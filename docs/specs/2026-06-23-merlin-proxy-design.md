@@ -63,7 +63,7 @@ Every gate decision is emitted to observability (metrics/traces/logs) and to the
 |---|---|---|
 | `registryv2` | Inbound V2 protocol handler (blob upload, manifest PUT, required GETs) | `auth`, `staging`, `policy`, `acr` |
 | `auth` | Entra ID bearer-token validation on inbound requests | Entra JWKS |
-| `staging` | Local OCI-layout store for buffered blobs/manifests; assembles complete image | filesystem |
+| `staging` | Buffered blob/manifest store on shared Azure Blob Storage; upload-session state in Valkey; assembles complete image to local scratch for scanning | Azure Blob, Valkey |
 | `policy` | Extensible gate engine; runs registered policies, aggregates verdicts | — |
 | `policies/trivy` | Trivy scan policy (fail on CRITICAL) | `trivy` binary (via injected runner) |
 | `policies/baseimage` | Base-image policy (UBI / Chainguard-Wolfi only) | `staging` filesystem access |
@@ -291,7 +291,64 @@ the push path. A ClickHouse outage degrades to buffered/queued writes plus an al
 — it does **not** fail the push. The gate decision is authoritative; the audit
 record is a durable record of it.
 
-## 10. Out of Scope (v1)
+## 10. Scalability & Concurrency
+
+Merlin runs as N stateless replicas behind a load balancer. All push state lives in
+shared backends, so any replica can serve any request of any push.
+
+### Horizontal scaling — shared staging
+
+- **Blob payloads → Azure Blob Storage.** Buffered layers and config blobs are
+  written to a shared Blob container keyed by server-issued upload UUID, not to
+  local disk. Any replica can read/write any in-flight upload.
+- **Upload-session state → Valkey** ([valkey.io](https://valkey.io/), the
+  open-source Redis fork; Redis-protocol compatible). Per-upload metadata — blob
+  list, byte offsets, completion flags — lives in Valkey so completion can be
+  verified from any replica.
+- **Replicas are stateless** and scale on CPU (Trivy is the hot path). A replica
+  dying mid-push does not lose the push; another replica resumes from shared state.
+- **Scan scratch is local + ephemeral.** When the manifest arrives, the handling
+  replica streams the assembled image from Blob to local scratch for Trivy, then
+  reclaims it (existing cleanup + TTL sweep).
+
+### Per-node concurrency
+
+Two distinct kinds of concurrency, handled differently:
+
+**Within a single push — fan out freely.** Docker uploads layers in parallel
+(multiple PATCH/PUT requests at once, possibly across replicas).
+- Each blob upload is keyed by its unique server-issued upload UUID → writes target
+  distinct Blob objects, so parallel uploads never collide.
+- Chunked PATCH for one blob is sequential per protocol (`Content-Range`); enforce
+  with an **atomic compare-and-set on the offset** in Valkey, rejecting out-of-order
+  chunks with `416`.
+- Manifest PUT is the **barrier**: assembly proceeds only after an atomic Valkey
+  check confirms every referenced blob digest is marked complete.
+
+**Across pushes on one node — fan in through a bounded pool.** Trivy is CPU/memory
+heavy and each scan needs the assembled image on local disk, so unbounded scan
+fan-out would exhaust the node.
+- **Bounded scan concurrency** — a semaphore/worker pool caps simultaneous Trivy
+  scans per node (sized to CPU cores). Excess pushes queue at the gate.
+- **Bounded scratch** — the semaphore also bounds peak local disk use; scratch is
+  reclaimed immediately after each scan.
+- **Per-push deadline** — each push carries a context deadline; a stuck scan or slow
+  ACR push frees its slot rather than holding it. The client waits on the open
+  manifest-PUT response meanwhile.
+- **Backpressure, not failure** — when the scan pool is saturated, pushes queue with
+  a bounded wait; only on queue/deadline exceedance return a retryable `503`.
+  Queue-depth and scan-pool-utilization metrics feed the autoscaler so the cluster
+  adds replicas before nodes saturate.
+
+### Cross-replica safety for the same push
+
+- The upload UUID is server-issued and unique; completion is gated on the atomic
+  Valkey all-blobs-present check, so two replicas cannot both "complete" the same
+  push — the first manifest PUT that passes wins.
+- Manifest PUT is **idempotent**: a duplicate/retried PUT with the same digest
+  returns `201` without re-running the gate (verdict keyed by image digest).
+
+## 11. Out of Scope (v1)
 
 - Image signing / provenance (cosign) — future policy
 - SBOM generation — future policy
