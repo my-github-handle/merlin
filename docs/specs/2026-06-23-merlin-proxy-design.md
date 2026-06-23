@@ -48,8 +48,14 @@ Single Go binary implementing the inbound side of the Docker Registry V2 HTTP AP
                          │                              │  fail                            │
                          │                              ▼                                 │
                          │                       reject + cleanup                         │
+                         │                                                              │
+                         │  observability (OTel: /metrics, logs, traces) ───────────────┼──► Prometheus / Azure Monitor
+                         │  audit (every decision + findings, async/batched) ───────────┼──► ClickHouse
                          └──────────────────────────────────────────────────────────────┘
 ```
+
+Every gate decision is emitted to observability (metrics/traces/logs) and to the
+`audit` store (ClickHouse) regardless of pass/fail.
 
 ### Components (each its own package, independently testable)
 
@@ -62,7 +68,9 @@ Single Go binary implementing the inbound side of the Docker Registry V2 HTTP AP
 | `policies/trivy` | Trivy scan policy (fail on CRITICAL) | `trivy` binary (via injected runner) |
 | `policies/baseimage` | Base-image policy (UBI / Chainguard-Wolfi only) | `staging` filesystem access |
 | `acr` | Outbound pusher to ACR using Managed Identity + go-containerregistry | Azure identity |
-| `config` | Loads policy/severity/base-image/ACR/Entra config at startup | filesystem |
+| `observability` | OTel metrics/traces setup, Prometheus `/metrics`, structured logging | OTel SDK |
+| `audit` | Append-only decision + finding history writer (ClickHouse), behind a swappable interface | ClickHouse |
+| `config` | Loads policy/severity/base-image/ACR/Entra/observability/audit config at startup | filesystem |
 
 ## 4. Push Data Flow & Lifecycle
 
@@ -181,6 +189,11 @@ pusher sit behind interfaces so they are mockable.
   HIGH/MEDIUM → pass; configurable threshold honored. Trivy runner mocked.
 - `policies/baseimage` — os-release fixtures: UBI passes, Wolfi/Chainguard passes,
   Debian/Ubuntu/Alpine fail, missing os-release fails.
+- `audit` — decision + findings mapped to the correct rows/columns; batched writer
+  flushes correctly; ClickHouse outage buffers and does not return an error to the
+  caller (push not failed). ClickHouse client mocked.
+- `observability` — metrics increment on the expected events; Trivy DB age metric
+  reflects the scan's DB version.
 
 **Integration tests:**
 - `registryv2` — drive real V2 endpoints with an HTTP client mimicking docker's push
@@ -189,11 +202,96 @@ pusher sit behind interfaces so they are mockable.
 - End-to-end gate (real Trivy binary, ACR mocked): good UBI image → forwarded; image
   with seeded CRITICAL CVE → rejected; Alpine-based image → rejected by base policy.
   ACR pusher replaced with a fake registry (go-containerregistry `httptest`).
+- `audit` integration — write decision + findings to a real ClickHouse (test
+  container), then exercise the reverse lookups (A: CVE → images; D: package/base;
+  B: digest history; C: identity) and assert expected rows return.
 
 **E2E (manual/CI smoke):** real `docker push` against a running Merlin pointed at a
 test ACR — happy path and a rejection path.
 
-## 8. Out of Scope (v1)
+## 9. Observability, Monitoring & Alerting
+
+### Instrumentation (OTel-first)
+
+- **Metrics** — OpenTelemetry metrics on a Prometheus `/metrics` endpoint;
+  exportable to Azure Monitor. Core metrics: pushes received; gate decisions
+  (pass/fail, by policy); scan duration histogram (→ p95); ACR push outcomes;
+  Trivy DB age; in-flight staging size.
+- **Logs** — Structured JSON to stdout with a stable schema; collected by the
+  platform pipeline (Azure Monitor / Log Analytics).
+- **Traces** — OTLP spans across the push lifecycle (auth → stage → scan → policy
+  → ACR push) so a slow or failed push is debuggable end-to-end.
+
+### Alert catalog
+
+| Category | Alert | Priority |
+|---|---|---|
+| Freshness | Trivy vulnerability DB stale (scanning against an old DB = silently missed CVEs) | **Page** |
+| Availability | Gate error rate high / unavailable (Trivy crash, ACR unreachable) | **Page** |
+| Availability | ACR push failures *after* a pass (passed but could not publish) | High |
+| Latency | Scan p95 too high (pushes timing out) | High |
+| Security | Rejection-rate spike (possible misconfig or attack) | Medium |
+| Security | Repeated rejections from one identity | Medium |
+
+### Audit history — ClickHouse (append-only)
+
+A dedicated `audit` emitter writes every gate decision to ClickHouse, behind an
+interface so the store is swappable. Records are written on **every** decision —
+pass *and* fail — so CVE lookups also cover successfully published images.
+
+**`gate_decisions`** — one row per push (powers reverse lookups **B**, **C**):
+
+```sql
+ts             DateTime64,
+push_id        UUID,
+image_repo     String,
+image_tag      String,
+image_digest   String,
+identity       String,
+passed         Bool,
+failed_policies Array(String),
+reasons        Array(String),
+base_image_id  String,
+trivy_db_version String,
+duration_ms    UInt32
+ENGINE = MergeTree
+ORDER BY (image_digest, ts)        -- fast digest history (B)
+```
+
+**`vulnerability_findings`** — one row per CVE per package per scan (powers **A**, **D**):
+
+```sql
+ts             DateTime64,
+push_id        UUID,
+image_digest   String,
+image_repo     String,
+cve_id         String,
+severity       Enum8('LOW','MEDIUM','HIGH','CRITICAL','UNKNOWN'),
+pkg_name       String,
+pkg_version    String,
+fixed_version  String,
+base_image_id  String,
+identity       String
+ENGINE = MergeTree
+ORDER BY (cve_id, severity, ts)    -- fast CVE → images reverse lookup (A)
+```
+
+**Reverse-lookup support (priority order):**
+
+- **A — CVE → images:** `WHERE cve_id = ?` on `vulnerability_findings`
+  (primary sort key → fast).
+- **D — package / base → images:** filter `pkg_name` / `pkg_version` or
+  `base_image_id`; secondary skip index or projection on `pkg_name`.
+- **B — digest → decision history:** `gate_decisions` ordered by `image_digest`.
+- **C — identity → activity:** filter `identity`; projection / skip index on
+  `identity` in both tables.
+
+**Write semantics:** audit writes are async and batched so ingestion never blocks
+the push path. A ClickHouse outage degrades to buffered/queued writes plus an alert
+— it does **not** fail the push. The gate decision is authoritative; the audit
+record is a durable record of it.
+
+## 10. Out of Scope (v1)
 
 - Image signing / provenance (cosign) — future policy
 - SBOM generation — future policy
