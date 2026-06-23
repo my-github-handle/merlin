@@ -98,6 +98,11 @@ Every gate decision is emitted to observability (metrics/traces/logs) and to the
    - **Fail** → Merlin returns an error status with a clear message listing failed
      policies and reasons. Staged content for this push is discarded.
 
+   In **both** cases the response surfaces the Trivy scan result (see
+   [§5.3 Scan result in the response](#scan-result-in-the-response)): a concise
+   summary in the message/error envelope plus a header
+   (`X-Merlin-Scan-Report-URL`) referencing the full Trivy JSON report.
+
 6. **Cleanup** — Staging content removed after success or failure; a TTL sweep
    reclaims orphaned/abandoned uploads.
 
@@ -156,6 +161,27 @@ Adding a future check = implement `Policy` and register it. The gate is unchange
   `base image not permitted: detected <id>, allowed: rhel(ubi), wolfi/chainguard`.
 - Accepted-base matchers are defined in config (extensible list of detection rules).
 
+### Scan result in the response
+
+Every push response — pass *and* fail — surfaces the Trivy scan result, within the
+limits of what `docker push` renders (the v2 error envelope `message` line; large
+bodies are ignored by the client). Delivery (Approach A):
+
+- **Concise summary inline.** On a reject, the v2 error envelope `message` carries a
+  short CVE summary, e.g.
+  `rejected: 3 CRITICAL CVEs — CVE-2024-X (openssl), CVE-2024-Y (glibc), CVE-2024-Z (zlib)`.
+  On a pass, an equivalent summary (e.g. `scan clean: 0 CRITICAL, 4 HIGH`) is
+  attached to the `201` response.
+- **Full report by reference.** Both responses include the header
+  `X-Merlin-Scan-Report-URL` pointing to the complete Trivy JSON report, retrievable
+  via a Merlin report endpoint (`GET /reports/<push_id>`) backed by the audit store —
+  the findings are already persisted to ClickHouse (§9), so no extra storage is
+  needed. The full Trivy JSON also rides in the error envelope `detail` field on
+  reject for clients that inspect it.
+- **Why by reference:** full Trivy JSON for a large image is too big to render in
+  `docker push` output; the summary keeps the CLI useful while the header/endpoint
+  gives the complete result one `curl` away (and powers any future UI).
+
 ### Configuration (loaded at startup, e.g. YAML)
 
 - Trivy severity threshold (default `CRITICAL`)
@@ -194,6 +220,9 @@ pusher sit behind interfaces so they are mockable.
   caller (push not failed). ClickHouse client mocked.
 - `observability` — metrics increment on the expected events; Trivy DB age metric
   reflects the scan's DB version.
+- scan-result response — reject carries the CVE summary in the error message and the
+  `X-Merlin-Scan-Report-URL` header; pass carries the clean summary + header;
+  `GET /reports/<push_id>` returns the full Trivy JSON from the audit store.
 
 **Integration tests:**
 - `registryv2` — drive real V2 endpoints with an HTTP client mimicking docker's push
