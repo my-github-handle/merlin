@@ -10,9 +10,41 @@ Each package is independently testable with a clear interface. Dependencies flow
 inward toward `policy` and `staging`; external systems (Trivy, ACR, Blob, Valkey,
 ClickHouse, Entra) sit behind interfaces so they are mockable.
 
-### `registryv2`
+### `router`
 
-Implements the inbound Docker Registry V2 HTTP surface plus a report endpoint.
+The extension seam (ports & adapters). Maps an event source to the adapter pair and
+gate profile that handle it, then drives the trigger-agnostic gate core. Adding a CI
+integration is "register an adapter pair," not a core change.
+
+```go
+type Ingress interface {
+    // Acquire turns an inbound event into a staged artifact + request context.
+    Acquire(ctx context.Context, event Event) (GateRequest, error)
+}
+
+type Outcome interface {
+    // Apply acts on the verdict in the way appropriate to the source.
+    Apply(ctx context.Context, req GateRequest, result policy.Result) error
+}
+
+type Route struct {
+    Ingress Ingress
+    Outcome Outcome
+    Profile GateProfile // which policies/thresholds apply for this source
+}
+
+// Handle: acquire → gate core (staging → policy.Engine.Run → audit) → outcome.Apply
+func (r *Router) Handle(ctx context.Context, source string, event Event) error
+```
+
+v1 registers exactly one route: `docker → {ingress/docker, outcome/docker}`. The
+`github` and `api` adapters are designed-for and deferred (see [specs.md §10–11](./specs.md)).
+
+### `ingress/docker` (`registryv2`)
+
+The v1 ingress adapter. Implements the inbound Docker Registry V2 HTTP surface plus a
+report endpoint. Its `Acquire` is the push itself (Docker streams blobs into
+staging); its paired `outcome/docker` blocks the push or forwards to ACR.
 
 | Endpoint | Purpose |
 |---|---|
@@ -182,6 +214,7 @@ auth ──► staging (Blob + Valkey) ──[manifest PUT]──► assemble to
 | Audit store | ClickHouse, append-only | Columnar speed for CVE → image reverse lookups |
 | Audit write failure | Non-blocking (buffer + alert) | Publish availability not coupled to ClickHouse |
 | Scan result delivery | Summary inline + report URL header | Works within what `docker push` renders |
+| CI extensibility | Router + ingress/outcome adapters | New sources (GitHub, API) without touching the gate core |
 
 ## 4. Testing
 

@@ -61,7 +61,8 @@ Every gate decision is emitted to observability (metrics/traces/logs) and to the
 
 | Package | Responsibility | Depends on |
 |---|---|---|
-| `registryv2` | Inbound V2 protocol handler (blob upload, manifest PUT, required GETs) | `auth`, `staging`, `policy`, `acr` |
+| `router` | Maps event source → {ingress, outcome, gate profile}; drives the trigger-agnostic gate core | `policy`, `staging`, `audit` |
+| `ingress/docker` (`registryv2`) | Inbound V2 protocol handler (blob upload, manifest PUT, required GETs); the v1 ingress adapter | `auth`, `staging`, `policy`, `acr` |
 | `auth` | Entra ID bearer-token validation on inbound requests | Entra JWKS |
 | `staging` | Buffered blob/manifest store on shared Azure Blob Storage; upload-session state in Valkey; assembles complete image to local scratch for scanning | Azure Blob, Valkey |
 | `policy` | Extensible gate engine; runs registered policies, aggregates verdicts | — |
@@ -175,7 +176,7 @@ bodies are ignored by the client). Delivery (Approach A):
 - **Full report by reference.** Both responses include the header
   `X-Merlin-Scan-Report-URL` pointing to the complete Trivy JSON report, retrievable
   via a Merlin report endpoint (`GET /reports/<push_id>`) backed by the audit store —
-  the findings are already persisted to ClickHouse (§9), so no extra storage is
+  the findings are already persisted to ClickHouse (§8), so no extra storage is
   needed. The full Trivy JSON also rides in the error envelope `detail` field on
   reject for clients that inspect it.
 - **Why by reference:** full Trivy JSON for a large image is too big to render in
@@ -238,7 +239,7 @@ pusher sit behind interfaces so they are mockable.
 **E2E (manual/CI smoke):** real `docker push` against a running Merlin pointed at a
 test ACR — happy path and a rejection path.
 
-## 9. Observability, Monitoring & Alerting
+## 8. Observability, Monitoring & Alerting
 
 ### Instrumentation (OTel-first)
 
@@ -320,7 +321,7 @@ the push path. A ClickHouse outage degrades to buffered/queued writes plus an al
 — it does **not** fail the push. The gate decision is authoritative; the audit
 record is a durable record of it.
 
-## 10. Scalability & Concurrency
+## 9. Scalability & Concurrency
 
 Merlin runs as N stateless replicas behind a load balancer. All push state lives in
 shared backends, so any replica can serve any request of any push.
@@ -377,8 +378,72 @@ fan-out would exhaust the node.
 - Manifest PUT is **idempotent**: a duplicate/retried PUT with the same digest
   returns `201` without re-running the gate (verdict keyed by image digest).
 
+## 10. Ingress Router & Extensible Gate Core
+
+Merlin's value is the **gate** — *acquire artifact → run policies → verdict → audit*
+— not the Docker protocol. To extend CI functionality over time (GitHub webhooks,
+other CI systems) without re-architecting, the gate is decoupled from Docker via a
+ports-and-adapters design. **v1 builds this seam and ships the Docker pair only;**
+other ingresses are designed-for but deferred (see §11).
+
+### Three layers
+
+**1. Ingress adapters (the port — how a gate request arrives).**
+Each adapter turns an external event into a normalized
+`GateRequest{ artifactRef, source, identity, ctx }` and is responsible for
+**acquiring** the artifact into `staging`:
+- `ingress/docker` — the v2 proxy (synchronous, in-band); Docker streams the image.
+- `ingress/github` *(deferred)* — webhook receiver: validates HMAC signature, parses
+  the event, resolves the image ref, and **pulls** it into staging.
+- `ingress/api` *(deferred)* — generic `POST /gate {image}` for CI systems and
+  future sources; pulls the referenced image into staging.
+
+After acquisition, every path is identical.
+
+**2. Gate core (trigger-agnostic, unchanged).**
+`staging → policy.Engine.Run → Result → audit`. It has no knowledge of what
+triggered it, so every ingress reuses it as-is.
+
+**3. Outcome adapters (the port — what the verdict does).**
+The verdict is handed to an outcome adapter selected by the ingress:
+- `outcome/docker` — block the push / forward to ACR (synchronous; current behavior).
+- `outcome/github` *(deferred)* — post a **commit status / check-run**; default model
+  is **report-only, promotable to a required status check** for enforcement;
+  react/remediate (delete/quarantine) is a later outcome.
+- `outcome/api` *(deferred)* — return verdict JSON to the caller.
+
+```go
+type Ingress interface {
+    // Acquire turns an inbound event into a staged artifact + request context.
+    Acquire(ctx context.Context, event Event) (GateRequest, error)
+}
+
+type Outcome interface {
+    // Apply acts on the verdict in the way appropriate to the source.
+    Apply(ctx context.Context, req GateRequest, result policy.Result) error
+}
+```
+
+### The Router
+
+`router` maps `source → {Ingress, Outcome, GateProfile}`. A `GateProfile` selects
+which policies/thresholds apply, so a source can differ from Docker (e.g. a GitHub
+PR check could warn-only while Docker push hard-blocks). **Adding a CI integration =
+register an ingress + outcome pair in config; the gate core never changes.**
+
+### Sync vs async is an adapter property
+
+- **Docker** = synchronous — reject in-band, nothing unscanned lands.
+- **GitHub / API** = asynchronous — the artifact already exists, so the outcome
+  *reports* (commit status / check-run) rather than blocks; enforcement is delegated
+  to GitHub branch-protection (required check). This difference lives entirely in the
+  adapters; the core is unaffected.
+
 ## 11. Out of Scope (v1)
 
+- `ingress/github` and `ingress/api` adapters — router seam built now, adapters
+  deferred (§10)
+- `outcome/github` (check-run) and `outcome/api` — deferred with their ingresses
 - Image signing / provenance (cosign) — future policy
 - SBOM generation — future policy
 - Non-root / config policies — future policy

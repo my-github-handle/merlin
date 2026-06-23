@@ -74,7 +74,8 @@ interface (see [design.md](./design.md) for internals).
 
 | Package | Responsibility |
 |---|---|
-| `registryv2` | Inbound Docker Registry V2 HTTP API; report endpoint |
+| `router` | Maps event source → {ingress, outcome, gate profile}; drives the trigger-agnostic gate core (extension seam for new CI sources) |
+| `ingress/docker` (`registryv2`) | Inbound Docker Registry V2 HTTP API; report endpoint — the v1 ingress adapter |
 | `auth` | Entra ID bearer-token validation |
 | `staging` | Buffered blob/manifest store (Blob + Valkey); image assembly |
 | `policy` | Extensible gate engine; runs registered policies, aggregates verdicts |
@@ -84,6 +85,27 @@ interface (see [design.md](./design.md) for internals).
 | `observability` | OTel metrics/traces, Prometheus `/metrics`, structured logs |
 | `audit` | Append-only decision + finding writer (ClickHouse) |
 | `config` | Startup configuration loading |
+
+### Extension seam (ports & adapters)
+
+Merlin is built so its gate (acquire → scan → verdict → audit) is independent of
+what triggers it. New CI integrations are added as **adapter pairs** registered in
+the `router`, never by changing the gate core:
+
+```
+ ingress adapters          gate core (unchanged)        outcome adapters
+ ┌──────────────┐                                       ┌──────────────────┐
+ │ docker (v1)  │─┐                                    ┌─│ docker: block /  │
+ │ github  (●)  │─┼─► staging ─► policy.Engine ─► audit─┼─│   forward to ACR │
+ │ api     (●)  │─┘            (verdict)                └─│ github: check-run(●)│
+ └──────────────┘                                       │ api: verdict JSON (●)│
+                                                         └──────────────────┘
+   (●) = designed-for, deferred past v1
+```
+
+Docker is synchronous (block in-band); future webhook/API ingresses are asynchronous
+(report a verdict, e.g. a GitHub check-run). That difference lives in the adapters —
+the core is unaffected. See [specs.md §10](./specs.md).
 
 ## 4. Request Lifecycle (high level)
 
@@ -111,7 +133,7 @@ See [specs.md §4](./specs.md) for the detailed flow and error-handling principl
   backpressure. Queue-depth and pool-utilization metrics drive autoscaling so the
   cluster adds replicas before nodes saturate.
 
-See [specs.md §10](./specs.md) for the full scalability & concurrency model.
+See [specs.md §9](./specs.md) for the full scalability & concurrency model.
 
 ## 6. Security Posture
 
@@ -133,4 +155,4 @@ See [specs.md §10](./specs.md) for the full scalability & concurrency model.
 - **Audit** (ClickHouse): durable decision + finding history; also serves scan
   reports via `GET /reports/<push_id>`.
 
-See [specs.md §9](./specs.md) for the alert catalog and audit schema.
+See [specs.md §8](./specs.md) for the alert catalog and audit schema.
