@@ -1,0 +1,11 @@
+# Go
+*.exe
+*.test
+*.out
+/bin/
+/dist/
+vendor/
+
+# Local staging / scratch
+/tmp/
+*.local.yaml
