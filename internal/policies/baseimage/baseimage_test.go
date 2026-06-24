@@ -68,3 +68,39 @@ func TestBaseImageRejectsMissingOSRelease(t *testing.T) {
 		t.Error("missing os-release should be rejected")
 	}
 }
+
+func TestBaseImageRejectsEmptyID(t *testing.T) {
+	p := New([]string{"rhel", "wolfi", "chainguard"})
+	img := stageWithOSRelease(t, "ID=\n") // file present, but ID empty
+	v, err := p.Evaluate(context.Background(), img)
+	if err != nil {
+		t.Fatalf("empty ID must be a fail, not an error: %v", err)
+	}
+	if v.Passed {
+		t.Error("empty ID should be rejected")
+	}
+}
+
+func TestBaseImageAllowsChainguard(t *testing.T) {
+	p := New([]string{"rhel", "wolfi", "chainguard"})
+	img := stageWithOSRelease(t, "ID=chainguard\n")
+	v, err := p.Evaluate(context.Background(), img)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !v.Passed {
+		t.Errorf("chainguard should pass, reasons=%v", v.Reasons)
+	}
+}
+
+func TestBaseImageMatchesCaseInsensitively(t *testing.T) {
+	p := New([]string{"rhel", "wolfi", "chainguard"})
+	img := stageWithOSRelease(t, `ID="RHEL"`+"\n") // uppercase in the image
+	v, err := p.Evaluate(context.Background(), img)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !v.Passed {
+		t.Errorf("RHEL (uppercase) should pass via case-insensitive match, reasons=%v", v.Reasons)
+	}
+}
