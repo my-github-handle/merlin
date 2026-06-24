@@ -49,8 +49,12 @@ func TestGatePassHandedToOutcome(t *testing.T) {
 func TestGateInfraErrorHandedToOutcome(t *testing.T) {
 	r := New(policy.NewEngine(errPolicy{}))
 	o := &recordingOutcome{}
+	// Gate must NOT surface the engine's infra error to its caller; it hands the
+	// error to the outcome adapter, which decides the response. Gate returns
+	// whatever the outcome returns (nil here), so the error must arrive via
+	// o.gateErr, not as Gate's return value.
 	if err := r.Gate(context.Background(), GateRequest{Source: "docker"}, o); err != nil {
-		t.Fatal(err)
+		t.Fatalf("Gate should return the outcome's result (nil here), not the gate error: %v", err)
 	}
 	if o.gateErr == nil {
 		t.Error("expected gateErr to be passed to outcome")
