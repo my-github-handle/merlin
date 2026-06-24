@@ -17,7 +17,7 @@ func TestExecRunnerParsesOutput(t *testing.T) {
 			if !strings.Contains(joined, "--format json") {
 				t.Errorf("args missing --format json: %v", args)
 			}
-			return []byte(`{"Metadata":{"DBVersion":"d1"},"Results":[]}`), nil
+			return []byte(`{"SchemaVersion":2,"Metadata":{"DBVersion":"d1"},"Results":[]}`), nil
 		},
 	}
 	rep, err := er.Scan(context.Background(), "/oci/path")

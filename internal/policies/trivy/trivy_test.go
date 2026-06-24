@@ -22,7 +22,7 @@ func TestEvaluateFailsOnCritical(t *testing.T) {
 		{CVE: "CVE-1", Severity: "CRITICAL", Pkg: "openssl", Version: "1.1.1"},
 	}}}
 	p := New(r, "CRITICAL")
-	v, err := p.Evaluate(context.Background(), policy.StagedImage{})
+	v, err := p.Evaluate(context.Background(), policy.StagedImage{OCIPath: "/oci"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -39,7 +39,7 @@ func TestEvaluatePassesWhenBelowThreshold(t *testing.T) {
 		{CVE: "CVE-2", Severity: "HIGH", Pkg: "zlib", Version: "1.2.0"},
 	}}}
 	p := New(r, "CRITICAL")
-	v, err := p.Evaluate(context.Background(), policy.StagedImage{})
+	v, err := p.Evaluate(context.Background(), policy.StagedImage{OCIPath: "/oci"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -51,7 +51,7 @@ func TestEvaluatePassesWhenBelowThreshold(t *testing.T) {
 func TestEvaluateRunnerErrorIsInfraFailure(t *testing.T) {
 	boom := errors.New("trivy exited 2")
 	p := New(fakeRunner{err: boom}, "CRITICAL")
-	_, err := p.Evaluate(context.Background(), policy.StagedImage{})
+	_, err := p.Evaluate(context.Background(), policy.StagedImage{OCIPath: "/oci"})
 	if !errors.Is(err, boom) {
 		t.Errorf("expected wrapped runner error, got %v", err)
 	}
@@ -60,5 +60,26 @@ func TestEvaluateRunnerErrorIsInfraFailure(t *testing.T) {
 func TestNameIsTrivy(t *testing.T) {
 	if New(fakeRunner{}, "CRITICAL").Name() != "trivy" {
 		t.Error("Name() should be trivy")
+	}
+}
+
+func TestEvaluateFailsClosedOnUnrecognizedSeverity(t *testing.T) {
+	r := fakeRunner{report: Report{Findings: []policy.Finding{
+		{CVE: "CVE-X", Severity: "WEIRD", Pkg: "p", Version: "1"},
+	}}}
+	v, err := New(r, "CRITICAL").Evaluate(context.Background(), policy.StagedImage{OCIPath: "/oci"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if v.Passed {
+		t.Error("unrecognized severity must fail closed (not pass)")
+	}
+}
+
+func TestEvaluateEmptyOCIPathIsError(t *testing.T) {
+	r := fakeRunner{report: Report{}}
+	_, err := New(r, "CRITICAL").Evaluate(context.Background(), policy.StagedImage{OCIPath: ""})
+	if err == nil {
+		t.Error("empty OCIPath must return an error, not pass")
 	}
 }

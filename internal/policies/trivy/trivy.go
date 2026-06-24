@@ -35,6 +35,9 @@ func (p *Policy) Name() string { return "trivy" }
 func (p *Policy) LastReport() Report { return p.lastReport }
 
 func (p *Policy) Evaluate(ctx context.Context, img policy.StagedImage) (policy.Verdict, error) {
+	if img.OCIPath == "" {
+		return policy.Verdict{}, fmt.Errorf("trivy scan: empty OCI path for image")
+	}
 	rep, err := p.runner.Scan(ctx, img.OCIPath)
 	if err != nil {
 		return policy.Verdict{}, fmt.Errorf("trivy scan: %w", err)
@@ -43,7 +46,13 @@ func (p *Policy) Evaluate(ctx context.Context, img policy.StagedImage) (policy.V
 	min := severityRank[p.threshold]
 	var reasons []string
 	for _, f := range rep.Findings {
-		if severityRank[f.Severity] >= min {
+		rank, known := severityRank[f.Severity]
+		if !known {
+			// Unrecognized severity: fail closed — never silently drop a finding.
+			reasons = append(reasons, fmt.Sprintf("%s (unrecognized severity %q) in %s %s", f.CVE, f.Severity, f.Pkg, f.Version))
+			continue
+		}
+		if rank >= min {
 			reasons = append(reasons, fmt.Sprintf("%s (%s) in %s %s", f.CVE, f.Severity, f.Pkg, f.Version))
 		}
 	}

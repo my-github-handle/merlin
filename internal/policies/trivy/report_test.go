@@ -3,6 +3,7 @@ package trivy
 import "testing"
 
 const sampleJSON = `{
+  "SchemaVersion": 2,
   "Metadata": {"DBVersion": "2024-06-23"},
   "Results": [
     {
@@ -35,7 +36,7 @@ func TestParseReportExtractsFindingsAndDBVersion(t *testing.T) {
 }
 
 func TestParseReportHandlesNoVulnerabilities(t *testing.T) {
-	r, err := ParseReport([]byte(`{"Metadata":{"DBVersion":"x"},"Results":[]}`))
+	r, err := ParseReport([]byte(`{"SchemaVersion":2,"Metadata":{"DBVersion":"x"},"Results":[]}`))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -47,5 +48,11 @@ func TestParseReportHandlesNoVulnerabilities(t *testing.T) {
 func TestParseReportRejectsInvalidJSON(t *testing.T) {
 	if _, err := ParseReport([]byte("not json")); err == nil {
 		t.Fatal("expected error for invalid JSON")
+	}
+}
+
+func TestParseReportRejectsMissingSchemaVersion(t *testing.T) {
+	if _, err := ParseReport([]byte(`{}`)); err == nil {
+		t.Fatal("expected error for missing SchemaVersion")
 	}
 }
