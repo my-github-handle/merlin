@@ -141,3 +141,34 @@ func TestAssembleSkipsSymlinkEntries(t *testing.T) {
 		t.Error("symlink entry should not be reproduced as a symlink")
 	}
 }
+
+func TestCleanupRemovesScratchAndBlobs(t *testing.T) {
+	s := newTestStore()
+	ctx := context.Background()
+	layer := makeLayerTar(t, "rhel")
+	dg := digestOf(layer)
+
+	up, _ := s.BeginUpload(ctx, "repo")
+	if err := s.CompleteBlob(ctx, up, dg, bytes.NewReader(layer)); err != nil {
+		t.Fatal(err)
+	}
+	mr, err := s.PutManifest(ctx, "repo", "v1", []byte(`{}`), []string{dg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scratch := t.TempDir()
+	if _, err := s.Assemble(ctx, mr, scratch); err != nil {
+		t.Fatal(err)
+	}
+	// scratch/oci should now exist
+	if _, err := os.Stat(filepath.Join(scratch, "oci")); err != nil {
+		t.Fatalf("expected oci layout before cleanup: %v", err)
+	}
+	// Cleanup must remove the scratch dir.
+	if err := s.Cleanup(ctx, mr, scratch); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	if _, err := os.Stat(scratch); !os.IsNotExist(err) {
+		t.Errorf("scratch dir should be removed after cleanup, stat err=%v", err)
+	}
+}
