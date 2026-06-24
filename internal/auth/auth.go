@@ -20,15 +20,23 @@ type Authenticator interface {
 
 // JWTAuthenticator validates Entra ID JWTs.
 type JWTAuthenticator struct {
-	issuer   string
-	audience string
-	keyfunc  jwt.Keyfunc
+	issuer     string
+	audience   string
+	keyfunc    jwt.Keyfunc
+	algorithms []string
 }
 
 // NewJWTAuthenticator builds an authenticator. In production keyfunc is backed by
 // the Entra JWKS endpoint; tests inject a static key.
+// Defaults to RS256 (Entra ID signing algorithm).
 func NewJWTAuthenticator(issuer, audience string, keyfunc jwt.Keyfunc) *JWTAuthenticator {
-	return &JWTAuthenticator{issuer: issuer, audience: audience, keyfunc: keyfunc}
+	return NewJWTAuthenticatorWithAlgorithms(issuer, audience, keyfunc, []string{"RS256"})
+}
+
+// NewJWTAuthenticatorWithAlgorithms builds an authenticator with custom allowed algorithms.
+// Use this for testing or non-standard JWT sources.
+func NewJWTAuthenticatorWithAlgorithms(issuer, audience string, keyfunc jwt.Keyfunc, algorithms []string) *JWTAuthenticator {
+	return &JWTAuthenticator{issuer: issuer, audience: audience, keyfunc: keyfunc, algorithms: algorithms}
 }
 
 func (a *JWTAuthenticator) Validate(_ context.Context, bearer string) (Identity, error) {
@@ -40,6 +48,7 @@ func (a *JWTAuthenticator) Validate(_ context.Context, bearer string) (Identity,
 		jwt.WithIssuer(a.issuer),
 		jwt.WithAudience(a.audience),
 		jwt.WithExpirationRequired(),
+		jwt.WithValidMethods(a.algorithms),
 	)
 	if err != nil {
 		return Identity{}, fmt.Errorf("auth: invalid token: %w", err)

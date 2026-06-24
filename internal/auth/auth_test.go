@@ -23,7 +23,7 @@ func signed(t *testing.T, claims jwt.MapClaims) string {
 func testKeyfunc(*jwt.Token) (interface{}, error) { return testKey, nil }
 
 func newAuth() *JWTAuthenticator {
-	return NewJWTAuthenticator("https://issuer", "api://merlin", testKeyfunc)
+	return NewJWTAuthenticatorWithAlgorithms("https://issuer", "api://merlin", testKeyfunc, []string{"HS256"})
 }
 
 func TestValidateAcceptsGoodToken(t *testing.T) {
@@ -65,5 +65,28 @@ func TestValidateRejectsExpired(t *testing.T) {
 func TestValidateRejectsEmpty(t *testing.T) {
 	if _, err := newAuth().Validate(context.Background(), ""); err == nil {
 		t.Error("expected empty-token rejection")
+	}
+}
+
+func TestValidateRejectsAlgorithmConfusion(t *testing.T) {
+	// Token signed with HS256, but a default (RS256-only) authenticator must reject it,
+	// regardless of the keyfunc, because the algorithm is not allowed.
+	tok := signed(t, jwt.MapClaims{
+		"iss": "https://issuer", "aud": "api://merlin",
+		"sub": "u", "exp": time.Now().Add(time.Hour).Unix(),
+	})
+	a := NewJWTAuthenticator("https://issuer", "api://merlin", testKeyfunc)
+	if _, err := a.Validate(context.Background(), tok); err == nil {
+		t.Error("HS256 token must be rejected by an RS256-only authenticator (algorithm confusion)")
+	}
+}
+
+func TestValidateRejectsWrongIssuer(t *testing.T) {
+	tok := signed(t, jwt.MapClaims{
+		"iss": "https://evil", "aud": "api://merlin",
+		"sub": "u", "exp": time.Now().Add(time.Hour).Unix(),
+	})
+	if _, err := newAuth().Validate(context.Background(), tok); err == nil {
+		t.Error("expected wrong-issuer rejection")
 	}
 }
