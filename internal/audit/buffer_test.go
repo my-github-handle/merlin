@@ -70,3 +70,22 @@ func TestRecordNeverBlocksOnWriterError(t *testing.T) {
 		t.Fatal("expected onDrop callback for failed write")
 	}
 }
+
+func TestRecordFlushConcurrentNoPanic(t *testing.T) {
+	w := &spyWriter{}
+	a := NewAuditor(w, 1000, func(error) {})
+	defer a.Close()
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				a.Record(context.Background(), Decision{PushID: "p"}, nil)
+				a.Flush(context.Background())
+			}
+		}()
+	}
+	wg.Wait()
+	// reaching here without panic is the assertion
+}
