@@ -129,3 +129,24 @@ auth:
 		t.Errorf("expected allowed_ids error, got: %v", err)
 	}
 }
+
+func TestLoadRejectsInvalidThreshold(t *testing.T) {
+	p := writeTemp(t, `
+trivy:
+  severity_threshold: SUPER_CRITICAL
+acr:
+  registry: myreg.azurecr.io
+auth:
+  issuer: https://issuer
+  audience: api://merlin
+base_image:
+  allowed_ids: [rhel]
+`)
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("expected error for invalid severity_threshold")
+	}
+	if !strings.Contains(err.Error(), "severity_threshold") {
+		t.Errorf("expected severity_threshold error, got: %v", err)
+	}
+}

@@ -85,6 +85,10 @@ func (c *Config) applyDefaults() {
 	}
 }
 
+var validSeverities = map[string]bool{
+	"UNKNOWN": true, "LOW": true, "MEDIUM": true, "HIGH": true, "CRITICAL": true,
+}
+
 func (c *Config) validate() error {
 	if c.ACR.Registry == "" {
 		return fmt.Errorf("config: acr.registry is required")
@@ -97,6 +101,9 @@ func (c *Config) validate() error {
 	}
 	if len(c.BaseImage.AllowedIDs) == 0 {
 		return fmt.Errorf("config: base_image.allowed_ids must not be empty")
+	}
+	if !validSeverities[c.Trivy.SeverityThreshold] {
+		return fmt.Errorf("config: trivy.severity_threshold %q is not a valid severity (UNKNOWN, LOW, MEDIUM, HIGH, CRITICAL)", c.Trivy.SeverityThreshold)
 	}
 	return nil
 }
