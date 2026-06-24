@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/merlin-gate/merlin/internal/policy"
 )
@@ -77,12 +78,22 @@ func extractTar(raw []byte, dest string) error {
 			return err
 		}
 		target := filepath.Join(dest, filepath.Clean("/"+hdr.Name))
+		// Explicit containment guard: ensure target stays within dest.
+		cleanDest := filepath.Clean(dest)
+		if target != cleanDest && !strings.HasPrefix(target, cleanDest+string(os.PathSeparator)) {
+			return fmt.Errorf("tar entry %q escapes extraction root", hdr.Name)
+		}
+
+		// Handle entry types intentionally: only reproduce directories and regular files.
+		// Symlinks, hardlinks, and device nodes are skipped because the assembled rootfs
+		// is only used for read-only policy scanning (os-release + Trivy), and reproducing
+		// them would add escape surface.
 		switch hdr.Typeflag {
 		case tar.TypeDir:
 			if err := os.MkdirAll(target, 0o755); err != nil {
 				return err
 			}
-		default:
+		case tar.TypeReg, tar.TypeRegA:
 			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 				return err
 			}
@@ -94,7 +105,13 @@ func extractTar(raw []byte, dest string) error {
 				f.Close()
 				return err
 			}
-			f.Close()
+			if err := f.Close(); err != nil {
+				return err
+			}
+		case tar.TypeSymlink, tar.TypeLink:
+			// Skip symlinks and hardlinks intentionally.
+		default:
+			// Skip other special types (devices, FIFOs, etc.).
 		}
 	}
 }
