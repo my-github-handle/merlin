@@ -79,16 +79,30 @@ func (s *Store) readIfExists(ctx context.Context, key string) ([]byte, error) {
 }
 
 func (s *Store) CompleteBlob(ctx context.Context, uploadID, digest string, r io.Reader) error {
-	buf, err := io.ReadAll(r)
+	// 1. Read optional final chunk from the completion PUT body
+	finalChunk, err := io.ReadAll(r)
 	if err != nil {
-		return fmt.Errorf("read blob: %w", err)
+		return fmt.Errorf("read final chunk: %w", err)
 	}
-	if err := VerifyDigest(bytes.NewReader(buf), digest); err != nil {
+
+	// 2. Append final chunk to accumulated staged data
+	existing, err := s.readIfExists(ctx, uploadKey(uploadID))
+	if err != nil {
 		return err
 	}
-	if err := s.blobs.Put(ctx, blobKey(digest), bytes.NewReader(buf)); err != nil {
+	accumulated := append(existing, finalChunk...)
+
+	// 3. Verify the FULL accumulated data against claimed digest
+	if err := VerifyDigest(bytes.NewReader(accumulated), digest); err != nil {
+		return err
+	}
+
+	// 4. Store the verified accumulated data under the digest key
+	if err := s.blobs.Put(ctx, blobKey(digest), bytes.NewReader(accumulated)); err != nil {
 		return fmt.Errorf("store blob: %w", err)
 	}
+
+	// 5. Mark complete and clean up the temporary upload blob
 	if err := s.sessions.MarkComplete(ctx, uploadID, digest); err != nil {
 		return fmt.Errorf("mark complete: %w", err)
 	}

@@ -35,7 +35,8 @@ func TestCompleteBlobThenManifest(t *testing.T) {
 	if _, err := s.WriteChunk(ctx, up, 0, bytes.NewReader(layer)); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CompleteBlob(ctx, up, dg, bytes.NewReader(layer)); err != nil {
+	// Complete with empty final body; digest verifies the accumulated chunks
+	if err := s.CompleteBlob(ctx, up, dg, bytes.NewReader(nil)); err != nil {
 		t.Fatalf("complete blob: %v", err)
 	}
 	mr, err := s.PutManifest(ctx, "repo", "v1", []byte(`{"manifest":true}`), []string{dg})
@@ -60,7 +61,10 @@ func TestCompleteBlobRejectsBadDigest(t *testing.T) {
 	s := newTestStore()
 	ctx := context.Background()
 	up, _ := s.BeginUpload(ctx, "repo")
-	err := s.CompleteBlob(ctx, up, "sha256:deadbeef", bytes.NewReader([]byte("x")))
+	// Stage some data via WriteChunk
+	_, _ = s.WriteChunk(ctx, up, 0, bytes.NewReader([]byte("actual-data")))
+	// Try to complete with a digest that doesn't match
+	err := s.CompleteBlob(ctx, up, "sha256:deadbeef", bytes.NewReader(nil))
 	if err == nil {
 		t.Error("expected digest mismatch error")
 	}
@@ -77,5 +81,44 @@ func TestWriteChunkOutOfOrder(t *testing.T) {
 	_, err := s.WriteChunk(ctx, up, 0, bytes.NewReader([]byte("def")))
 	if !errors.Is(err, ErrOutOfOrder) {
 		t.Errorf("expected ErrOutOfOrder, got %v", err)
+	}
+}
+
+func TestCompleteBlobVerifiesAccumulatedChunks(t *testing.T) {
+	s := newTestStore()
+	ctx := context.Background()
+	full := []byte("chunk-A-chunk-B")
+	dg := digestOf(full)
+
+	up, _ := s.BeginUpload(ctx, "repo")
+	// Two chunks via WriteChunk, nothing in the final CompleteBlob reader.
+	off, err := s.WriteChunk(ctx, up, 0, bytes.NewReader([]byte("chunk-A-")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.WriteChunk(ctx, up, off, bytes.NewReader([]byte("chunk-B"))); err != nil {
+		t.Fatal(err)
+	}
+	// Complete with empty final body; digest must verify the ACCUMULATED chunks.
+	if err := s.CompleteBlob(ctx, up, dg, bytes.NewReader(nil)); err != nil {
+		t.Fatalf("accumulated chunks should verify: %v", err)
+	}
+	mr, err := s.PutManifest(ctx, "repo", "v1", []byte(`{}`), []string{dg})
+	if err != nil {
+		t.Fatalf("put manifest: %v", err)
+	}
+	if len(mr.LayerDigests) != 1 {
+		t.Errorf("manifest layers = %v", mr.LayerDigests)
+	}
+}
+
+func TestCompleteBlobRejectsWhenAccumulatedDigestWrong(t *testing.T) {
+	s := newTestStore()
+	ctx := context.Background()
+	up, _ := s.BeginUpload(ctx, "repo")
+	_, _ = s.WriteChunk(ctx, up, 0, bytes.NewReader([]byte("actual-bytes")))
+	// Claim a digest of different content -> must error.
+	if err := s.CompleteBlob(ctx, up, digestOf([]byte("other")), bytes.NewReader(nil)); err == nil {
+		t.Error("expected digest mismatch on accumulated data")
 	}
 }
