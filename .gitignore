@@ -4,8 +4,10 @@
 *.out
 /bin/
 /dist/
+/merlin
 vendor/
 
 # Local staging / scratch
 /tmp/
 *.local.yaml
+.superpowers/
