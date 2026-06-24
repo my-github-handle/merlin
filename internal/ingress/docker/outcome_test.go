@@ -2,6 +2,7 @@ package docker
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/merlin-gate/merlin/internal/acr"
@@ -46,5 +47,21 @@ func TestOutcomeInfraErrorIs500(t *testing.T) {
 	_ = o.Apply(context.Background(), req, policy.Result{}, context.DeadlineExceeded)
 	if o.Last().StatusCode != 500 || !o.Last().InfraError {
 		t.Errorf("expected 500 infra, got %+v", o.Last())
+	}
+	if len(fp.Pushed) != 0 {
+		t.Error("must not push on infra error")
+	}
+}
+
+func TestOutcomePushFailureIs502(t *testing.T) {
+	fp := &acr.FakePusher{Err: errors.New("acr unreachable")}
+	o := &Outcome{Pusher: fp, ReportBaseURL: "https://merlin/reports"}
+	req := router.GateRequest{Target: "myreg.azurecr.io/app:v1", Image: policy.StagedImage{OCIPath: "/oci", Digest: "sha256:abc"}}
+	err := o.Apply(context.Background(), req, policy.Result{Passed: true}, nil)
+	if err == nil {
+		t.Error("expected error when ACR push fails")
+	}
+	if o.Last().StatusCode != 502 || !o.Last().InfraError {
+		t.Errorf("expected 502 infra after failed push, got %+v", o.Last())
 	}
 }
