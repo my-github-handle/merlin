@@ -14,6 +14,7 @@ func VerifyDigest(r io.Reader, claimed string) error {
 	if !ok || algo != "sha256" {
 		return fmt.Errorf("unsupported digest %q (want sha256:...)", claimed)
 	}
+	want = strings.ToLower(want)
 	h := sha256.New()
 	if _, err := io.Copy(h, r); err != nil {
 		return fmt.Errorf("hash blob: %w", err)

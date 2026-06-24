@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"strings"
 	"testing"
 )
 
@@ -25,5 +26,14 @@ func TestVerifyDigestMismatch(t *testing.T) {
 func TestVerifyDigestMalformed(t *testing.T) {
 	if err := VerifyDigest(bytes.NewReader([]byte("x")), "md5:abc"); err == nil {
 		t.Error("expected error for non-sha256 digest")
+	}
+}
+
+func TestVerifyDigestAcceptsUppercaseHex(t *testing.T) {
+	data := []byte("layer-bytes")
+	sum := sha256.Sum256(data)
+	claimed := "sha256:" + strings.ToUpper(hex.EncodeToString(sum[:]))
+	if err := VerifyDigest(bytes.NewReader(data), claimed); err != nil {
+		t.Errorf("uppercase hex of the correct digest should verify, got %v", err)
 	}
 }
