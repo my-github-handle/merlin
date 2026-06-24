@@ -11,6 +11,7 @@ import (
 // Metrics holds Merlin's Prometheus collectors.
 type Metrics struct {
 	reg          prometheus.Registerer
+	gatherer     prometheus.Gatherer
 	pushTotal    *prometheus.CounterVec
 	scanDuration prometheus.Histogram
 	trivyDBAge   prometheus.Gauge
@@ -18,9 +19,10 @@ type Metrics struct {
 }
 
 // NewMetrics registers and returns Merlin's metrics on reg.
-func NewMetrics(reg prometheus.Registerer) *Metrics {
+func NewMetrics(reg *prometheus.Registry) *Metrics {
 	m := &Metrics{
-		reg: reg,
+		reg:      reg,
+		gatherer: reg,
 		pushTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "merlin_push_decisions_total",
 			Help: "Total push gate decisions by outcome.",
@@ -52,7 +54,7 @@ func (m *Metrics) ObservePush(passed bool) {
 }
 
 func (m *Metrics) ObserveScanDuration(seconds float64) { m.scanDuration.Observe(seconds) }
-func (m *Metrics) SetTrivyDBAgeDays(days float64)       { m.trivyDBAge.Set(days) }
+func (m *Metrics) SetTrivyDBAgeDays(days float64)      { m.trivyDBAge.Set(days) }
 
 func (m *Metrics) ObserveACRPush(ok bool) {
 	result := "error"
@@ -64,5 +66,5 @@ func (m *Metrics) ObserveACRPush(ok bool) {
 
 // Handler returns the Prometheus metrics HTTP handler.
 func (m *Metrics) Handler() http.Handler {
-	return promhttp.HandlerFor(m.reg.(prometheus.Gatherer), promhttp.HandlerOpts{})
+	return promhttp.HandlerFor(m.gatherer, promhttp.HandlerOpts{})
 }
