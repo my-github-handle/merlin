@@ -76,3 +76,56 @@ base_image:
 		t.Errorf("expected acr.registry error, got: %v", err)
 	}
 }
+
+func TestLoadRejectsMissingAuthIssuer(t *testing.T) {
+	p := writeTemp(t, `
+acr:
+  registry: myreg.azurecr.io
+auth:
+  audience: api://merlin
+base_image:
+  allowed_ids: [rhel]
+`)
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("expected error for missing auth.issuer")
+	}
+	if !strings.Contains(err.Error(), "auth.issuer") {
+		t.Errorf("expected auth.issuer error, got: %v", err)
+	}
+}
+
+func TestLoadRejectsMissingAuthAudience(t *testing.T) {
+	p := writeTemp(t, `
+acr:
+  registry: myreg.azurecr.io
+auth:
+  issuer: https://issuer
+base_image:
+  allowed_ids: [rhel]
+`)
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("expected error for missing auth.audience")
+	}
+	if !strings.Contains(err.Error(), "auth.audience") {
+		t.Errorf("expected auth.audience error, got: %v", err)
+	}
+}
+
+func TestLoadRejectsEmptyAllowedIDs(t *testing.T) {
+	p := writeTemp(t, `
+acr:
+  registry: myreg.azurecr.io
+auth:
+  issuer: https://issuer
+  audience: api://merlin
+`)
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("expected error for empty base_image.allowed_ids")
+	}
+	if !strings.Contains(err.Error(), "allowed_ids") {
+		t.Errorf("expected allowed_ids error, got: %v", err)
+	}
+}

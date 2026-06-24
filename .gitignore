@@ -4,6 +4,7 @@
 *.out
 /bin/
 /dist/
+/merlin
 vendor/
 
 # Local staging / scratch
