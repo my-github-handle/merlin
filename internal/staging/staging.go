@@ -44,6 +44,11 @@ func (s *Store) BeginUpload(ctx context.Context, _ string) (string, error) {
 func uploadKey(uploadID string) string { return "upload/" + uploadID }
 func blobKey(digest string) string     { return "blob/" + digest }
 
+// WriteChunk appends a chunk to an in-progress upload at the given offset.
+// Per the Docker v2 protocol (spec §9), chunked PATCH for a single upload is
+// sequential with a single in-flight writer; the offset CAS serializes ordering,
+// and the per-upload blob read-modify-write assumes that single-writer invariant.
+// TODO(hardening): offset-addressed writes would remove the implicit assumption.
 func (s *Store) WriteChunk(ctx context.Context, uploadID string, offset int64, r io.Reader) (int64, error) {
 	buf, err := io.ReadAll(r)
 	if err != nil {

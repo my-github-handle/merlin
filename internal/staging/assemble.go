@@ -34,6 +34,11 @@ func (s *Store) Assemble(ctx context.Context, mr ManifestRef, scratchDir string)
 		if err != nil {
 			return policy.StagedImage{}, fmt.Errorf("read blob %s: %w", dg, err)
 		}
+		// Re-verify the digest: with the shared Azure backend a blob could be
+		// corrupted or overwritten between CompleteBlob and Assemble.
+		if err := VerifyDigest(bytes.NewReader(raw), dg); err != nil {
+			return policy.StagedImage{}, fmt.Errorf("assemble: layer %s failed digest re-verification: %w", dg, err)
+		}
 		// Persist the blob into the OCI layout's blobs/sha256 dir.
 		if err := writeOCIBlob(ociPath, dg, raw); err != nil {
 			return policy.StagedImage{}, err

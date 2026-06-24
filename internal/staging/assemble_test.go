@@ -142,6 +142,38 @@ func TestAssembleSkipsSymlinkEntries(t *testing.T) {
 	}
 }
 
+func TestAssembleRejectsTamperedBlob(t *testing.T) {
+	// Build the store manually so we hold a reference to the BlobStore for tampering.
+	bs := NewMemoryBlobStore()
+	ss := NewMemorySessionStore()
+	n := 0
+	s := New(bs, ss, func() string {
+		n++
+		return "upload-" + string(rune('0'+n))
+	})
+	ctx := context.Background()
+
+	layer := makeLayerTar(t, "rhel")
+	dg := digestOf(layer)
+	up, _ := s.BeginUpload(ctx, "repo")
+	if err := s.CompleteBlob(ctx, up, dg, bytes.NewReader(layer)); err != nil {
+		t.Fatal(err)
+	}
+	mr, err := s.PutManifest(ctx, "repo", "v1", []byte(`{}`), []string{dg})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Tamper: overwrite the stored blob with different content under the same key.
+	if err := bs.Put(ctx, blobKey(dg), bytes.NewReader([]byte("tampered-bytes"))); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.Assemble(ctx, mr, t.TempDir()); err == nil {
+		t.Fatal("assembly must reject a blob that no longer matches its digest")
+	}
+}
+
 func TestCleanupRemovesScratchAndBlobs(t *testing.T) {
 	s := newTestStore()
 	ctx := context.Background()

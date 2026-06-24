@@ -46,10 +46,17 @@ func (v *valkeySessionStore) CompareAndSetOffset(ctx context.Context, uploadID s
 	return res == 1, nil
 }
 
+// MarkComplete flags a blob as complete. The completion flag is keyed by digest
+// and lives in a different store from the blob bytes; CompleteBlob's
+// Put-then-MarkComplete ordering upholds the invariant. AllComplete checks the
+// flag, not the bytes — Assemble fails closed if a flagged blob is absent.
+// TODO(hardening): cross-store reconciliation for drift detection.
 func (v *valkeySessionStore) MarkComplete(ctx context.Context, _, digest string) error {
 	return v.rdb.Set(ctx, v.completeKey(digest), 1, 0).Err()
 }
 
+// AllComplete checks whether all digests are flagged as complete. See MarkComplete
+// for invariant notes.
 func (v *valkeySessionStore) AllComplete(ctx context.Context, digests []string) (bool, error) {
 	for _, d := range digests {
 		n, err := v.rdb.Exists(ctx, v.completeKey(d)).Result()
