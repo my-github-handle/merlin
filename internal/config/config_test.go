@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -67,7 +68,11 @@ auth:
 base_image:
   allowed_ids: [rhel]
 `)
-	if _, err := Load(p); err == nil {
+	_, err := Load(p)
+	if err == nil {
 		t.Fatal("expected error for missing acr.registry, got nil")
+	}
+	if !strings.Contains(err.Error(), "acr.registry") {
+		t.Errorf("expected acr.registry error, got: %v", err)
 	}
 }

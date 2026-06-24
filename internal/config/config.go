@@ -89,8 +89,11 @@ func (c *Config) validate() error {
 	if c.ACR.Registry == "" {
 		return fmt.Errorf("config: acr.registry is required")
 	}
-	if c.Auth.Issuer == "" || c.Auth.Audience == "" {
-		return fmt.Errorf("config: auth.issuer and auth.audience are required")
+	if c.Auth.Issuer == "" {
+		return fmt.Errorf("config: auth.issuer is required")
+	}
+	if c.Auth.Audience == "" {
+		return fmt.Errorf("config: auth.audience is required")
 	}
 	if len(c.BaseImage.AllowedIDs) == 0 {
 		return fmt.Errorf("config: base_image.allowed_ids must not be empty")

@@ -9,3 +9,4 @@ vendor/
 # Local staging / scratch
 /tmp/
 *.local.yaml
+.superpowers/
