@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "merlin.fullname" . }}
+  labels: {{- include "merlin.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels: {{- include "merlin.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "merlin.selectorLabels" . | nindent 8 }}
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+      containers:
+        - name: merlin
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: v2
+              containerPort: 5000
+            - name: metrics
+              containerPort: 9090
+          env:
+            - name: MERLIN_MODE
+              value: production
+            - name: MERLIN_CONFIG
+              value: /etc/merlin/config.yaml
+            {{- if .Values.externalSecrets.enabled }}
+            # CRITICAL: ClickHouse password injection via secretKeyRef.
+            # The ConfigMap renders clickhouse_dsn with the literal ${CLICKHOUSE_PASSWORD} placeholder.
+            # At runtime, Merlin's config loader expands this env var via os.Expand.
+            # This keeps the password out of the ConfigMap (no secret in git/etcd plaintext).
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "merlin.fullname" . }}-secrets
+                  key: clickhouse-password
+            {{- end }}
+          {{- if .Values.externalSecrets.enabled }}
+          # envFrom makes all ESO-synced secret keys available as env vars.
+          # CLICKHOUSE_PASSWORD is explicitly mapped above via secretKeyRef for clarity,
+          # but envFrom ensures any additional secret keys (e.g., future Azure Storage keys)
+          # are also available to the application without requiring Deployment updates.
+          envFrom:
+            - secretRef:
+                name: {{ include "merlin.fullname" . }}-secrets
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/merlin
+              readOnly: true
+            - name: scratch
+              mountPath: {{ .Values.merlin.staging.scratchDir }}
+          # TODO: Add a real /healthz endpoint for HTTP probes.
+          # Current state: /v2/ returns 401 (auth required), which fails HTTP 200 probes.
+          # TCP socket probes work around this by checking the port is listening.
+          # Future: Implement GET /healthz → 200 OK (no auth) and switch to httpGet probes.
+          livenessProbe:
+            tcpSocket:
+              port: v2
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            tcpSocket:
+              port: v2
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "merlin.fullname" . }}-config
+        - name: scratch
+          emptyDir: {}
