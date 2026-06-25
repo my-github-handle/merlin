@@ -150,3 +150,75 @@ base_image:
 		t.Errorf("expected severity_threshold error, got: %v", err)
 	}
 }
+
+func TestLoadExpandsEnvVars(t *testing.T) {
+	// Test case (a): config with ${VAR} expands when env var is set
+	t.Setenv("TEST_CH_PW", "test_password_123")
+	p := writeTemp(t, `
+acr:
+  registry: myreg.azurecr.io
+auth:
+  issuer: https://issuer
+  audience: api://merlin
+base_image:
+  allowed_ids: [rhel]
+audit:
+  clickhouse_dsn: clickhouse://merlin:${TEST_CH_PW}@host:9000/merlin
+`)
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := "clickhouse://merlin:test_password_123@host:9000/merlin"
+	if cfg.Audit.ClickHouseDSN != want {
+		t.Errorf("clickhouse_dsn = %q, want %q", cfg.Audit.ClickHouseDSN, want)
+	}
+}
+
+func TestLoadRejectsUnsetEnvVar(t *testing.T) {
+	// Test case (b): config referencing UNSET var returns error naming the var
+	p := writeTemp(t, `
+acr:
+  registry: myreg.azurecr.io
+auth:
+  issuer: https://issuer
+  audience: api://merlin
+base_image:
+  allowed_ids: [rhel]
+audit:
+  clickhouse_dsn: clickhouse://merlin:${MISSING_VAR}@host:9000/merlin
+`)
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("expected error for unset env var, got nil")
+	}
+	if !strings.Contains(err.Error(), "MISSING_VAR") {
+		t.Errorf("expected error naming MISSING_VAR, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "unset config env var") {
+		t.Errorf("expected 'unset config env var' in error, got: %v", err)
+	}
+}
+
+func TestLoadWithNoEnvRefsStillWorks(t *testing.T) {
+	// Test case (c): config with no env refs still loads fine (regression)
+	p := writeTemp(t, `
+acr:
+  registry: myreg.azurecr.io
+auth:
+  issuer: https://issuer
+  audience: api://merlin
+base_image:
+  allowed_ids: [rhel]
+audit:
+  clickhouse_dsn: clickhouse://merlin:plainpassword@host:9000/merlin
+`)
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("config without env refs should load fine, got: %v", err)
+	}
+	want := "clickhouse://merlin:plainpassword@host:9000/merlin"
+	if cfg.Audit.ClickHouseDSN != want {
+		t.Errorf("clickhouse_dsn = %q, want %q", cfg.Audit.ClickHouseDSN, want)
+	}
+}

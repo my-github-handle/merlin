@@ -1,0 +1,74 @@
+image:
+  repository: ""   # set in Phase 8 (e.g. <acr>.azurecr.io/merlin)
+  tag: ""          # set in Phase 8
+  pullPolicy: IfNotPresent
+replicaCount: 2
+serviceAccount:
+  create: true
+  name: merlin
+  # AKS Workload Identity client-id of the Entra app/managed identity:
+  workloadIdentityClientID: ""   # required in prod values
+podLabels:
+  azure.workload.identity/use: "true"
+service:
+  type: ClusterIP
+  port: 5000
+metrics:
+  port: 9090
+ingress:
+  enabled: true
+  className: ""        # e.g. nginx / azure-application-gateway
+  host: ""             # e.g. merlin.example.com  (required)
+  tlsSecretName: ""    # existing TLS secret OR via cert-manager annotations
+  annotations: {}
+hpa:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+externalSecrets:
+  enabled: true
+  secretStoreRef:
+    name: ""           # ESO SecretStore/ClusterSecretStore name (required)
+    kind: ClusterSecretStore
+  refreshInterval: 1h
+  # keys to sync (remoteKey = key in the external backend):
+  data: []             # e.g. [{secretKey: clickhouse-password, remoteKey: merlin-ch-pass}]
+merlin:
+  # rendered into /etc/merlin/config.yaml
+  trivy: { severityThreshold: CRITICAL }
+  baseImage: { allowedIDs: [rhel, wolfi, chainguard] }
+  acr: { registry: "" }                 # required: <acr>.azurecr.io
+  auth: { issuer: "", audience: "", jwksURL: "" }   # required (Entra)
+  staging:
+    blobAccountURL: ""                  # required: https://<acct>.blob.core.windows.net
+    blobContainer: merlin-staging
+    valkeyAddr: ""                      # defaulted from operator-CR service in helpers if empty
+    scratchDir: /tmp/merlin
+    scanPoolSize: 4
+  audit: { clickhouseDSN: "", queueSize: 1024 }   # DSN defaulted from operator-CR service if empty
+  server:
+    addr: ":5000"
+    metricsAddr: ":9090"
+    maxUploadBytes: 2147483648
+    gateTimeout: 5m
+# Valkey via Hyperspike valkey-operator (hyperspike.io/v1 Valkey CR).
+valkey:
+  enabled: true
+  nodes: 1                # standalone for first deploy; >1 for HA
+  tls: false             # in-cluster; Merlin connects plaintext within the namespace
+  storage: { size: 8Gi, storageClassName: "" }   # "" = default StorageClass
+  # If enabled: false, set merlin.staging.valkeyAddr to an external address.
+# ClickHouse via Altinity clickhouse-operator (clickhouse.altinity.com/v1 CHI CR).
+clickhouse:
+  enabled: true
+  user: merlin
+  # password supplied via ESO secret (clickhouse-password key); referenced by
+  # k8s_secret_password in the CHI users config — NOT stored in values/ConfigMap.
+  shardsCount: 1
+  replicasCount: 1
+  storage: { dataSize: 20Gi, logSize: 1Gi, storageClassName: "" }
+  # If enabled: false, set merlin.audit.clickhouseDSN to an external DSN.
+resources:
+  requests: { cpu: 500m, memory: 512Mi }
+  limits: { cpu: "2", memory: 2Gi }

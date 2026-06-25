@@ -1,0 +1,40 @@
+{{- if .Values.clickhouse.enabled }}
+apiVersion: clickhouse.altinity.com/v1
+kind: ClickHouseInstallation
+metadata:
+  name: {{ include "merlin.fullname" . }}-ch
+  labels: {{- include "merlin.labels" . | nindent 4 }}
+spec:
+  defaults:
+    templates:
+      dataVolumeClaimTemplate: data-volume
+      logVolumeClaimTemplate: log-volume
+  configuration:
+    users:
+      {{ .Values.clickhouse.user }}/k8s_secret_password: {{ .Release.Namespace }}/{{ include "merlin.fullname" . }}-secrets/clickhouse-password
+      {{ .Values.clickhouse.user }}/networks/ip:
+        - "0.0.0.0/0"
+    clusters:
+      - name: merlin
+        layout:
+          shardsCount: {{ .Values.clickhouse.shardsCount }}
+          replicasCount: {{ .Values.clickhouse.replicasCount }}
+  templates:
+    volumeClaimTemplates:
+      - name: data-volume
+        spec:
+          accessModes: [ReadWriteOnce]
+          resources: { requests: { storage: {{ .Values.clickhouse.storage.dataSize }} } }
+          {{- with .Values.clickhouse.storage.storageClassName }}
+          storageClassName: {{ . }}
+          {{- end }}
+      - name: log-volume
+        spec:
+          accessModes: [ReadWriteOnce]
+          resources: { requests: { storage: {{ .Values.clickhouse.storage.logSize }} } }
+{{- end }}
+# NOTE: The k8s_secret_password references the ESO-synced <fullname>-secrets Secret's
+# clickhouse-password key (password never lands in ConfigMap/CR plaintext). Altinity
+# resolves it at reconcile time. The operator creates a clickhouse-<chi-name> Service;
+# the ClickHouse DSN helper builds clickhouse://<user>@<service>:9000/merlin with the
+# password injected into Merlin via env from the same ESO secret.

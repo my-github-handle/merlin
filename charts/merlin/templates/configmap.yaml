@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "merlin.fullname" . }}-config
+  labels: {{- include "merlin.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    # Merlin configuration (snake_case keys match internal/config/config.go yaml tags)
+    trivy:
+      severity_threshold: {{ .Values.merlin.trivy.severityThreshold }}
+    base_image:
+      allowed_ids: {{ toJson .Values.merlin.baseImage.allowedIDs }}
+    acr:
+      registry: {{ .Values.merlin.acr.registry | quote }}
+    auth:
+      issuer: {{ .Values.merlin.auth.issuer | quote }}
+      audience: {{ .Values.merlin.auth.audience | quote }}
+      jwks_url: {{ .Values.merlin.auth.jwksURL | quote }}
+    staging:
+      blob_account_url: {{ .Values.merlin.staging.blobAccountURL | quote }}
+      blob_container: {{ .Values.merlin.staging.blobContainer | quote }}
+      valkey_addr: {{ include "merlin.valkeyAddr" . | quote }}
+      scratch_dir: {{ .Values.merlin.staging.scratchDir | quote }}
+      scan_pool_size: {{ .Values.merlin.staging.scanPoolSize }}
+    audit:
+      # NOTE: The clickhouse_dsn contains ${CLICKHOUSE_PASSWORD}, a literal placeholder (NOT expanded by Helm).
+      # At runtime, Merlin's config loader (internal/config/config.go) expands environment variables using
+      # os.Expand with strict validation. The Deployment injects CLICKHOUSE_PASSWORD from the ESO-synced
+      # <fullname>-secrets Secret. If the env var is unset, Merlin fails fast at startup with a clear error,
+      # preventing silent misconfiguration. This keeps the password out of the ConfigMap (no secret in git).
+      clickhouse_dsn: {{ include "merlin.clickhouseDSN" . | quote }}
+      queue_size: {{ .Values.merlin.audit.queueSize }}
+    server:
+      addr: {{ .Values.merlin.server.addr | quote }}
+      metrics_addr: {{ .Values.merlin.server.metricsAddr | quote }}
+      max_upload_bytes: {{ .Values.merlin.server.maxUploadBytes }}
+      gate_timeout: {{ .Values.merlin.server.gateTimeout | quote }}

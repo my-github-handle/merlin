@@ -22,6 +22,7 @@ type Handler struct {
 	maxUploadBytes int64
 	pool           *router.Pool
 	gateTimeout    time.Duration
+	scratchBaseDir string
 }
 
 // NewHandler builds the V2 handler. reports backs GET /reports/<push_id>.
@@ -54,6 +55,14 @@ func (h *Handler) SetPool(p *router.Pool) {
 // SetGateTimeout configures the gate timeout (default 5 minutes when pool is used).
 func (h *Handler) SetGateTimeout(d time.Duration) {
 	h.gateTimeout = d
+}
+
+// SetScratchBaseDir configures the base directory for scratch dirs used during
+// image assembly. When set, scratch dirs are created under this directory (typically
+// a writable emptyDir mount). When empty (default), os.MkdirTemp creates scratch
+// dirs in the system temp location.
+func (h *Handler) SetScratchBaseDir(dir string) {
+	h.scratchBaseDir = dir
 }
 
 func (h *Handler) route(w http.ResponseWriter, r *http.Request) {

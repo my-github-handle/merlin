@@ -1,0 +1,9 @@
+apiVersion: v2
+name: merlin
+description: Merlin image-publishing gate proxy
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+# No subchart dependencies: Valkey (Hyperspike) and ClickHouse (Altinity) are
+# provisioned via operator Custom Resources (see templates/valkey.yaml,
+# clickhouseinstallation.yaml). The operators are assumed pre-installed cluster-wide.

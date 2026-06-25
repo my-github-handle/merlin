@@ -1,0 +1,22 @@
+{{- if .Values.valkey.enabled }}
+apiVersion: hyperspike.io/v1
+kind: Valkey
+metadata:
+  name: {{ include "merlin.fullname" . }}-valkey
+  labels: {{- include "merlin.labels" . | nindent 4 }}
+spec:
+  nodes: {{ .Values.valkey.nodes }}
+  tls: {{ .Values.valkey.tls }}
+  storage:
+    spec:
+      accessModes: [ReadWriteOnce]
+      resources:
+        requests:
+          storage: {{ .Values.valkey.storage.size }}
+      {{- with .Values.valkey.storage.storageClassName }}
+      storageClassName: {{ . }}
+      {{- end }}
+{{- end }}
+# NOTE(Phase 8): Confirm the exact hyperspike.io/v1 Valkey field names against the installed
+# operator CRD via `kubectl explain valkey.spec`. The fields above (nodes, tls, storage.spec)
+# reflect the operator's documented shape; adapt if field names differ.
