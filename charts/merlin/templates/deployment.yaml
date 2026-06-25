@@ -6,11 +6,11 @@ metadata:
 spec:
   replicas: {{ .Values.replicaCount }}
   selector:
-    matchLabels: {{- include "merlin.selectorLabels" . | nindent 6 }}
+    matchLabels: {{- include "merlin.gateSelectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
-        {{- include "merlin.selectorLabels" . | nindent 8 }}
+        {{- include "merlin.gateSelectorLabels" . | nindent 8 }}
         azure.workload.identity/use: "true"
     spec:
       serviceAccountName: {{ .Values.serviceAccount.name }}

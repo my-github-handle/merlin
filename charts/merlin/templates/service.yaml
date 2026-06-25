@@ -5,7 +5,7 @@ metadata:
   labels: {{- include "merlin.labels" . | nindent 4 }}
 spec:
   type: {{ .Values.service.type }}
-  selector: {{- include "merlin.selectorLabels" . | nindent 4 }}
+  selector: {{- include "merlin.gateSelectorLabels" . | nindent 4 }}
   ports:
     - name: v2
       port: {{ .Values.service.port }}
