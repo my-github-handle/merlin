@@ -58,6 +58,14 @@ INSERT INTO vulnerability_findings
 	return batch.Send()
 }
 
+// Close closes the ClickHouse writer connection.
+func (c *clickhouseWriter) Close() error {
+	if c.conn != nil {
+		return c.conn.Close()
+	}
+	return nil
+}
+
 // Reader runs reverse-lookup queries against ClickHouse.
 type Reader struct {
 	conn driver.Conn
@@ -153,6 +161,14 @@ func (r *Reader) FindingsByPush(ctx context.Context, pushID string) ([]policy.Fi
 		out = append(out, f)
 	}
 	return out, rows.Err()
+}
+
+// Close closes the ClickHouse reader connection.
+func (r *Reader) Close() error {
+	if r.conn != nil {
+		return r.conn.Close()
+	}
+	return nil
 }
 
 func nowFn() time.Time { return time.Now() }

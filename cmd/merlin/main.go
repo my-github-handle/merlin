@@ -30,7 +30,9 @@ func main() {
 
 	if mode == "production" {
 		log.Println("Starting in production mode with live backends...")
-		mainSrv, metricsSrv, cleanup, err = app.BuildWithBackends(context.Background(), cfg)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		mainSrv, metricsSrv, cleanup, err = app.BuildWithBackends(ctx, cfg)
 		if err != nil {
 			log.Fatalf("build production: %v", err)
 		}

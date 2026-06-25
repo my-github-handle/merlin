@@ -100,42 +100,64 @@ func BuildWithBackends(ctx context.Context, cfg config.Config) (*http.Server, *h
 
 	// --- LIVE BACKENDS (network calls below) ---
 
-	// Auth: Entra ID JWKS keyfunc + JWT authenticator
-	keyfunc, err := auth.NewEntraKeyfunc(ctx, cfg.Auth.JWKSURL)
+	// Create cancellable context for JWKS refresh goroutine
+	bctx, cancel := context.WithCancel(ctx)
+
+	// Track opened resources for cleanup on error
+	var closers []func()
+	fail := func(e error) (*http.Server, *http.Server, func(), error) {
+		cancel()
+		for i := len(closers) - 1; i >= 0; i-- {
+			closers[i]()
+		}
+		return nil, nil, nil, e
+	}
+
+	// Auth: Entra ID JWKS keyfunc + JWT authenticator (uses bctx for background refresh)
+	keyfunc, err := auth.NewEntraKeyfunc(bctx, cfg.Auth.JWKSURL)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("create JWKS keyfunc: %w", err)
+		return fail(fmt.Errorf("create JWKS keyfunc: %w", err))
 	}
 	authn := auth.NewJWTAuthenticator(cfg.Auth.Issuer, cfg.Auth.Audience, keyfunc)
 
 	// Staging: Azure Blob + Valkey session store
 	blobStore, err := staging.NewAzureBlobStoreWithCredential(cfg.Staging.BlobAccountURL, cfg.Staging.BlobContainer)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("create blob store: %w", err)
+		return fail(fmt.Errorf("create blob store: %w", err))
 	}
 	sessionStore, err := staging.NewValkeySessionStore(cfg.Staging.ValkeyAddr)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("create session store: %w", err)
+		return fail(fmt.Errorf("create session store: %w", err))
 	}
 	store := staging.New(blobStore, sessionStore, generatePushID)
 
 	// Audit: ClickHouse writer + auditor + reader
 	auditWriter, err := audit.NewClickHouseWriter(cfg.Audit.ClickHouseDSN)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("create audit writer: %w", err)
+		return fail(fmt.Errorf("create audit writer: %w", err))
 	}
+	// Track writer for cleanup (cast to access Close method)
+	writerCloser, ok := auditWriter.(interface{ Close() error })
+	if ok {
+		closers = append(closers, func() { writerCloser.Close() })
+	}
+
 	auditor := audit.NewAuditor(auditWriter, cfg.Audit.QueueSize, func(err error) {
 		// TODO(observability): log dropped audit events
 		_ = err
 	})
+	closers = append(closers, func() { auditor.Close() })
+
 	reportsReader, err := audit.NewClickHouseReader(cfg.Audit.ClickHouseDSN)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("create audit reader: %w", err)
+		return fail(fmt.Errorf("create audit reader: %w", err))
 	}
+	closers = append(closers, func() { reportsReader.Close() })
 
 	// ACR pusher with managed identity credentials
 	pusher, err := acr.NewACRPusherWithCredential(cfg.ACR.Registry)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("create ACR pusher: %w", err)
+		return fail(fmt.Errorf("create ACR pusher: %w", err))
 	}
 
 	// Policies + engine
@@ -166,8 +188,12 @@ func BuildWithBackends(ctx context.Context, cfg config.Config) (*http.Server, *h
 	mainSrv := &http.Server{Addr: cfg.Server.Addr, Handler: handler}
 	metricsSrv := &http.Server{Addr: cfg.Server.MetricsAddr, Handler: metrics.Handler()}
 
+	// Build cleanup function: cancel JWKS context + close all resources (reverse order)
 	cleanup := func() {
-		auditor.Close()
+		cancel() // Stop JWKS background refresh
+		for i := len(closers) - 1; i >= 0; i-- {
+			closers[i]()
+		}
 	}
 
 	return mainSrv, metricsSrv, cleanup, nil
@@ -176,6 +202,8 @@ func BuildWithBackends(ctx context.Context, cfg config.Config) (*http.Server, *h
 // generatePushID creates a random 16-byte hex ID for tracking push sessions.
 func generatePushID() string {
 	b := make([]byte, 16)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic(fmt.Sprintf("crypto/rand failed: %v", err))
+	}
 	return hex.EncodeToString(b)
 }
