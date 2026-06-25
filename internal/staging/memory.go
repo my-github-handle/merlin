@@ -54,7 +54,8 @@ type memSession struct {
 type memSessionStore struct {
 	mu       sync.Mutex
 	sessions map[string]*memSession
-	complete map[string]bool // global digest -> complete
+	complete map[string]bool  // global digest -> complete
+	refs     map[string]int64 // global digest -> reference count
 }
 
 // NewMemorySessionStore returns an in-memory SessionStore for tests.
@@ -62,6 +63,7 @@ func NewMemorySessionStore() SessionStore {
 	return &memSessionStore{
 		sessions: make(map[string]*memSession),
 		complete: make(map[string]bool),
+		refs:     make(map[string]int64),
 	}
 }
 
@@ -109,4 +111,24 @@ func (m *memSessionStore) Clear(_ context.Context, uploadID string) error {
 	defer m.mu.Unlock()
 	delete(m.sessions, uploadID)
 	return nil
+}
+
+func (m *memSessionStore) IncBlobRef(_ context.Context, digest string) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.refs[digest]++
+	return m.refs[digest], nil
+}
+
+func (m *memSessionStore) DecBlobRef(_ context.Context, digest string) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.refs[digest] > 0 {
+		m.refs[digest]--
+	}
+	n := m.refs[digest]
+	if n == 0 {
+		delete(m.refs, digest)
+	}
+	return n, nil
 }

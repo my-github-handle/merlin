@@ -13,6 +13,7 @@ type FakePusher struct {
 	mu             sync.Mutex
 	Pushed         []string
 	PushedManifest []string // targets passed to PushManifest (verbatim forwards)
+	PushedBlob     []string // repos passed to PushBlob (attestation blob seeding)
 }
 
 func (f *FakePusher) Push(_ context.Context, _, target string) error {
@@ -32,5 +33,15 @@ func (f *FakePusher) PushManifest(_ context.Context, _ []byte, _ string, target 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.PushedManifest = append(f.PushedManifest, target)
+	return nil
+}
+
+func (f *FakePusher) PushBlob(_ context.Context, _ []byte, _ string, repo string) error {
+	if f.Err != nil {
+		return f.Err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.PushedBlob = append(f.PushedBlob, repo)
 	return nil
 }

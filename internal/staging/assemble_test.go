@@ -307,6 +307,48 @@ func TestAssembleRejectsTamperedBlob(t *testing.T) {
 	}
 }
 
+// TestCleanupSharedBlobNotDeletedWhileInUse reproduces the shared-blob cleanup
+// race (TODO I-3): two pushes reference the same blob digest; when the first push
+// cleans up, the blob must survive because the second push still needs it. Only
+// when the last referencing push cleans up is the blob deleted.
+func TestCleanupSharedBlobNotDeletedWhileInUse(t *testing.T) {
+	s := newTestStore()
+	ctx := context.Background()
+	layer := makeLayerTar(t, "rhel")
+	dgst := digestOf(layer)
+
+	// Push A and push B both upload (complete) the SAME blob digest.
+	upA, _ := s.BeginUpload(ctx, "repoA")
+	if err := s.CompleteBlob(ctx, upA, dgst, bytes.NewReader(layer)); err != nil {
+		t.Fatal(err)
+	}
+	upB, _ := s.BeginUpload(ctx, "repoB")
+	if err := s.CompleteBlob(ctx, upB, dgst, bytes.NewReader(layer)); err != nil {
+		t.Fatal(err)
+	}
+
+	mrA, _ := s.PutManifest(ctx, "repoA", "v1", []byte(`{}`), "", []string{dgst})
+	mrB, _ := s.PutManifest(ctx, "repoB", "v1", []byte(`{}`), "", []string{dgst})
+
+	// Push A finishes and cleans up. The shared blob must STILL be assemblable by B.
+	if err := s.Cleanup(ctx, mrA, t.TempDir()); err != nil {
+		t.Fatalf("cleanup A: %v", err)
+	}
+	if _, err := s.Assemble(ctx, mrB, t.TempDir()); err != nil {
+		t.Fatalf("push B must still assemble the shared blob after A cleaned up: %v", err)
+	}
+
+	// Now B cleans up too — last reference gone, blob may be deleted.
+	if err := s.Cleanup(ctx, mrB, t.TempDir()); err != nil {
+		t.Fatalf("cleanup B: %v", err)
+	}
+	// A fresh push referencing the digest without re-uploading must fail (blob gone).
+	mrC, _ := s.PutManifest(ctx, "repoC", "v1", []byte(`{}`), "", []string{dgst})
+	if _, err := s.Assemble(ctx, mrC, t.TempDir()); err == nil {
+		t.Error("after the last referencing push cleaned up, the blob should be gone")
+	}
+}
+
 func TestCleanupRemovesScratchAndBlobs(t *testing.T) {
 	s := newTestStore()
 	ctx := context.Background()

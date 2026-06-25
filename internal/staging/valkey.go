@@ -73,3 +73,28 @@ func (v *valkeySessionStore) AllComplete(ctx context.Context, digests []string) 
 func (v *valkeySessionStore) Clear(ctx context.Context, uploadID string) error {
 	return v.rdb.Del(ctx, v.offsetKey(uploadID)).Err()
 }
+
+func (v *valkeySessionStore) refKey(d string) string { return "merlin:blob:" + d + ":refs" }
+
+// IncBlobRef atomically increments the reference count for a content digest.
+func (v *valkeySessionStore) IncBlobRef(ctx context.Context, digest string) (int64, error) {
+	n, err := v.rdb.Incr(ctx, v.refKey(digest)).Result()
+	if err != nil {
+		return 0, fmt.Errorf("valkey incr ref: %w", err)
+	}
+	return n, nil
+}
+
+// DecBlobRef atomically decrements the reference count and deletes the counter key
+// when it reaches zero. The caller deletes the blob bytes only at zero, so a
+// finished push never removes a blob a concurrent push still references.
+func (v *valkeySessionStore) DecBlobRef(ctx context.Context, digest string) (int64, error) {
+	n, err := v.rdb.Decr(ctx, v.refKey(digest)).Result()
+	if err != nil {
+		return 0, fmt.Errorf("valkey decr ref: %w", err)
+	}
+	if n <= 0 {
+		_ = v.rdb.Del(ctx, v.refKey(digest)).Err()
+	}
+	return n, nil
+}

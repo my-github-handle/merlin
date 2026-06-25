@@ -115,6 +115,12 @@ func (s *Store) CompleteBlob(ctx context.Context, uploadID, digest string, r io.
 	if err := s.sessions.MarkComplete(ctx, uploadID, digest); err != nil {
 		return fmt.Errorf("mark complete: %w", err)
 	}
+	// 6. Reference-count the content blob: each completing push holds one reference
+	// so a finished push's Cleanup cannot delete a blob a concurrent push (e.g. a
+	// shared base layer, or the image + attestation of one buildx push) still needs.
+	if _, err := s.sessions.IncBlobRef(ctx, digest); err != nil {
+		return fmt.Errorf("inc blob ref: %w", err)
+	}
 	_ = s.blobs.Delete(ctx, uploadKey(uploadID))
 	return nil
 }
@@ -123,6 +129,13 @@ func (s *Store) CompleteBlob(ctx context.Context, uploadID, digest string, r io.
 // staging, then returns the assembled ManifestRef. configDigest is the image
 // config blob; layerDigests are the filesystem layers. configDigest may be empty
 // for manifests that reference no config (e.g. test fixtures).
+// GetStagedBlob returns the bytes of a completed blob by digest, re-verifying the
+// digest. Used to forward an attestation manifest's referenced blobs (config +
+// in-toto layers) to ACR before forwarding the manifest itself.
+func (s *Store) GetStagedBlob(ctx context.Context, digest string) ([]byte, error) {
+	return s.fetchVerified(ctx, digest)
+}
+
 func (s *Store) PutManifest(ctx context.Context, repo, ref string, manifest []byte, configDigest string, layerDigests []string) (ManifestRef, error) {
 	required := layerDigests
 	if configDigest != "" {

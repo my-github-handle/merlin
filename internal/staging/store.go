@@ -22,4 +22,11 @@ type SessionStore interface {
 	MarkComplete(ctx context.Context, uploadID, digest string) error
 	AllComplete(ctx context.Context, digests []string) (bool, error)
 	Clear(ctx context.Context, uploadID string) error
+	// IncBlobRef increments the reference count for a content digest (one per push
+	// that completes it) and returns the new count.
+	IncBlobRef(ctx context.Context, digest string) (int64, error)
+	// DecBlobRef decrements the reference count for a content digest and returns
+	// the remaining count. The caller deletes the blob bytes only when this hits 0,
+	// so a finished push never removes a blob a concurrent push still needs.
+	DecBlobRef(ctx context.Context, digest string) (int64, error)
 }

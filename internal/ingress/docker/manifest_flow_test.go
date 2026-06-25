@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -129,12 +131,19 @@ func TestManifestPUTUBILayerAccepted(t *testing.T) {
 func TestManifestPUTAttestationForwarded(t *testing.T) {
 	h, fp := buildIntegrationHandler(t, trivy.Report{}, 2)
 
+	// Stage the attestation's referenced blobs (config + in-toto layer) as the
+	// docker client would before the manifest PUT, so they can be seeded to ACR.
+	configBlob := []byte(`{"architecture":"amd64","os":"linux"}`)
+	intotoBlob := []byte(`{"_type":"https://in-toto.io/Statement/v0.1"}`)
+	configDg := uploadLayer(t, h, "app", configBlob)
+	intotoDg := uploadLayer(t, h, "app", intotoBlob)
+
 	attestation := map[string]interface{}{
 		"schemaVersion": 2,
 		"mediaType":     "application/vnd.oci.image.manifest.v1+json",
-		"config":        map[string]interface{}{"mediaType": "application/vnd.oci.image.config.v1+json", "digest": "sha256:b6"},
+		"config":        map[string]interface{}{"mediaType": "application/vnd.oci.image.config.v1+json", "digest": configDg},
 		"layers": []map[string]interface{}{
-			{"mediaType": "application/vnd.in-toto+json", "digest": "sha256:a1"},
+			{"mediaType": "application/vnd.in-toto+json", "digest": intotoDg},
 		},
 	}
 	body, _ := json.Marshal(attestation)
@@ -150,6 +159,10 @@ func TestManifestPUTAttestationForwarded(t *testing.T) {
 	}
 	if rec.Header().Get("Docker-Content-Digest") != digest {
 		t.Errorf("Docker-Content-Digest = %q, want %q", rec.Header().Get("Docker-Content-Digest"), digest)
+	}
+	// Its config + in-toto blobs must have been seeded to ACR first.
+	if len(fp.PushedBlob) != 2 {
+		t.Errorf("expected 2 seeded blobs (config + in-toto), got %d", len(fp.PushedBlob))
 	}
 	if len(fp.PushedManifest) != 1 {
 		t.Fatalf("expected 1 verbatim manifest forward, got %d", len(fp.PushedManifest))
@@ -213,6 +226,51 @@ func TestManifestPUTIndexForwardFailureIs400(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("failed index forward: status = %d, want 400", rec.Code)
+	}
+}
+
+// TestManifestPUTSharedBlobConcurrent reproduces the production buildx race: two
+// repos push the SAME layer blob; both gate concurrently. With content-addressed
+// ref-counting, one push's cleanup must not delete the shared blob the other still
+// needs — both must succeed (201), not spuriously 500.
+func TestManifestPUTSharedBlobConcurrent(t *testing.T) {
+	h, fp := buildIntegrationHandler(t, trivy.Report{}, 4)
+	layer := layerWithOSID(t, "rhel") // same bytes => same digest, shared blob
+
+	const repos = 6
+	// Pre-upload the shared blob under each repo (each completion adds a ref).
+	for i := 0; i < repos; i++ {
+		uploadLayer(t, h, fmt.Sprintf("shared%d", i), layer)
+	}
+	manifest := map[string]interface{}{
+		"schemaVersion": 2,
+		"config":        map[string]interface{}{"digest": dg(layer)},
+		"layers":        []map[string]interface{}{{"digest": dg(layer)}},
+	}
+	manifestBytes, _ := json.Marshal(manifest)
+
+	statuses := make([]int, repos)
+	var wg sync.WaitGroup
+	for i := 0; i < repos; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			req := httptest.NewRequest(http.MethodPut, fmt.Sprintf("/v2/shared%d/manifests/v1", i), bytes.NewReader(manifestBytes))
+			req.Header.Set("Authorization", "Bearer good")
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			statuses[i] = rec.Code
+		}(i)
+	}
+	wg.Wait()
+
+	for i, s := range statuses {
+		if s != http.StatusCreated {
+			t.Errorf("shared%d: status = %d, want 201 (shared-blob cleanup race?)", i, s)
+		}
+	}
+	if len(fp.Pushed) != repos {
+		t.Errorf("ACR pushes = %d, want %d", len(fp.Pushed), repos)
 	}
 }
 

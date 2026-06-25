@@ -23,20 +23,34 @@ import (
 // target ref mirrors how the client addressed it: by digest (sub-manifests, e.g. the
 // attestation) or by tag (the index). On success it echoes Docker-Content-Digest so
 // the docker client accepts the response.
-func (h *Handler) forwardManifest(w http.ResponseWriter, ctx context.Context, repo, ref string, raw []byte, mediaType string, kind manifestKind) {
+func (h *Handler) forwardManifest(w http.ResponseWriter, ctx context.Context, repo, ref string, raw []byte, m parsedManifest, kind manifestKind) {
 	sum := sha256.Sum256(raw)
 	digest := "sha256:" + hex.EncodeToString(sum[:])
 
 	// Address the manifest in ACR exactly as the client addressed it here: a
 	// digest ref (sha256:...) pushes by digest; anything else is a tag.
+	repoRef := h.registry + "/" + repo
 	var target string
 	if strings.HasPrefix(ref, "sha256:") {
-		target = h.registry + "/" + repo + "@" + ref
+		target = repoRef + "@" + ref
 	} else {
-		target = h.registry + "/" + repo + ":" + ref
+		target = repoRef + ":" + ref
 	}
 
-	if err := h.outcome.Pusher.PushManifest(ctx, raw, mediaType, target); err != nil {
+	// An attestation manifest references its own blobs (config + in-toto layers)
+	// that Merlin staged but never forwarded; the registry rejects the manifest
+	// (MANIFEST_BLOB_UNKNOWN) unless they exist there first. Seed them now. (An
+	// index references only sub-manifests, already in ACR from the gated image, so
+	// it needs no blob seeding.)
+	if kind == kindAttestation {
+		if err := h.seedAttestationBlobs(ctx, repoRef, m); err != nil {
+			log.Printf("forward attestation %s: seed blobs failed: %v", digest, err)
+			http.Error(w, fmt.Sprintf("manifest not published: %v", err), http.StatusBadRequest)
+			return
+		}
+	}
+
+	if err := h.outcome.Pusher.PushManifest(ctx, raw, m.MediaType, target); err != nil {
 		// An index whose gated image was rejected has no sub-manifest in ACR, so
 		// this PUT fails — that is the gate holding, not an internal fault. Surface
 		// it as a 400 so the push fails cleanly with the reason.
@@ -46,6 +60,31 @@ func (h *Handler) forwardManifest(w http.ResponseWriter, ctx context.Context, re
 	}
 	w.Header().Set("Docker-Content-Digest", digest)
 	w.WriteHeader(http.StatusCreated)
+}
+
+// seedAttestationBlobs uploads an attestation manifest's referenced blobs (config
+// + layers) from staging to ACR, so the subsequent manifest forward resolves. Each
+// blob was staged during the push; it is fetched (digest re-verified) and pushed
+// addressed by content digest.
+func (h *Handler) seedAttestationBlobs(ctx context.Context, repoRef string, m parsedManifest) error {
+	type blob struct{ digest, mediaType string }
+	var blobs []blob
+	if m.Config.Digest != "" {
+		blobs = append(blobs, blob{m.Config.Digest, m.Config.MediaType})
+	}
+	for _, l := range m.Layers {
+		blobs = append(blobs, blob{l.Digest, l.MediaType})
+	}
+	for _, b := range blobs {
+		raw, err := h.store.GetStagedBlob(ctx, b.digest)
+		if err != nil {
+			return fmt.Errorf("fetch staged blob %s: %w", b.digest, err)
+		}
+		if err := h.outcome.Pusher.PushBlob(ctx, raw, b.mediaType, repoRef); err != nil {
+			return fmt.Errorf("push blob %s: %w", b.digest, err)
+		}
+	}
+	return nil
 }
 
 // kindName renders a manifestKind for logs.
@@ -113,7 +152,7 @@ func (h *Handler) handleManifest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if kind == kindIndex || kind == kindAttestation {
-		h.forwardManifest(w, ctx, repo, ref, manifestBytes, manifest.MediaType, kind)
+		h.forwardManifest(w, ctx, repo, ref, manifestBytes, manifest, kind)
 		return
 	}
 

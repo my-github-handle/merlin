@@ -234,11 +234,18 @@ func extractTar(raw []byte, dest string) error {
 
 // Cleanup removes the scratch dir and staged blobs for a finished push.
 func (s *Store) Cleanup(ctx context.Context, mr ManifestRef, scratchDir string) error {
-	for _, dg := range mr.LayerDigests {
-		_ = s.blobs.Delete(ctx, blobKey(dg))
-	}
+	digests := append([]string{}, mr.LayerDigests...)
 	if mr.ConfigDigest != "" {
-		_ = s.blobs.Delete(ctx, blobKey(mr.ConfigDigest))
+		digests = append(digests, mr.ConfigDigest)
+	}
+	for _, dg := range digests {
+		// Release this push's reference; delete the bytes only when no other push
+		// still references the digest (content-addressed ref-counting). This avoids
+		// a finished push deleting a blob a concurrent push still needs (TODO I-3).
+		remaining, err := s.sessions.DecBlobRef(ctx, dg)
+		if err != nil || remaining <= 0 {
+			_ = s.blobs.Delete(ctx, blobKey(dg))
+		}
 	}
 	return os.RemoveAll(scratchDir)
 }

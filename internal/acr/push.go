@@ -10,6 +10,7 @@ import (
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/google/go-containerregistry/pkg/v1/static"
 	"github.com/google/go-containerregistry/pkg/v1/types"
 )
 
@@ -91,6 +92,24 @@ func (p *acrPusher) PushManifest(ctx context.Context, raw []byte, mediaType, tar
 		mt = types.OCIManifestSchema1
 	}
 	return remote.Put(ref, rawManifest{raw: raw, mediaType: mt},
+		remote.WithAuth(p.auth),
+		remote.WithContext(ctx))
+}
+
+// PushBlob uploads a single content blob (config or layer) to repo, addressed by
+// its content digest. static.NewLayer wraps the raw bytes so go-containerregistry
+// uploads them verbatim; the registry verifies the digest. This seeds the blobs an
+// attestation manifest references so the subsequent PushManifest can succeed.
+func (p *acrPusher) PushBlob(ctx context.Context, raw []byte, mediaType, repo string) error {
+	ref, err := name.ParseReference(repo)
+	if err != nil {
+		return fmt.Errorf("parse repo %q: %w", repo, err)
+	}
+	mt := types.MediaType(mediaType)
+	if mt == "" {
+		mt = types.OCILayer
+	}
+	return remote.WriteLayer(ref.Context(), static.NewLayer(raw, mt),
 		remote.WithAuth(p.auth),
 		remote.WithContext(ctx))
 }
