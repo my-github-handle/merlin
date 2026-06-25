@@ -158,9 +158,18 @@ func repoFromV2Path(path string) string {
 	return strings.TrimSuffix(path, "/")
 }
 
-// validatedIdentity re-validates the bearer token and returns the identity.
+// validatedIdentity returns the caller identity from the bearer token, using the
+// same dual-mode logic as authenticate(): verify Merlin's registry token when
+// registry auth is active, otherwise validate the Entra token (legacy path).
 func (h *Handler) validatedIdentity(r *http.Request) (auth.Identity, bool) {
 	bearer := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if h.regIssuer != nil {
+		subject, _, err := h.regIssuer.Verify(bearer)
+		if err != nil {
+			return auth.Identity{}, false
+		}
+		return auth.Identity{Subject: subject}, true
+	}
 	identity, err := h.auth.Validate(r.Context(), bearer)
 	if err != nil {
 		return auth.Identity{}, false

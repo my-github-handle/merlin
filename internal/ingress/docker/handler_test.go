@@ -101,3 +101,46 @@ func TestV2VerifiesRegistryToken(t *testing.T) {
 		t.Errorf("non-registry token: code = %d, want 401", rec3.Code)
 	}
 }
+
+func TestValidatedIdentityRegistryMode(t *testing.T) {
+	iss := auth.NewRegistryTokenIssuer([]byte("s"), "merlin", time.Minute)
+	h := NewHandler(fakeAuth{ok: true}, nil, nil, nil, "myreg.azurecr.io", nil)
+	h.SetRegistryAuth(iss, "https://merlin.example/token", "merlin")
+
+	tok, _, _ := iss.Mint("alice@x", "repository:app:push,pull")
+	r := httptest.NewRequest(http.MethodGet, "/v2/", nil)
+	r.Header.Set("Authorization", "Bearer "+tok)
+	id, ok := h.validatedIdentity(r)
+	if !ok || id.Subject != "alice@x" {
+		t.Errorf("registry-mode identity: ok=%v subject=%q, want true/alice@x", ok, id.Subject)
+	}
+
+	// a raw (non-registry) token must NOT yield an identity under registry auth
+	r2 := httptest.NewRequest(http.MethodGet, "/v2/", nil)
+	r2.Header.Set("Authorization", "Bearer not-a-registry-token")
+	if _, ok := h.validatedIdentity(r2); ok {
+		t.Error("raw token must not yield identity under registry auth")
+	}
+}
+
+func TestRepoFromV2Path(t *testing.T) {
+	tests := []struct {
+		path string
+		want string
+	}{
+		{"/v2/", ""},                                                     // bare /v2/ → ""
+		{"/v2/app/manifests/v1", "app"},                                  // manifest path
+		{"/v2/foo/bar/blobs/uploads/uuid", "foo/bar"},                    // multi-level repo
+		{"/v2/repo/blobs/sha256:abc", "repo"},                            // blob path
+		{"/v2/deep/path/structure/manifests/tag", "deep/path/structure"}, // deep repo
+		{"/v2/simple", "simple"},                                         // repo name only
+		{"/v2/trailing/", "trailing"},                                    // repo with trailing slash
+	}
+
+	for _, tc := range tests {
+		got := repoFromV2Path(tc.path)
+		if got != tc.want {
+			t.Errorf("repoFromV2Path(%q) = %q, want %q", tc.path, got, tc.want)
+		}
+	}
+}
