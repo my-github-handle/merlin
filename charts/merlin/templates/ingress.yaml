@@ -1,0 +1,29 @@
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "merlin.fullname" . }}
+  labels: {{- include "merlin.labels" . | nindent 4 }}
+  annotations: {{- toYaml .Values.ingress.annotations | nindent 4 }}
+  # IMPORTANT: For nginx ingress, large layer uploads require unlimited body size.
+  # Add the following annotation via .Values.ingress.annotations:
+  #   nginx.ingress.kubernetes.io/proxy-body-size: "0"
+  # Without this, large docker push operations will be truncated and fail.
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  tls:
+    - hosts: [{{ .Values.ingress.host | quote }}]
+      secretName: {{ .Values.ingress.tlsSecretName }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "merlin.fullname" . }}
+                port: { number: {{ .Values.service.port }} }
+{{- end }}
