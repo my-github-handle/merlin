@@ -21,6 +21,13 @@ spec:
         - name: merlin
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            # Defense-in-depth for a security gate: scratch is an emptyDir, so the
+            # root filesystem can be read-only; Merlin needs no extra capabilities.
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           ports:
             - name: v2
               containerPort: 5000
@@ -31,6 +38,10 @@ spec:
               value: production
             - name: MERLIN_CONFIG
               value: /etc/merlin/config.yaml
+            # readOnlyRootFilesystem=true means trivy cannot use its default
+            # ~/.cache/trivy; point its cache at the writable emptyDir below.
+            - name: TRIVY_CACHE_DIR
+              value: /var/cache/trivy
             {{- if .Values.externalSecrets.enabled }}
             # CRITICAL: ClickHouse password injection via secretKeyRef.
             # The ConfigMap renders clickhouse_dsn with the literal ${CLICKHOUSE_PASSWORD} placeholder.
@@ -57,6 +68,8 @@ spec:
               readOnly: true
             - name: scratch
               mountPath: {{ .Values.merlin.staging.scratchDir }}
+            - name: trivy-cache
+              mountPath: /var/cache/trivy
           # TODO: Add a real /healthz endpoint for HTTP probes.
           # Current state: /v2/ returns 401 (auth required), which fails HTTP 200 probes.
           # TCP socket probes work around this by checking the port is listening.
@@ -81,4 +94,6 @@ spec:
           configMap:
             name: {{ include "merlin.fullname" . }}-config
         - name: scratch
+          emptyDir: {}
+        - name: trivy-cache
           emptyDir: {}
