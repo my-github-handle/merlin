@@ -12,11 +12,12 @@ type Runner interface {
 	Scan(ctx context.Context, ociPath string) (Report, error)
 }
 
-// Policy is the Trivy vulnerability-scan policy.
+// Policy is the Trivy vulnerability-scan policy. It is stateless across calls:
+// each Evaluate carries its findings back through the returned Verdict, so the
+// same Policy is safe to use from concurrent gates.
 type Policy struct {
-	runner     Runner
-	threshold  string
-	lastReport Report
+	runner    Runner
+	threshold string
 }
 
 // severityRank orders severities so we can compare against a threshold.
@@ -31,15 +32,6 @@ func New(runner Runner, threshold string) *Policy {
 
 func (p *Policy) Name() string { return "trivy" }
 
-// LastReport returns the most recent scan report (findings + DB version).
-func (p *Policy) LastReport() Report { return p.lastReport }
-
-// ReportedFindings implements policy.FindingsReporter.
-func (p *Policy) ReportedFindings() []policy.Finding { return p.lastReport.Findings }
-
-// ScannerDBVersion implements policy.FindingsReporter.
-func (p *Policy) ScannerDBVersion() string { return p.lastReport.DBVersion }
-
 func (p *Policy) Evaluate(ctx context.Context, img policy.StagedImage) (policy.Verdict, error) {
 	if img.OCIPath == "" {
 		return policy.Verdict{}, fmt.Errorf("trivy scan: empty OCI path for image")
@@ -48,7 +40,6 @@ func (p *Policy) Evaluate(ctx context.Context, img policy.StagedImage) (policy.V
 	if err != nil {
 		return policy.Verdict{}, fmt.Errorf("trivy scan: %w", err)
 	}
-	p.lastReport = rep
 	min := severityRank[p.threshold]
 	var reasons []string
 	for _, f := range rep.Findings {
@@ -62,8 +53,10 @@ func (p *Policy) Evaluate(ctx context.Context, img policy.StagedImage) (policy.V
 			reasons = append(reasons, fmt.Sprintf("%s (%s) in %s %s", f.CVE, f.Severity, f.Pkg, f.Version))
 		}
 	}
-	if len(reasons) > 0 {
-		return policy.Verdict{Passed: false, Reasons: reasons}, nil
-	}
-	return policy.Verdict{Passed: true}, nil
+	return policy.Verdict{
+		Passed:           len(reasons) == 0,
+		Reasons:          reasons,
+		Findings:         rep.Findings,
+		ScannerDBVersion: rep.DBVersion,
+	}, nil
 }

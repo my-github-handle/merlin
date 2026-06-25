@@ -61,18 +61,18 @@ func TestEnginePolicyErrorIsBlockingInfraFailure(t *testing.T) {
 	}
 }
 
-func TestEngineCollectsFindingsFromReporter(t *testing.T) {
+func TestEngineCollectsFindingsFromVerdict(t *testing.T) {
 	findings := []Finding{
 		{CVE: "CVE-2023-1234", Severity: "CRITICAL", Pkg: "libssl", Version: "1.0.0"},
 		{CVE: "CVE-2023-5678", Severity: "HIGH", Pkg: "curl", Version: "7.1.0"},
 	}
 	e := NewEngine(
 		staticPolicy{name: "baseline", verdict: Verdict{Passed: true}},
-		&findingsReporterPolicy{
-			staticPolicy: staticPolicy{name: "trivy", verdict: Verdict{Passed: true}},
-			findings:     findings,
-			dbVersion:    "db-2023-12-01",
-		},
+		staticPolicy{name: "trivy", verdict: Verdict{
+			Passed:           true,
+			Findings:         findings,
+			ScannerDBVersion: "db-2023-12-01",
+		}},
 	)
 	res, err := e.Run(context.Background(), StagedImage{})
 	if err != nil {
@@ -97,11 +97,12 @@ func TestEngineCollectsFindingsOnBothPassAndFail(t *testing.T) {
 		{CVE: "CVE-2023-9999", Severity: "CRITICAL", Pkg: "zlib", Version: "1.2.3"},
 	}
 	e := NewEngine(
-		&findingsReporterPolicy{
-			staticPolicy: staticPolicy{name: "trivy", verdict: Verdict{Passed: false, Reasons: []string{"blocking CVE"}}},
-			findings:     findings,
-			dbVersion:    "db-2024-01-01",
-		},
+		staticPolicy{name: "trivy", verdict: Verdict{
+			Passed:           false,
+			Reasons:          []string{"blocking CVE"},
+			Findings:         findings,
+			ScannerDBVersion: "db-2024-01-01",
+		}},
 	)
 	res, err := e.Run(context.Background(), StagedImage{})
 	if err != nil {
@@ -118,7 +119,7 @@ func TestEngineCollectsFindingsOnBothPassAndFail(t *testing.T) {
 	}
 }
 
-func TestEnginePolicyWithoutFindingsReporter(t *testing.T) {
+func TestEnginePolicyWithoutFindings(t *testing.T) {
 	e := NewEngine(
 		staticPolicy{name: "baseline", verdict: Verdict{Passed: true}},
 		staticPolicy{name: "distro", verdict: Verdict{Passed: true}},
@@ -131,19 +132,9 @@ func TestEnginePolicyWithoutFindingsReporter(t *testing.T) {
 		t.Error("expected Passed=true")
 	}
 	if len(res.Findings) != 0 {
-		t.Errorf("findings = %d, want 0 (no policy implements FindingsReporter)", len(res.Findings))
+		t.Errorf("findings = %d, want 0 (no verdict carries findings)", len(res.Findings))
 	}
 	if res.TrivyDBVersion != "" {
 		t.Errorf("TrivyDBVersion = %q, want empty string", res.TrivyDBVersion)
 	}
 }
-
-// findingsReporterPolicy is a test double implementing FindingsReporter.
-type findingsReporterPolicy struct {
-	staticPolicy
-	findings  []Finding
-	dbVersion string
-}
-
-func (f *findingsReporterPolicy) ReportedFindings() []Finding { return f.findings }
-func (f *findingsReporterPolicy) ScannerDBVersion() string    { return f.dbVersion }

@@ -58,9 +58,33 @@ INSERT INTO vulnerability_findings
 	return batch.Send()
 }
 
+// Close closes the ClickHouse writer connection.
+func (c *clickhouseWriter) Close() error {
+	if c.conn != nil {
+		return c.conn.Close()
+	}
+	return nil
+}
+
 // Reader runs reverse-lookup queries against ClickHouse.
 type Reader struct {
 	conn driver.Conn
+}
+
+// NewClickHouseReader connects to ClickHouse for read-only queries.
+func NewClickHouseReader(dsn string) (*Reader, error) {
+	opts, err := clickhouse.ParseDSN(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("parse clickhouse dsn: %w", err)
+	}
+	conn, err := clickhouse.Open(opts)
+	if err != nil {
+		return nil, fmt.Errorf("open clickhouse: %w", err)
+	}
+	if err := conn.Ping(context.Background()); err != nil {
+		return nil, fmt.Errorf("ping clickhouse: %w", err)
+	}
+	return &Reader{conn: conn}, nil
 }
 
 // ImagesByCVE (A): which image digests contained a given CVE.
@@ -137,6 +161,14 @@ func (r *Reader) FindingsByPush(ctx context.Context, pushID string) ([]policy.Fi
 		out = append(out, f)
 	}
 	return out, rows.Err()
+}
+
+// Close closes the ClickHouse reader connection.
+func (r *Reader) Close() error {
+	if r.conn != nil {
+		return r.conn.Close()
+	}
+	return nil
 }
 
 func nowFn() time.Time { return time.Now() }

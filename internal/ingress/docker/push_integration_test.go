@@ -84,11 +84,10 @@ func TestPushGoodUBIForwarded(t *testing.T) {
 		t.Errorf("assembled os-release = %q, want it to contain ID=rhel", gotOSR)
 	}
 	req := router.GateRequest{Source: "docker", Image: img, Target: "myreg.azurecr.io/app:v1"}
-	if err := h.router.Gate(ctx, req, h.outcome); err != nil {
-		t.Fatalf("gate: %v", err)
-	}
-	if h.outcome.Last().StatusCode != 201 {
-		t.Errorf("status = %d, want 201 (summary=%q)", h.outcome.Last().StatusCode, h.outcome.Last().Summary)
+	res, gateErr := h.router.Gate(ctx, req)
+	d, _ := h.outcome.Apply(ctx, req, res, gateErr)
+	if d.StatusCode != 201 {
+		t.Errorf("status = %d, want 201 (summary=%q)", d.StatusCode, d.Summary)
 	}
 	if len(fp.Pushed) != 1 {
 		t.Errorf("expected forward to ACR, pushed=%v", fp.Pushed)
@@ -115,11 +114,11 @@ func TestPushCriticalCVERejected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := h.router.Gate(ctx, router.GateRequest{Image: img, Target: "myreg.azurecr.io/app:v1"}, h.outcome); err != nil {
-		t.Fatalf("gate: %v", err)
-	}
-	if h.outcome.Last().StatusCode != 400 {
-		t.Errorf("status = %d, want 400", h.outcome.Last().StatusCode)
+	req := router.GateRequest{Image: img, Target: "myreg.azurecr.io/app:v1"}
+	res, gateErr := h.router.Gate(ctx, req)
+	d, _ := h.outcome.Apply(ctx, req, res, gateErr)
+	if d.StatusCode != 400 {
+		t.Errorf("status = %d, want 400", d.StatusCode)
 	}
 	if len(fp.Pushed) != 0 {
 		t.Error("must not forward a rejected image")
@@ -145,11 +144,11 @@ func TestPushAlpineRejectedByBasePolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := h.router.Gate(ctx, router.GateRequest{Image: img, Target: "myreg.azurecr.io/app:v1"}, h.outcome); err != nil {
-		t.Fatalf("gate: %v", err)
-	}
-	if h.outcome.Last().StatusCode != 400 {
-		t.Errorf("status = %d, want 400 (alpine base)", h.outcome.Last().StatusCode)
+	req := router.GateRequest{Image: img, Target: "myreg.azurecr.io/app:v1"}
+	res, gateErr := h.router.Gate(ctx, req)
+	d, _ := h.outcome.Apply(ctx, req, res, gateErr)
+	if d.StatusCode != 400 {
+		t.Errorf("status = %d, want 400 (alpine base)", d.StatusCode)
 	}
 	if len(fp.Pushed) != 0 {
 		t.Error("must not forward a non-approved base image")

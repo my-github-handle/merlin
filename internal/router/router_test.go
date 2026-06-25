@@ -8,19 +8,6 @@ import (
 	"github.com/merlin-gate/merlin/internal/policy"
 )
 
-type recordingOutcome struct {
-	res     policy.Result
-	gateErr error
-	called  bool
-}
-
-func (o *recordingOutcome) Apply(_ context.Context, _ GateRequest, res policy.Result, gateErr error) error {
-	o.called = true
-	o.res = res
-	o.gateErr = gateErr
-	return nil
-}
-
 type passPolicy struct{}
 
 func (passPolicy) Name() string { return "p" }
@@ -35,31 +22,26 @@ func (errPolicy) Evaluate(context.Context, policy.StagedImage) (policy.Verdict, 
 	return policy.Verdict{}, errors.New("scan crashed")
 }
 
-func TestGatePassHandedToOutcome(t *testing.T) {
+func TestGateReturnsPassingResult(t *testing.T) {
 	r := New(policy.NewEngine(passPolicy{}))
-	o := &recordingOutcome{}
-	if err := r.Gate(context.Background(), GateRequest{Source: "docker"}, o); err != nil {
+	res, err := r.Gate(context.Background(), GateRequest{Source: "docker"})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if !o.called || !o.res.Passed {
-		t.Errorf("outcome not called with passing result: %+v", o)
+	if !res.Passed {
+		t.Errorf("expected passing result, got %+v", res)
 	}
 }
 
-func TestGateInfraErrorHandedToOutcome(t *testing.T) {
+func TestGateReturnsInfraError(t *testing.T) {
 	r := New(policy.NewEngine(errPolicy{}))
-	o := &recordingOutcome{}
-	// Gate must NOT surface the engine's infra error to its caller; it hands the
-	// error to the outcome adapter, which decides the response. Gate returns
-	// whatever the outcome returns (nil here), so the error must arrive via
-	// o.gateErr, not as Gate's return value.
-	if err := r.Gate(context.Background(), GateRequest{Source: "docker"}, o); err != nil {
-		t.Fatalf("Gate should return the outcome's result (nil here), not the gate error: %v", err)
+	// Gate returns the engine's infra error directly to the caller (the handler),
+	// which decides the response. The result must not pass on an infra error.
+	res, err := r.Gate(context.Background(), GateRequest{Source: "docker"})
+	if err == nil {
+		t.Fatal("expected infra error from Gate")
 	}
-	if o.gateErr == nil {
-		t.Error("expected gateErr to be passed to outcome")
-	}
-	if o.res.Passed {
+	if res.Passed {
 		t.Error("result should not pass on infra error")
 	}
 }

@@ -13,9 +13,13 @@ type StagedImage struct {
 }
 
 // Verdict is a single policy's decision. Zero value is a fail (Passed=false).
+// Findings and ScannerDBVersion carry per-evaluation scan data back to the
+// engine so it can be aggregated into Result without any shared policy state.
 type Verdict struct {
-	Passed  bool
-	Reasons []string
+	Passed           bool
+	Reasons          []string
+	Findings         []Finding
+	ScannerDBVersion string
 }
 
 // Finding is one vulnerability detected during scanning.
