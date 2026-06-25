@@ -7,7 +7,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/merlin ./cmd/merlin
 
 # Trivy binary source (option b: copy static trivy binary from official image)
-FROM aquasec/trivy:latest AS trivy
+FROM aquasec/trivy:0.71.2 AS trivy
 
 FROM registry.c3.ai/c3.ai/chainguard-base-fips:latest-202602172225
 # Chainguard base already runs as nonroot (uid 65532) and ships CA certs.
