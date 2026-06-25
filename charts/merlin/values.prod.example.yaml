@@ -1,0 +1,153 @@
+# Production values example for Merlin Helm chart
+# This file contains PLACEHOLDER values - replace them with actual values before deploying.
+
+# Container image configuration
+image:
+  # REQUIRED: Azure Container Registry repository URL
+  # Example: myacr.azurecr.io/merlin
+  repository: "<acr-name>.azurecr.io/merlin"  # REQUIRED: Replace <acr-name> with your ACR name
+  # REQUIRED: Image tag (typically a git commit SHA)
+  tag: "<git-sha>"  # REQUIRED: Replace with actual image tag
+  pullPolicy: IfNotPresent
+
+replicaCount: 2
+
+# ServiceAccount with AKS Workload Identity
+serviceAccount:
+  create: true
+  name: merlin
+  # REQUIRED: Client ID of the Entra (AAD) application or managed identity
+  # Get this from: az ad sp list --display-name <your-app-name> --query "[0].appId" -o tsv
+  workloadIdentityClientID: "<entra-app-client-id>"  # REQUIRED: Replace with Entra app client ID
+
+podLabels:
+  azure.workload.identity/use: "true"
+
+service:
+  type: ClusterIP
+  port: 5000
+
+metrics:
+  port: 9090
+
+# Ingress configuration for docker push/pull traffic
+ingress:
+  enabled: true
+  # REQUIRED: Ingress class (nginx, azure-application-gateway, etc.)
+  className: "nginx"  # REQUIRED: Replace with your ingress controller class
+  # REQUIRED: Hostname for Merlin registry
+  # Example: merlin.example.com
+  host: "merlin.example.com"  # REQUIRED: Replace with your domain
+  # REQUIRED: Name of the TLS secret containing the certificate for the host
+  # Either pre-created or provisioned via cert-manager
+  tlsSecretName: "merlin-tls"  # REQUIRED: Replace with your TLS secret name
+  annotations:
+    # IMPORTANT: Allow large docker layer uploads (disable size limit)
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+    # Optional: cert-manager annotation for automatic TLS certificate provisioning
+    # cert-manager.io/cluster-issuer: "letsencrypt-prod"
+
+# HorizontalPodAutoscaler
+hpa:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+# External Secrets Operator configuration
+externalSecrets:
+  enabled: true
+  secretStoreRef:
+    # REQUIRED: Name of the SecretStore or ClusterSecretStore
+    name: "azure-keyvault-store"  # REQUIRED: Replace with your SecretStore name
+    kind: ClusterSecretStore
+  refreshInterval: 1h
+  # REQUIRED: Map external secret keys to Kubernetes secret keys
+  data:
+    # REQUIRED: ClickHouse password from external secret backend
+    - secretKey: clickhouse-password
+      remoteKey: "merlin-clickhouse-password"  # REQUIRED: Replace with your key in Azure Key Vault or backend
+
+# Merlin application configuration
+merlin:
+  # Trivy security scanning settings
+  trivy:
+    severityThreshold: CRITICAL
+
+  # Base image allowlist (Merlin will reject images not based on these)
+  baseImage:
+    allowedIDs: [rhel, wolfi, chainguard]
+
+  # Azure Container Registry configuration
+  acr:
+    # REQUIRED: ACR registry URL (without https://)
+    # Example: myacr.azurecr.io
+    registry: "<acr-name>.azurecr.io"  # REQUIRED: Replace with your ACR name
+
+  # Entra (Azure AD) authentication configuration
+  auth:
+    # REQUIRED: Entra tenant issuer URL
+    # Format: https://sts.windows.net/<tenant-id>/
+    issuer: "https://sts.windows.net/<tenant-id>/"  # REQUIRED: Replace <tenant-id>
+    # REQUIRED: Audience claim expected in tokens (typically the ACR client ID or custom audience)
+    audience: "<acr-client-id-or-audience>"  # REQUIRED: Replace with audience value
+    # REQUIRED: JWKS URL for Entra token validation
+    # Format: https://login.microsoftonline.com/<tenant-id>/discovery/v2.0/keys
+    jwksURL: "https://login.microsoftonline.com/<tenant-id>/discovery/v2.0/keys"  # REQUIRED: Replace <tenant-id>
+
+  # Staging storage configuration (Azure Blob)
+  staging:
+    # REQUIRED: Azure Blob Storage account URL
+    # Format: https://<storage-account>.blob.core.windows.net
+    blobAccountURL: "https://<storage-account>.blob.core.windows.net"  # REQUIRED: Replace <storage-account>
+    # REQUIRED: Blob container name for staged layers
+    blobContainer: "merlin-staging"  # REQUIRED: Replace if using a different container name
+    # valkeyAddr is auto-derived from the Valkey operator service if left empty
+    valkeyAddr: ""
+    scratchDir: /tmp/merlin
+    scanPoolSize: 4
+
+  # Audit logging configuration (ClickHouse)
+  audit:
+    # clickhouseDSN is auto-derived from the ClickHouse operator service if left empty
+    clickhouseDSN: ""
+    queueSize: 1024
+
+  # Server configuration
+  server:
+    addr: ":5000"
+    metricsAddr: ":9090"
+    maxUploadBytes: 2147483648  # 2GB
+    gateTimeout: 5m
+
+# Valkey (Redis replacement) via Hyperspike operator
+valkey:
+  enabled: true
+  nodes: 1  # Set to 3+ for HA cluster
+  tls: false  # In-cluster plaintext is acceptable
+  storage:
+    size: 8Gi
+    # REQUIRED: StorageClass for persistent volumes (empty string = default StorageClass)
+    storageClassName: "managed-premium"  # REQUIRED: Replace with your StorageClass or "" for default
+
+# ClickHouse via Altinity operator
+clickhouse:
+  enabled: true
+  user: merlin
+  # Password is NOT set here - it comes from the ExternalSecret (clickhouse-password key)
+  shardsCount: 1
+  replicasCount: 1
+  storage:
+    dataSize: 20Gi
+    logSize: 1Gi
+    # REQUIRED: StorageClass for persistent volumes (empty string = default StorageClass)
+    storageClassName: "managed-premium"  # REQUIRED: Replace with your StorageClass or "" for default
+
+# Resource limits and requests
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits:
+    cpu: "2"
+    memory: 2Gi

@@ -1,0 +1,88 @@
+Merlin has been installed successfully!
+
+===================================
+🚀 Getting Started
+===================================
+
+1. DOCKER LOGIN (via Entra/Azure AD):
+
+   Authenticate using your Azure Active Directory credentials:
+
+   $ az login
+   $ az acr login --name <your-acr-name>
+   $ docker login {{ .Values.ingress.host }}
+
+   The docker login will use your Entra token to authenticate with Merlin.
+
+2. DOCKER PUSH (gated by Merlin):
+
+   Tag and push your image through Merlin:
+
+   $ docker tag myimage:latest {{ .Values.ingress.host }}/<repository>:<tag>
+   $ docker push {{ .Values.ingress.host }}/<repository>:<tag>
+
+   Merlin will:
+   - Verify your image is based on UBI, Wolfi, or Chainguard
+   - Scan for CRITICAL vulnerabilities using Trivy
+   - Reject images that fail the gate
+   - Forward approved images to {{ .Values.merlin.acr.registry }}
+
+3. DOCKER PULL:
+
+   Pull approved images from Merlin:
+
+   $ docker pull {{ .Values.ingress.host }}/<repository>:<tag>
+
+4. QUERY SCAN REPORTS:
+
+   Retrieve audit reports for a push operation:
+
+   $ PUSH_ID="<push-id-from-docker-push-output>"
+   $ curl -H "Authorization: Bearer $(az account get-access-token --query accessToken -o tsv)" \
+          https://{{ .Values.ingress.host }}/reports/$PUSH_ID
+
+   The report includes:
+   - Gate decision (allow/reject) and reason
+   - Base image check results
+   - Trivy scan findings (vulnerabilities)
+   - Timestamp and duration
+
+5. PROMETHEUS METRICS (cluster-internal):
+
+   Metrics are exposed at:
+
+   http://{{ include "merlin.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.metrics.port }}/metrics
+
+   Configure your Prometheus to scrape this endpoint (ServiceMonitor not included).
+
+===================================
+⚠️  Gate Policy Reminder
+===================================
+
+Merlin will REJECT images that:
+- Are NOT based on Red Hat UBI, Wolfi, or Chainguard base images
+- Contain CRITICAL severity vulnerabilities (Trivy scan)
+
+Approved images are forwarded to the upstream ACR: {{ .Values.merlin.acr.registry }}
+
+===================================
+📊 Monitoring & Troubleshooting
+===================================
+
+Check pod status:
+  $ kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/name={{ include "merlin.name" . }}
+
+View logs:
+  $ kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/name={{ include "merlin.name" . }} -f
+
+Check ingress:
+  $ kubectl get ingress -n {{ .Release.Namespace }} {{ include "merlin.fullname" . }}
+
+===================================
+📚 Documentation
+===================================
+
+For more information, see the chart README:
+  charts/merlin/README.md
+
+Known limitations and Phase 6 punch-list items are documented in the README.
