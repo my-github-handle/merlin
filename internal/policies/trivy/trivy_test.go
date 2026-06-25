@@ -84,36 +84,45 @@ func TestEvaluateEmptyOCIPathIsError(t *testing.T) {
 	}
 }
 
-func TestReportedFindings(t *testing.T) {
+// TestVerdictCarriesFindings verifies the verdict carries the scan's findings
+// and DB version back to the caller (request-local), replacing the old shared
+// ReportedFindings()/ScannerDBVersion() state.
+func TestVerdictCarriesFindings(t *testing.T) {
 	findings := []policy.Finding{
 		{CVE: "CVE-2024-1111", Severity: "CRITICAL", Pkg: "curl", Version: "8.0.0"},
 		{CVE: "CVE-2024-2222", Severity: "HIGH", Pkg: "nginx", Version: "1.24.0"},
 	}
 	r := fakeRunner{report: Report{Findings: findings, DBVersion: "db-2024-06-23"}}
 	p := New(r, "HIGH")
-	_, err := p.Evaluate(context.Background(), policy.StagedImage{OCIPath: "/oci"})
+	v, err := p.Evaluate(context.Background(), policy.StagedImage{OCIPath: "/oci"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	reported := p.ReportedFindings()
-	if len(reported) != 2 {
-		t.Errorf("ReportedFindings() = %d, want 2", len(reported))
+	if len(v.Findings) != 2 {
+		t.Errorf("Verdict.Findings = %d, want 2", len(v.Findings))
 	}
-	if reported[0].CVE != "CVE-2024-1111" {
-		t.Errorf("first finding CVE = %q, want CVE-2024-1111", reported[0].CVE)
+	if v.Findings[0].CVE != "CVE-2024-1111" {
+		t.Errorf("first finding CVE = %q, want CVE-2024-1111", v.Findings[0].CVE)
 	}
-	dbv := p.ScannerDBVersion()
-	if dbv != "db-2024-06-23" {
-		t.Errorf("ScannerDBVersion() = %q, want db-2024-06-23", dbv)
+	if v.ScannerDBVersion != "db-2024-06-23" {
+		t.Errorf("Verdict.ScannerDBVersion = %q, want db-2024-06-23", v.ScannerDBVersion)
 	}
 }
 
-func TestReportedFindingsBeforeEvaluate(t *testing.T) {
-	p := New(fakeRunner{}, "CRITICAL")
-	if len(p.ReportedFindings()) != 0 {
-		t.Error("ReportedFindings() before Evaluate should return empty slice")
+// TestVerdictFindingsOnPass verifies findings are reported even when the scan
+// passes (below threshold), so the audit trail/summary still has them.
+func TestVerdictFindingsOnPass(t *testing.T) {
+	r := fakeRunner{report: Report{Findings: []policy.Finding{
+		{CVE: "CVE-2", Severity: "HIGH", Pkg: "zlib", Version: "1.2.0"},
+	}, DBVersion: "db-x"}}
+	v, err := New(r, "CRITICAL").Evaluate(context.Background(), policy.StagedImage{OCIPath: "/oci"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if p.ScannerDBVersion() != "" {
-		t.Error("ScannerDBVersion() before Evaluate should return empty string")
+	if !v.Passed {
+		t.Fatalf("expected pass, reasons=%v", v.Reasons)
+	}
+	if len(v.Findings) != 1 || v.ScannerDBVersion != "db-x" {
+		t.Errorf("passing verdict should still carry findings/db: %+v", v)
 	}
 }

@@ -3,6 +3,8 @@ package router
 import (
 	"context"
 	"errors"
+
+	"github.com/merlin-gate/merlin/internal/policy"
 )
 
 // ErrSaturated is returned when the scan pool has no free slot before the
@@ -24,12 +26,14 @@ func NewPool(r *Router, size int) *Pool {
 }
 
 // Gate acquires a slot (respecting ctx), runs the gate, then releases the slot.
-func (p *Pool) Gate(ctx context.Context, req GateRequest, outcome Outcome) error {
+// It returns the gate result and any infra error, or ErrSaturated if no slot
+// became free before the context deadline.
+func (p *Pool) Gate(ctx context.Context, req GateRequest) (policy.Result, error) {
 	select {
 	case p.slots <- struct{}{}:
 		defer func() { <-p.slots }()
-		return p.router.Gate(ctx, req, outcome)
+		return p.router.Gate(ctx, req)
 	case <-ctx.Done():
-		return ErrSaturated
+		return policy.Result{}, ErrSaturated
 	}
 }

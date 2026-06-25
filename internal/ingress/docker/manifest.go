@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/merlin-gate/merlin/internal/policy"
 	"github.com/merlin-gate/merlin/internal/router"
 	"github.com/merlin-gate/merlin/internal/staging"
 )
@@ -100,8 +101,12 @@ func (h *Handler) handleManifest(w http.ResponseWriter, r *http.Request) {
 		Target:   target,
 	}
 
-	// Gate via pool or direct router
-	var gateErr error
+	// Gate via pool or direct router. The gate returns the result (and any infra
+	// error) request-locally; the handler then builds the Decision via the Outcome.
+	var (
+		res     policy.Result
+		gateErr error
+	)
 	if h.pool != nil {
 		timeout := h.gateTimeout
 		if timeout == 0 {
@@ -109,21 +114,22 @@ func (h *Handler) handleManifest(w http.ResponseWriter, r *http.Request) {
 		}
 		gctx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
-		gateErr = h.pool.Gate(gctx, req, h.outcome)
+		res, gateErr = h.pool.Gate(gctx, req)
 	} else {
-		gateErr = h.router.Gate(ctx, req, h.outcome)
+		res, gateErr = h.router.Gate(ctx, req)
 	}
 
-	// Handle ErrSaturated → 503 (returned before outcome.Apply is called)
+	// Handle ErrSaturated → 503 (before the Outcome runs)
 	if errors.Is(gateErr, router.ErrSaturated) {
 		w.Header().Set("Retry-After", "5")
 		http.Error(w, "scan pool saturated, retry later", http.StatusServiceUnavailable)
 		return
 	}
 
-	// Other gate errors are handled by outcome.Apply (rendered as infra error 500)
-	// Render outcome (outcome.Apply was already called inside Gate)
-	d := h.outcome.Last()
+	// Build the Decision from the gate result. Other infra errors are rendered as
+	// 500/502 by Apply. An ACR push failure surfaces as a returned error (502);
+	// the Decision still carries the right status to render, so it is ignored here.
+	d, _ := h.outcome.Apply(ctx, req, res, gateErr)
 	if d.ReportURL != "" {
 		w.Header().Set("X-Merlin-Scan-Report-URL", d.ReportURL)
 	}

@@ -15,11 +15,6 @@ type GateRequest struct {
 	Target   string
 }
 
-// Outcome acts on a gate verdict in the way appropriate to the source.
-type Outcome interface {
-	Apply(ctx context.Context, req GateRequest, res policy.Result, gateErr error) error
-}
-
 // Router drives the trigger-agnostic gate core.
 type Router struct {
 	engine *policy.Engine
@@ -30,10 +25,10 @@ func New(engine *policy.Engine) *Router {
 	return &Router{engine: engine}
 }
 
-// Gate runs the policy engine and hands the result (and any infra error) to the
-// outcome adapter. The infra error is surfaced via the outcome, not returned, so
-// the adapter decides how to respond to the client.
-func (r *Router) Gate(ctx context.Context, req GateRequest, outcome Outcome) error {
-	res, gateErr := r.engine.Run(ctx, req.Image)
-	return outcome.Apply(ctx, req, res, gateErr)
+// Gate runs the policy engine and returns the gate result together with any
+// infra error from the engine. The router is outcome-agnostic: the caller (the
+// source-specific handler) decides how to act on the result. Returning the
+// result by value keeps the decision request-local — there is no shared state.
+func (r *Router) Gate(ctx context.Context, req GateRequest) (policy.Result, error) {
+	return r.engine.Run(ctx, req.Image)
 }
