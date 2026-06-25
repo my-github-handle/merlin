@@ -67,6 +67,9 @@ externalSecrets:
     # REQUIRED: ClickHouse password from external secret backend
     - secretKey: clickhouse-password
       remoteKey: "merlin-clickhouse-password"  # REQUIRED: Replace with your key in Azure Key Vault or backend
+    # REQUIRED: Registry token secret for signing/verifying Docker registry tokens
+    - secretKey: registry-token-secret
+      remoteKey: "merlin-registry-token-secret"  # REQUIRED: Replace with your key in Azure Key Vault or backend
 
 # Merlin application configuration
 merlin:
@@ -94,6 +97,13 @@ merlin:
     # REQUIRED: JWKS URL for Entra token validation
     # Format: https://login.microsoftonline.com/<tenant-id>/discovery/v2.0/keys
     jwksURL: "https://login.microsoftonline.com/<tenant-id>/discovery/v2.0/keys"  # REQUIRED: Replace <tenant-id>
+    # REQUIRED: Entra tenant ID for Docker registry token endpoint
+    # Format: <tenant-id> (same as issuer/jwksURL)
+    tenantID: "<tenant-id>"  # REQUIRED: Replace <tenant-id>
+    # Service name for Docker registry tokens (default: merlin)
+    service: merlin
+    # Registry token TTL (default: 5m)
+    registryTokenTTL: "5m"
 
   # Staging storage configuration (Azure Blob)
   staging:
@@ -119,6 +129,9 @@ merlin:
     metricsAddr: ":9090"
     maxUploadBytes: 2147483648  # 2GB
     gateTimeout: 5m
+    # REQUIRED: External URL for Docker registry (used in token endpoint realm)
+    # Format: https://merlin.<host>
+    externalURL: "https://merlin.example.com"  # REQUIRED: Replace with your Merlin domain
 
 # Valkey (Redis replacement) via Hyperspike operator
 valkey:

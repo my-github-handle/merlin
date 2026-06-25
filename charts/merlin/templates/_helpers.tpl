@@ -49,6 +49,19 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
+Gate selector labels: selectorLabels PLUS a component discriminator. Used ONLY by the
+Merlin Deployment (pod template + matchLabels) and the Service selector, so the Service
+selects ONLY Merlin's gate pods. The Valkey/ClickHouse operator CRs carry merlin.labels
+(name+instance) but NOT this component, so their pods are not matched by the gate Service.
+(Without this, operators propagate name=merlin/instance=merlin onto DB pods and the
+Service load-balances gate traffic onto ClickHouse/Valkey -> intermittent 502/connection refused.)
+*/}}
+{{- define "merlin.gateSelectorLabels" -}}
+{{ include "merlin.selectorLabels" . }}
+app.kubernetes.io/component: gate
+{{- end }}
+
+{{/*
 Valkey address helper.
 If .Values.merlin.staging.valkeyAddr is set, use it.
 Otherwise, default to the operator-CR generated service: <fullname>-valkey:6379

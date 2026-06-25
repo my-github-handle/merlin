@@ -20,3 +20,4 @@ vendor/
 .smoke.
 values.smoke.yaml
 values.opsadmin.yaml
+watch_*

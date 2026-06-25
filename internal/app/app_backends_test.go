@@ -14,7 +14,15 @@ func prodConfig() config.Config {
 		Trivy:     config.TrivyConfig{SeverityThreshold: "CRITICAL"},
 		BaseImage: config.BaseImageConfig{AllowedIDs: []string{"rhel", "wolfi", "chainguard"}},
 		ACR:       config.ACRConfig{Registry: "myreg.azurecr.io"},
-		Auth:      config.AuthConfig{Issuer: "https://issuer", Audience: "api://merlin", JWKSURL: "https://login.microsoftonline.com/common/discovery/keys"},
+		Auth: config.AuthConfig{
+			Issuer:              "https://issuer",
+			Audience:            "api://merlin",
+			JWKSURL:             "https://login.microsoftonline.com/common/discovery/keys",
+			TenantID:            "tenant-id",
+			Service:             "merlin",
+			RegistryTokenSecret: "test-secret-32-bytes-minimum!!",
+			RegistryTokenTTL:    "5m",
+		},
 		Staging: config.StagingConfig{
 			BlobAccountURL: "https://myaccount.blob.core.windows.net",
 			BlobContainer:  "staging",
@@ -29,6 +37,7 @@ func prodConfig() config.Config {
 		Server: config.ServerConfig{
 			Addr:           ":5000",
 			MetricsAddr:    ":9090",
+			ExternalURL:    "https://merlin.example.com",
 			MaxUploadBytes: 1 << 30,
 			GateTimeout:    "5m",
 		},
@@ -68,6 +77,16 @@ func TestBuildWithBackends_ValidatesRequiredFields(t *testing.T) {
 			name:      "missing ACR.Registry",
 			mutate:    func(c *config.Config) { c.ACR.Registry = "" },
 			wantField: "Registry",
+		},
+		{
+			name:      "missing RegistryTokenSecret",
+			mutate:    func(c *config.Config) { c.Auth.RegistryTokenSecret = "" },
+			wantField: "RegistryTokenSecret",
+		},
+		{
+			name:      "missing ExternalURL",
+			mutate:    func(c *config.Config) { c.Server.ExternalURL = "" },
+			wantField: "ExternalURL",
 		},
 	}
 

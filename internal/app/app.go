@@ -79,6 +79,12 @@ func BuildWithBackends(ctx context.Context, cfg config.Config) (*http.Server, *h
 	if cfg.Auth.JWKSURL == "" {
 		return nil, nil, nil, fmt.Errorf("production config: Auth.JWKSURL is required")
 	}
+	if cfg.Auth.RegistryTokenSecret == "" {
+		return nil, nil, nil, fmt.Errorf("production config: Auth.RegistryTokenSecret is required")
+	}
+	if cfg.Server.ExternalURL == "" {
+		return nil, nil, nil, fmt.Errorf("production config: Server.ExternalURL is required")
+	}
 	if cfg.Staging.BlobAccountURL == "" {
 		return nil, nil, nil, fmt.Errorf("production config: Staging.BlobAccountURL is required")
 	}
@@ -119,6 +125,14 @@ func BuildWithBackends(ctx context.Context, cfg config.Config) (*http.Server, *h
 		return fail(fmt.Errorf("create JWKS keyfunc: %w", err))
 	}
 	authn := auth.NewJWTAuthenticator(cfg.Auth.Issuer, cfg.Auth.Audience, keyfunc)
+
+	// Registry token issuer + client credentials validator
+	ttl, err := time.ParseDuration(cfg.Auth.RegistryTokenTTL)
+	if err != nil {
+		return fail(fmt.Errorf("parse registry_token_ttl: %w", err))
+	}
+	issuer := auth.NewRegistryTokenIssuer([]byte(cfg.Auth.RegistryTokenSecret), cfg.Auth.Service, ttl)
+	cc := auth.NewEntraClientCredentials(cfg.Auth.TenantID, cfg.Auth.Audience+"/.default")
 
 	// Staging: Azure Blob + Valkey session store
 	blobStore, err := staging.NewAzureBlobStoreWithCredential(cfg.Staging.BlobAccountURL, cfg.Staging.BlobContainer)
@@ -184,6 +198,11 @@ func BuildWithBackends(ctx context.Context, cfg config.Config) (*http.Server, *h
 	if cfg.Staging.ScratchDir != "" {
 		handler.SetScratchBaseDir(cfg.Staging.ScratchDir)
 	}
+
+	// Wire Docker registry auth: token endpoint + challenge
+	th := &dockeringress.TokenHandler{Authn: authn, ClientCreds: cc, Issuer: issuer}
+	handler.SetRegistryAuth(issuer, cfg.Server.ExternalURL+"/token", cfg.Auth.Service)
+	handler.SetTokenHandler(th)
 
 	// Metrics
 	reg := prometheus.NewRegistry()

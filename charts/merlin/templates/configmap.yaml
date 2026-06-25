@@ -16,6 +16,10 @@ data:
       issuer: {{ .Values.merlin.auth.issuer | quote }}
       audience: {{ .Values.merlin.auth.audience | quote }}
       jwks_url: {{ .Values.merlin.auth.jwksURL | quote }}
+      tenant_id: {{ .Values.merlin.auth.tenantID | quote }}
+      service: {{ .Values.merlin.auth.service | quote }}
+      registry_token_secret: "${REGISTRY_TOKEN_SECRET}"
+      registry_token_ttl: {{ .Values.merlin.auth.registryTokenTTL | quote }}
     staging:
       blob_account_url: {{ .Values.merlin.staging.blobAccountURL | quote }}
       blob_container: {{ .Values.merlin.staging.blobContainer | quote }}
@@ -35,3 +39,4 @@ data:
       metrics_addr: {{ .Values.merlin.server.metricsAddr | quote }}
       max_upload_bytes: {{ .Values.merlin.server.maxUploadBytes }}
       gate_timeout: {{ .Values.merlin.server.gateTimeout | quote }}
+      external_url: {{ .Values.merlin.server.externalURL | quote }}
