@@ -41,3 +41,25 @@ func TestV2BaseReturns200WhenAuthenticated(t *testing.T) {
 		t.Errorf("code = %d, want 200", rec.Code)
 	}
 }
+
+func TestManifestPathRejectsNonPUT(t *testing.T) {
+	h := NewHandler(fakeAuth{ok: true}, nil, nil, nil, "myreg.azurecr.io", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v2/repo/manifests/sha256:abc", nil)
+	req.Header.Set("Authorization", "Bearer good")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("GET to manifest path: code = %d, want 405", rec.Code)
+	}
+}
+
+func TestUploadPathRejectsGET(t *testing.T) {
+	h := NewHandler(fakeAuth{ok: true}, nil, nil, nil, "myreg.azurecr.io", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v2/repo/blobs/uploads/session-id", nil)
+	req.Header.Set("Authorization", "Bearer good")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("GET to upload path: code = %d, want 405", rec.Code)
+	}
+}

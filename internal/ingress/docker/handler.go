@@ -41,8 +41,16 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case strings.Contains(r.URL.Path, "/blobs/uploads/"):
+		if r.Method != http.MethodPost && r.Method != http.MethodPatch && r.Method != http.MethodPut {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
 		h.handleUpload(w, r)
 	case strings.Contains(r.URL.Path, "/manifests/"):
+		if r.Method != http.MethodPut {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
 		h.handleManifest(w, r)
 	default:
 		http.NotFound(w, r)
