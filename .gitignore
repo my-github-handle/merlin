@@ -11,3 +11,8 @@ vendor/
 /tmp/
 *.local.yaml
 .superpowers/
+
+# Node (not part of this Go project; guard against accidental commits)
+/node_modules/
+/package.json
+/package-lock.json
