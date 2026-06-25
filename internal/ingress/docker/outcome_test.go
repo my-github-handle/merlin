@@ -53,6 +53,39 @@ func TestOutcomeInfraErrorIs500(t *testing.T) {
 	}
 }
 
+// TestOutcomeReportURLMatchesRecordedPushID verifies the report URL is keyed by
+// the SAME push_id recorded in the audit store, so GET /reports/<id> resolves.
+// (Previously the URL used the image digest while findings were stored by push_id,
+// and the digest was empty — so the report endpoint could never find the scan.)
+func TestOutcomeReportURLMatchesRecordedPushID(t *testing.T) {
+	fp := &acr.FakePusher{}
+	spy := &spyRecorder{}
+	o := &Outcome{
+		Pusher:        fp,
+		ReportBaseURL: "https://merlin/reports",
+		Recorder:      spy,
+		IDGen:         func() string { return "push-xyz" },
+	}
+	req := router.GateRequest{Target: "myreg.azurecr.io/app:v1", Image: policy.StagedImage{OCIPath: "/oci"}}
+	d, err := o.Apply(context.Background(), req, policy.Result{Passed: true}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "https://merlin/reports/push-xyz"; d.ReportURL != want {
+		t.Errorf("ReportURL = %q, want %q", d.ReportURL, want)
+	}
+	if len(spy.calls) != 1 {
+		t.Fatalf("expected 1 recorded decision, got %d", len(spy.calls))
+	}
+	recordedID := spy.calls[0].decision.PushID
+	if recordedID != "push-xyz" {
+		t.Errorf("recorded PushID = %q, want push-xyz", recordedID)
+	}
+	if d.ReportURL != "https://merlin/reports/"+recordedID {
+		t.Errorf("report URL %q must end with recorded push_id %q", d.ReportURL, recordedID)
+	}
+}
+
 func TestOutcomePushFailureIs502(t *testing.T) {
 	fp := &acr.FakePusher{Err: errors.New("acr unreachable")}
 	o := &Outcome{Pusher: fp, ReportBaseURL: "https://merlin/reports"}

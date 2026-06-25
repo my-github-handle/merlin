@@ -43,33 +43,39 @@ type Outcome struct {
 // the decision (and findings) to the audit store if a Recorder is configured. The
 // Decision is returned to the caller, not stored on the Outcome.
 func (o *Outcome) Apply(ctx context.Context, req router.GateRequest, res policy.Result, gateErr error) (Decision, error) {
-	reportURL := fmt.Sprintf("%s/%s", o.ReportBaseURL, req.Image.Digest)
+	// The report is served by GET /reports/<push_id> from the audit store (findings
+	// are keyed by push_id), so the report URL MUST use the same push_id that the
+	// decision is recorded under — not the image digest. Generate it once here and
+	// thread it through both the URL and the audit record.
+	idGen := o.IDGen
+	if idGen == nil {
+		idGen = generatePushID
+	}
+	pushID := idGen()
+	reportURL := fmt.Sprintf("%s/%s", o.ReportBaseURL, pushID)
+
 	if gateErr != nil {
-		o.recordDecision(ctx, req, res, false)
+		o.recordDecision(ctx, pushID, req, res, false)
 		return Decision{StatusCode: 500, Summary: "scan could not complete", ReportURL: reportURL, InfraError: true}, nil
 	}
 	summary := router.SummarizeResult(res)
 	if !res.Passed {
-		o.recordDecision(ctx, req, res, false)
+		o.recordDecision(ctx, pushID, req, res, false)
 		return Decision{StatusCode: 400, Summary: summary, ReportURL: reportURL}, nil
 	}
 	if err := o.Pusher.Push(ctx, req.Image.OCIPath, req.Target); err != nil {
-		o.recordDecision(ctx, req, res, false)
+		o.recordDecision(ctx, pushID, req, res, false)
 		return Decision{StatusCode: 502, Summary: "passed but ACR push failed", ReportURL: reportURL, InfraError: true}, fmt.Errorf("acr push: %w", err)
 	}
-	o.recordDecision(ctx, req, res, true)
+	o.recordDecision(ctx, pushID, req, res, true)
 	return Decision{StatusCode: 201, Summary: summary, ReportURL: reportURL}, nil
 }
 
-// recordDecision records the gate decision to the audit store if Recorder is configured.
-func (o *Outcome) recordDecision(ctx context.Context, req router.GateRequest, res policy.Result, passed bool) {
+// recordDecision records the gate decision to the audit store if Recorder is
+// configured, under the given pushID (shared with the report URL).
+func (o *Outcome) recordDecision(ctx context.Context, pushID string, req router.GateRequest, res policy.Result, passed bool) {
 	if o.Recorder == nil {
 		return
-	}
-
-	idGen := o.IDGen
-	if idGen == nil {
-		idGen = generatePushID
 	}
 
 	// Collect failed policies and their reasons
@@ -83,7 +89,7 @@ func (o *Outcome) recordDecision(ctx context.Context, req router.GateRequest, re
 	}
 
 	decision := audit.Decision{
-		PushID:         idGen(),
+		PushID:         pushID,
 		Repo:           req.Image.Repo,
 		Tag:            req.Image.Tag,
 		Digest:         req.Image.Digest,
