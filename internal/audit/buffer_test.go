@@ -89,3 +89,10 @@ func TestRecordFlushConcurrentNoPanic(t *testing.T) {
 	wg.Wait()
 	// reaching here without panic is the assertion
 }
+
+func TestCloseIsIdempotent(t *testing.T) {
+	a := NewAuditor(&spyWriter{}, 8, func(error) {})
+	a.Record(context.Background(), Decision{PushID: "p"}, nil)
+	a.Close()
+	a.Close() // second close must not panic
+}

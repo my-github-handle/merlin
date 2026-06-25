@@ -15,10 +15,11 @@ type job struct {
 
 // Auditor wraps a Writer with an async, non-blocking buffered queue.
 type Auditor struct {
-	w        Writer
-	queue    chan job
-	onDrop   func(error)
-	workerWg sync.WaitGroup // tracks worker goroutine
+	w         Writer
+	queue     chan job
+	onDrop    func(error)
+	workerWg  sync.WaitGroup // tracks worker goroutine
+	closeOnce sync.Once      // guards close(a.queue) against double-close
 }
 
 // NewAuditor starts a background worker draining into w. If the queue is full or
@@ -61,7 +62,8 @@ func (a *Auditor) Record(_ context.Context, d Decision, findings []policy.Findin
 }
 
 // Flush blocks until all jobs enqueued before this call have been processed.
-// (Flush itself may block; Record never does.) Safe to call concurrently with Record.
+// Record never blocks; Flush may block. Neither Record nor Flush may be called concurrently with Close —
+// the caller must ensure all producers have stopped before calling Close.
 func (a *Auditor) Flush(ctx context.Context) {
 	marker := make(chan struct{})
 	select {
@@ -74,9 +76,10 @@ func (a *Auditor) Flush(ctx context.Context) {
 	}
 }
 
-// Close stops the worker after draining.
-// Must NOT be called concurrently with Record (closes the queue; concurrent Record panics).
+// Close stops the worker after draining. The caller MUST ensure no Record or Flush calls
+// are in flight or will start during/after Close; Close closes the internal queue, so a concurrent
+// send would panic. Close is idempotent.
 func (a *Auditor) Close() {
-	close(a.queue)
+	a.closeOnce.Do(func() { close(a.queue) })
 	a.workerWg.Wait()
 }
