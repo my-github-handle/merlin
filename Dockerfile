@@ -1,10 +1,16 @@
 # syntax=docker/dockerfile:1
-FROM golang:1.26 AS build
+# Build on the NATIVE builder arch (no QEMU emulation), then cross-compile the Go
+# binary to the target arch via GOARCH. Emulating `go mod download`/`go build` under
+# QEMU is unstable (SIGSEGV in flate); Go cross-compiles cleanly instead.
+FROM --platform=$BUILDPLATFORM golang:1.26 AS build
+ARG TARGETOS
+ARG TARGETARCH
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/merlin ./cmd/merlin
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
+    go build -trimpath -ldflags="-s -w" -o /out/merlin ./cmd/merlin
 
 # Trivy binary source (option b: copy static trivy binary from official image)
 FROM aquasec/trivy:0.71.2 AS trivy

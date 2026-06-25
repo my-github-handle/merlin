@@ -17,3 +17,6 @@ vendor/
 /package.json
 /package-lock.json
 /.serena/
+.smoke.
+values.smoke.yaml
+values.opsadmin.yaml

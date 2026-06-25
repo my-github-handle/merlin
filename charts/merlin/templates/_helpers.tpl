@@ -57,7 +57,7 @@ Otherwise, default to the operator-CR generated service: <fullname>-valkey:6379
 {{- if .Values.merlin.staging.valkeyAddr }}
 {{- .Values.merlin.staging.valkeyAddr }}
 {{- else }}
-{{- printf "%s-valkey:6379" (include "merlin.fullname" .) }}
+{{- printf "%s-valkey.%s.svc.cluster.local:6379" (include "merlin.fullname" .) .Release.Namespace }}
 {{- end }}
 {{- end }}
 
@@ -68,12 +68,14 @@ Otherwise, build from operator-CR defaults with ${CLICKHOUSE_PASSWORD} placehold
 The literal ${CLICKHOUSE_PASSWORD} is NOT expanded by Helm — it stays in the rendered YAML.
 At runtime, Merlin's config loader expands it from the CLICKHOUSE_PASSWORD env var
 (injected by the Deployment from the ESO secret). This keeps the password out of the ConfigMap.
-IMPORTANT: The operator Service name format must be confirmed in Phase 8; adjust if needed.
+Service name: the Altinity operator creates `clickhouse-<chi-name>` (chi-name = <fullname>-ch);
+we use the namespace-qualified FQDN so resolution does not depend on the pod's DNS search list
+(verified live: the bare name is NXDOMAIN, the .svc.cluster.local FQDN resolves).
 */}}
 {{- define "merlin.clickhouseDSN" -}}
 {{- if .Values.merlin.audit.clickhouseDSN }}
 {{- .Values.merlin.audit.clickhouseDSN }}
 {{- else }}
-{{- printf "clickhouse://%s:${CLICKHOUSE_PASSWORD}@clickhouse-%s-ch:9000/merlin" .Values.clickhouse.user (include "merlin.fullname" .) }}
+{{- printf "clickhouse://%s:${CLICKHOUSE_PASSWORD}@clickhouse-%s-ch.%s.svc.cluster.local:9000/merlin" .Values.clickhouse.user (include "merlin.fullname" .) .Release.Namespace }}
 {{- end }}
 {{- end }}

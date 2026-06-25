@@ -14,6 +14,12 @@ spec:
         azure.workload.identity/use: "true"
     spec:
       serviceAccountName: {{ .Values.serviceAccount.name }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- range . }}
+        - name: {{ . }}
+        {{- end }}
+      {{- end }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -51,15 +57,18 @@ spec:
             # keeping the root filesystem truly read-only for defense-in-depth.
             - name: TMPDIR
               value: {{ .Values.merlin.staging.scratchDir | quote }}
-            {{- if .Values.externalSecrets.enabled }}
+            {{- if or .Values.externalSecrets.enabled .Values.clickhouse.passwordSecret }}
             # CRITICAL: ClickHouse password injection via secretKeyRef.
             # The ConfigMap renders clickhouse_dsn with the literal ${CLICKHOUSE_PASSWORD} placeholder.
             # At runtime, Merlin's config loader expands this env var via os.Expand.
             # This keeps the password out of the ConfigMap (no secret in git/etcd plaintext).
+            # Decoupled from externalSecrets: the secret may be ESO-synced OR provided
+            # directly (clickhouse.passwordSecret names an existing Secret); either way
+            # the env MUST be injected or config expansion fails closed at startup.
             - name: CLICKHOUSE_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "merlin.fullname" . }}-secrets
+                  name: {{ .Values.clickhouse.passwordSecret | default (printf "%s-secrets" (include "merlin.fullname" .)) }}
                   key: clickhouse-password
             {{- end }}
           {{- if .Values.externalSecrets.enabled }}

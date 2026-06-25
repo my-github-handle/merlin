@@ -2,6 +2,7 @@ image:
   repository: ""   # set in Phase 8 (e.g. <acr>.azurecr.io/merlin)
   tag: ""          # set in Phase 8
   pullPolicy: IfNotPresent
+  pullSecrets: []  # names of dockerconfigjson Secrets for a private registry, e.g. [devregistryc3ai]
 replicaCount: 2
 serviceAccount:
   create: true
@@ -57,12 +58,21 @@ valkey:
   enabled: true
   nodes: 1                # standalone for first deploy; >1 for HA
   tls: false             # in-cluster; Merlin connects plaintext within the namespace
+  anonymousAuth: true    # staging session state is ephemeral; no password needed
+  clusterDomain: cluster.local
+  prometheus: false      # operator metrics exporter off for first deploy
+  serviceMonitor: false  # no Prometheus-Operator ServiceMonitor
+  volumePermissions: false
   storage: { size: 8Gi, storageClassName: "" }   # "" = default StorageClass
   # If enabled: false, set merlin.staging.valkeyAddr to an external address.
 # ClickHouse via Altinity clickhouse-operator (clickhouse.altinity.com/v1 CHI CR).
 clickhouse:
   enabled: true
   user: merlin
+  # Name of an existing Secret holding key `clickhouse-password`. Leave empty to use
+  # the ESO-synced `<fullname>-secrets` (externalSecrets.enabled). Set this to inject
+  # the password env when providing the secret WITHOUT ESO (e.g. manual/sealed-secret).
+  passwordSecret: ""
   # password supplied via ESO secret (clickhouse-password key); referenced by
   # k8s_secret_password in the CHI users config — NOT stored in values/ConfigMap.
   shardsCount: 1

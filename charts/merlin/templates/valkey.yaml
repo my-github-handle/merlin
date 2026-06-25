@@ -5,8 +5,16 @@ metadata:
   name: {{ include "merlin.fullname" . }}-valkey
   labels: {{- include "merlin.labels" . | nindent 4 }}
 spec:
+  # Field names verified against the hyperspike.io/v1 CRD (valkey-operator v0.0.61)
+  # via `kubectl explain valkey.spec`. anonymousAuth / clusterDomain / prometheus /
+  # serviceMonitor / volumePermissions are REQUIRED by the CRD schema.
   nodes: {{ .Values.valkey.nodes }}
   tls: {{ .Values.valkey.tls }}
+  anonymousAuth: {{ .Values.valkey.anonymousAuth }}
+  clusterDomain: {{ .Values.valkey.clusterDomain | quote }}
+  prometheus: {{ .Values.valkey.prometheus }}
+  serviceMonitor: {{ .Values.valkey.serviceMonitor }}
+  volumePermissions: {{ .Values.valkey.volumePermissions }}
   storage:
     spec:
       accessModes: [ReadWriteOnce]
@@ -17,6 +25,3 @@ spec:
       storageClassName: {{ . }}
       {{- end }}
 {{- end }}
-# NOTE(Phase 8): Confirm the exact hyperspike.io/v1 Valkey field names against the installed
-# operator CRD via `kubectl explain valkey.spec`. The fields above (nodes, tls, storage.spec)
-# reflect the operator's documented shape; adapt if field names differ.
