@@ -32,9 +32,13 @@ type ACRConfig struct {
 }
 
 type AuthConfig struct {
-	Issuer   string `yaml:"issuer"`
-	Audience string `yaml:"audience"`
-	JWKSURL  string `yaml:"jwks_url"`
+	Issuer              string `yaml:"issuer"`
+	Audience            string `yaml:"audience"`
+	JWKSURL             string `yaml:"jwks_url"`
+	TenantID            string `yaml:"tenant_id"`
+	Service             string `yaml:"service"`
+	RegistryTokenSecret string `yaml:"registry_token_secret"`
+	RegistryTokenTTL    string `yaml:"registry_token_ttl"`
 }
 
 type StagingConfig struct {
@@ -100,6 +104,12 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Server.GateTimeout == "" {
 		c.Server.GateTimeout = "5m"
+	}
+	if c.Auth.Service == "" {
+		c.Auth.Service = "merlin"
+	}
+	if c.Auth.RegistryTokenTTL == "" {
+		c.Auth.RegistryTokenTTL = "5m"
 	}
 }
 

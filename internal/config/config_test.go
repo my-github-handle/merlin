@@ -222,3 +222,49 @@ audit:
 		t.Errorf("clickhouse_dsn = %q, want %q", cfg.Audit.ClickHouseDSN, want)
 	}
 }
+
+func TestLoadAppliesTokenEndpointDefaults(t *testing.T) {
+	p := writeTemp(t, `
+acr:
+  registry: r.azurecr.io
+auth:
+  issuer: https://issuer
+  audience: api://merlin
+base_image:
+  allowed_ids: [rhel]
+`)
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Auth.Service != "merlin" {
+		t.Errorf("Service default = %q, want merlin", cfg.Auth.Service)
+	}
+	if cfg.Auth.RegistryTokenTTL != "5m" {
+		t.Errorf("RegistryTokenTTL default = %q, want 5m", cfg.Auth.RegistryTokenTTL)
+	}
+}
+
+func TestLoadReadsTokenEndpointFields(t *testing.T) {
+	p := writeTemp(t, `
+acr:
+  registry: r.azurecr.io
+auth:
+  issuer: https://issuer
+  audience: api://merlin
+  tenant_id: my-tenant
+  service: myreg
+  registry_token_secret: shh
+  registry_token_ttl: 10m
+base_image:
+  allowed_ids: [rhel]
+`)
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Auth.TenantID != "my-tenant" || cfg.Auth.Service != "myreg" ||
+		cfg.Auth.RegistryTokenSecret != "shh" || cfg.Auth.RegistryTokenTTL != "10m" {
+		t.Errorf("token fields not read: %+v", cfg.Auth)
+	}
+}
