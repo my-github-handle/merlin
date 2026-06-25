@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -19,14 +18,46 @@ import (
 	"github.com/merlin-gate/merlin/internal/staging"
 )
 
-// dockerManifest is a minimal struct to extract referenced digests from a Docker/OCI manifest.
-type dockerManifest struct {
-	Config struct {
-		Digest string `json:"digest"`
-	} `json:"config"`
-	Layers []struct {
-		Digest string `json:"digest"`
-	} `json:"layers"`
+// forwardManifest pushes a non-filesystem manifest (image index or attestation) to
+// ACR verbatim, preserving its exact bytes so its content digest is unchanged. The
+// target ref mirrors how the client addressed it: by digest (sub-manifests, e.g. the
+// attestation) or by tag (the index). On success it echoes Docker-Content-Digest so
+// the docker client accepts the response.
+func (h *Handler) forwardManifest(w http.ResponseWriter, ctx context.Context, repo, ref string, raw []byte, mediaType string, kind manifestKind) {
+	sum := sha256.Sum256(raw)
+	digest := "sha256:" + hex.EncodeToString(sum[:])
+
+	// Address the manifest in ACR exactly as the client addressed it here: a
+	// digest ref (sha256:...) pushes by digest; anything else is a tag.
+	var target string
+	if strings.HasPrefix(ref, "sha256:") {
+		target = h.registry + "/" + repo + "@" + ref
+	} else {
+		target = h.registry + "/" + repo + ":" + ref
+	}
+
+	if err := h.outcome.Pusher.PushManifest(ctx, raw, mediaType, target); err != nil {
+		// An index whose gated image was rejected has no sub-manifest in ACR, so
+		// this PUT fails — that is the gate holding, not an internal fault. Surface
+		// it as a 400 so the push fails cleanly with the reason.
+		log.Printf("forward %s manifest %s -> %s failed: %v", kindName(kind), digest, target, err)
+		http.Error(w, fmt.Sprintf("manifest not published: %v", err), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Docker-Content-Digest", digest)
+	w.WriteHeader(http.StatusCreated)
+}
+
+// kindName renders a manifestKind for logs.
+func kindName(k manifestKind) string {
+	switch k {
+	case kindIndex:
+		return "index"
+	case kindAttestation:
+		return "attestation"
+	default:
+		return "image"
+	}
 }
 
 // handleManifest runs the gate on push completion and renders the Decision.
@@ -69,10 +100,20 @@ func (h *Handler) handleManifest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse manifest to extract referenced digests
-	var manifest dockerManifest
-	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+	// Classify the manifest. A buildx push sends not just the image manifest but
+	// also a SLSA attestation manifest (in-toto layers, no filesystem) and an image
+	// index referencing both. Those carry nothing scannable, so they are forwarded
+	// to ACR verbatim rather than run through the gate (which would tar-extract the
+	// non-filesystem layer and 500). The index PUT only succeeds once its referenced
+	// image manifest is already in ACR — i.e. only after that image passed the gate —
+	// so a rejected image cannot be published by reference.
+	manifest, kind, err := classifyManifest(manifestBytes)
+	if err != nil {
 		http.Error(w, fmt.Sprintf("invalid manifest JSON: %v", err), http.StatusBadRequest)
+		return
+	}
+	if kind == kindIndex || kind == kindAttestation {
+		h.forwardManifest(w, ctx, repo, ref, manifestBytes, manifest.MediaType, kind)
 		return
 	}
 

@@ -10,8 +10,9 @@ import (
 type FakePusher struct {
 	Err error
 
-	mu     sync.Mutex
-	Pushed []string
+	mu             sync.Mutex
+	Pushed         []string
+	PushedManifest []string // targets passed to PushManifest (verbatim forwards)
 }
 
 func (f *FakePusher) Push(_ context.Context, _, target string) error {
@@ -21,5 +22,15 @@ func (f *FakePusher) Push(_ context.Context, _, target string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.Pushed = append(f.Pushed, target)
+	return nil
+}
+
+func (f *FakePusher) PushManifest(_ context.Context, _ []byte, _ string, target string) error {
+	if f.Err != nil {
+		return f.Err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.PushedManifest = append(f.PushedManifest, target)
 	return nil
 }

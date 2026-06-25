@@ -123,6 +123,99 @@ func TestManifestPUTUBILayerAccepted(t *testing.T) {
 	}
 }
 
+// TestManifestPUTAttestationForwarded verifies a buildx SLSA attestation manifest
+// (in-toto layer, no filesystem) is forwarded to ACR verbatim — NOT run through the
+// gate (which would tar-extract the in-toto JSON and 500).
+func TestManifestPUTAttestationForwarded(t *testing.T) {
+	h, fp := buildIntegrationHandler(t, trivy.Report{}, 2)
+
+	attestation := map[string]interface{}{
+		"schemaVersion": 2,
+		"mediaType":     "application/vnd.oci.image.manifest.v1+json",
+		"config":        map[string]interface{}{"mediaType": "application/vnd.oci.image.config.v1+json", "digest": "sha256:b6"},
+		"layers": []map[string]interface{}{
+			{"mediaType": "application/vnd.in-toto+json", "digest": "sha256:a1"},
+		},
+	}
+	body, _ := json.Marshal(attestation)
+	// docker pushes the attestation by digest.
+	digest := dg(body)
+	req := httptest.NewRequest(http.MethodPut, "/v2/app/manifests/"+digest, bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer good")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Errorf("attestation PUT: status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("Docker-Content-Digest") != digest {
+		t.Errorf("Docker-Content-Digest = %q, want %q", rec.Header().Get("Docker-Content-Digest"), digest)
+	}
+	if len(fp.PushedManifest) != 1 {
+		t.Fatalf("expected 1 verbatim manifest forward, got %d", len(fp.PushedManifest))
+	}
+	// forwarded by digest, to the configured registry/repo
+	if want := "myreg.azurecr.io/app@" + digest; fp.PushedManifest[0] != want {
+		t.Errorf("forward target = %q, want %q", fp.PushedManifest[0], want)
+	}
+	// must NOT have been gated/assembled (no image push)
+	if len(fp.Pushed) != 0 {
+		t.Errorf("attestation must not go through the image gate, got Pushed=%v", fp.Pushed)
+	}
+}
+
+// TestManifestPUTIndexForwarded verifies an image index is forwarded to ACR verbatim.
+func TestManifestPUTIndexForwarded(t *testing.T) {
+	h, fp := buildIntegrationHandler(t, trivy.Report{}, 2)
+
+	index := map[string]interface{}{
+		"schemaVersion": 2,
+		"mediaType":     "application/vnd.oci.image.index.v1+json",
+		"manifests": []map[string]interface{}{
+			{"mediaType": "application/vnd.oci.image.manifest.v1+json", "digest": "sha256:fc"},
+		},
+	}
+	body, _ := json.Marshal(index)
+	// docker pushes the index by tag.
+	req := httptest.NewRequest(http.MethodPut, "/v2/app/manifests/2.13.25", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer good")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Errorf("index PUT: status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	if len(fp.PushedManifest) != 1 {
+		t.Fatalf("expected 1 verbatim manifest forward, got %d", len(fp.PushedManifest))
+	}
+	if want := "myreg.azurecr.io/app:2.13.25"; fp.PushedManifest[0] != want {
+		t.Errorf("forward target = %q, want %q (index pushed by tag)", fp.PushedManifest[0], want)
+	}
+}
+
+// TestManifestPUTIndexForwardFailureIs400 verifies that when forwarding fails
+// (e.g. the gated image was rejected so its sub-manifest is absent in ACR), the
+// push fails cleanly with 400 rather than publishing or 500ing.
+func TestManifestPUTIndexForwardFailureIs400(t *testing.T) {
+	h, fp := buildIntegrationHandler(t, trivy.Report{}, 2)
+	fp.Err = context.DeadlineExceeded // simulate ACR rejecting the index
+
+	index := map[string]interface{}{
+		"schemaVersion": 2,
+		"mediaType":     "application/vnd.oci.image.index.v1+json",
+		"manifests":     []map[string]interface{}{{"digest": "sha256:fc"}},
+	}
+	body, _ := json.Marshal(index)
+	req := httptest.NewRequest(http.MethodPut, "/v2/app/manifests/v1", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer good")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("failed index forward: status = %d, want 400", rec.Code)
+	}
+}
+
 // TestManifestPUTPoolSaturated tests that when the pool is saturated, the handler returns 503 + Retry-After.
 func TestManifestPUTPoolSaturated(t *testing.T) {
 	layer := layerWithOSID(t, "rhel")

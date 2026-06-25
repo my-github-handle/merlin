@@ -10,6 +10,7 @@ import (
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/google/go-containerregistry/pkg/v1/types"
 )
 
 type acrPusher struct {
@@ -60,6 +61,36 @@ func (p *acrPusher) Push(ctx context.Context, ociPath, target string) error {
 		return fmt.Errorf("no image in oci layout %s", ociPath)
 	}
 	return remote.Write(ref, img,
+		remote.WithAuth(p.auth),
+		remote.WithContext(ctx))
+}
+
+// rawManifest forwards a manifest (or index) to a registry verbatim, satisfying
+// go-containerregistry's remote.Taggable (RawManifest) + withMediaType so the
+// exact bytes — and thus the content digest — are preserved on the wire.
+type rawManifest struct {
+	raw       []byte
+	mediaType types.MediaType
+}
+
+func (m rawManifest) RawManifest() ([]byte, error)        { return m.raw, nil }
+func (m rawManifest) MediaType() (types.MediaType, error) { return m.mediaType, nil }
+
+// PushManifest uploads a raw manifest/index verbatim. The referenced sub-manifests
+// and blobs must already exist in the target registry (the registry rejects a
+// manifest whose references are absent); for an image index this is what enforces
+// gate ordering — a rejected image's manifest is never present, so its index PUT
+// fails rather than publishing an ungated image by reference.
+func (p *acrPusher) PushManifest(ctx context.Context, raw []byte, mediaType, target string) error {
+	ref, err := name.ParseReference(target)
+	if err != nil {
+		return fmt.Errorf("parse target %q: %w", target, err)
+	}
+	mt := types.MediaType(mediaType)
+	if mt == "" {
+		mt = types.OCIManifestSchema1
+	}
+	return remote.Put(ref, rawManifest{raw: raw, mediaType: mt},
 		remote.WithAuth(p.auth),
 		remote.WithContext(ctx))
 }

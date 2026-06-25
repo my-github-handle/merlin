@@ -3,7 +3,13 @@ package acr
 
 import "context"
 
-// Pusher uploads a local OCI layout to a target registry reference.
+// Pusher uploads images and raw manifests to a target registry reference.
 type Pusher interface {
+	// Push uploads a gated image from a local OCI layout to target.
 	Push(ctx context.Context, ociPath, target string) error
+	// PushManifest uploads a raw manifest (or image index) verbatim to target,
+	// preserving its exact bytes (and therefore its content digest). Used to
+	// forward buildx attestation manifests and image indexes that carry no
+	// scannable filesystem. mediaType is the manifest's own media type.
+	PushManifest(ctx context.Context, raw []byte, mediaType, target string) error
 }
