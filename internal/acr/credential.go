@@ -1,12 +1,13 @@
 package acr
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -20,6 +21,10 @@ import (
 type acrCredAuthenticator struct {
 	registry string
 	cred     *azidentity.DefaultAzureCredential
+
+	// Overridable for testing
+	exchangeURL string
+	httpClient  *http.Client
 
 	mu           sync.Mutex
 	cachedToken  string
@@ -49,48 +54,78 @@ func (a *acrCredAuthenticator) Authorization() (*authn.AuthConfig, error) {
 	}
 
 	// Step 2: Exchange AAD token for ACR refresh token
-	exchangeURL := fmt.Sprintf("https://%s/oauth2/exchange", a.registry)
-	reqBody := map[string]string{
-		"grant_type":   "access_token",
-		"service":      a.registry,
-		"access_token": token.Token,
-	}
-	reqJSON, err := json.Marshal(reqBody)
+	refreshToken, err := a.exchange(ctx, token.Token)
 	if err != nil {
-		return nil, fmt.Errorf("marshal exchange request: %w", err)
+		return nil, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, exchangeURL, bytes.NewReader(reqJSON))
-	if err != nil {
-		return nil, fmt.Errorf("create exchange request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
+	// Cache the token with the AAD token's expiry
+	a.cachedToken = refreshToken
+	a.cachedExpiry = token.ExpiresOn
 
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("exchange request: %w", err)
-	}
-	defer resp.Body.Close()
+	return &authn.AuthConfig{IdentityToken: refreshToken}, nil
+}
 
+// exchange performs the ACR token exchange with form encoding (FIX 1),
+// redacts error messages (FIX 2), and drains the response body (FIX 3).
+func (a *acrCredAuthenticator) exchange(ctx context.Context, aadToken string) (string, error) {
+	// Default to real ACR exchange URL if not set
+	exchangeURL := a.exchangeURL
+	if exchangeURL == "" {
+		exchangeURL = fmt.Sprintf("https://%s/oauth2/exchange", a.registry)
+	}
+
+	// FIX 1: Use form encoding, not JSON
+	form := url.Values{}
+	form.Set("grant_type", "access_token")
+	form.Set("service", a.registry)
+	form.Set("access_token", aadToken)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		exchangeURL,
+		strings.NewReader(form.Encode()))
+	if err != nil {
+		return "", fmt.Errorf("build acr exchange request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	client := a.httpClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("acr exchange request: %w", err)
+	}
+
+	// FIX 3: Drain body on defer so HTTP keep-alive connections are reused
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}()
+
+	// FIX 2: Do not leak response body into error messages
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("exchange failed: %s: %s", resp.Status, string(body))
+		return "", fmt.Errorf("acr token exchange failed: status %d", resp.StatusCode)
+	}
+
+	// FIX 3: Read body once into buffer, then unmarshal
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // cap 1MiB
+	if err != nil {
+		return "", fmt.Errorf("read acr exchange response: %w", err)
 	}
 
 	var exchangeResp struct {
 		RefreshToken string `json:"refresh_token"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&exchangeResp); err != nil {
-		return nil, fmt.Errorf("decode exchange response: %w", err)
+	if err := json.Unmarshal(raw, &exchangeResp); err != nil {
+		return "", fmt.Errorf("decode acr exchange response: %w", err)
 	}
 
 	if exchangeResp.RefreshToken == "" {
-		return nil, fmt.Errorf("empty refresh token in exchange response")
+		return "", fmt.Errorf("acr token exchange returned empty refresh_token")
 	}
 
-	// Cache the token with the AAD token's expiry
-	a.cachedToken = exchangeResp.RefreshToken
-	a.cachedExpiry = token.ExpiresOn
-
-	return &authn.AuthConfig{IdentityToken: exchangeResp.RefreshToken}, nil
+	return exchangeResp.RefreshToken, nil
 }
