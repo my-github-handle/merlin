@@ -2,7 +2,9 @@ package docker
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -244,4 +246,28 @@ func TestBlobUploadFullSequence(t *testing.T) {
 
 	// The blob is now stored and marked complete in staging.
 	// We trust CompleteBlob worked since it returned 201 without error.
+}
+
+func TestMonolithicPostUploadPersistsBlob(t *testing.T) {
+	st := staging.New(staging.NewMemoryBlobStore(), staging.NewMemorySessionStore(), func() string { return "u-mono" })
+	h := NewHandler(fakeAuth{ok: true}, st, nil, nil, "myreg.azurecr.io", nil)
+	body := []byte("monolithic-blob-bytes")
+	sum := sha256.Sum256(body)
+	dg := "sha256:" + hex.EncodeToString(sum[:])
+
+	// monolithic upload: POST .../uploads/?digest=<dg> with the full body
+	req := httptest.NewRequest(http.MethodPost, "/v2/app/blobs/uploads/?digest="+dg, bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer good")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("monolithic POST: code = %d, want 201", rec.Code)
+	}
+	if rec.Header().Get("Docker-Content-Digest") != dg {
+		t.Errorf("Docker-Content-Digest = %q, want %q", rec.Header().Get("Docker-Content-Digest"), dg)
+	}
+	// the blob must now be complete so a manifest referencing it assembles
+	if _, err := st.PutManifest(context.Background(), "app", "v1", []byte(`{}`), []string{dg}); err != nil {
+		t.Errorf("blob not persisted by monolithic POST: PutManifest err = %v", err)
+	}
 }

@@ -26,6 +26,23 @@ func (h *Handler) handleUpload(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("begin upload: %v", err), http.StatusInternalServerError)
 			return
 		}
+		// Monolithic upload: POST .../uploads/?digest=<d> with the full blob in the
+		// body completes the blob in a single request (common in docker/buildkit/
+		// containerd clients). Without this the blob is silently never stored and the
+		// later manifest PUT fails to assemble.
+		if digest := r.URL.Query().Get("digest"); digest != "" {
+			body := http.MaxBytesReader(w, r.Body, h.getMaxUploadBytes())
+			defer body.Close()
+			if err := h.store.CompleteBlob(ctx, uploadID, digest, body); err != nil {
+				// Digest mismatch / bad body is a client error.
+				http.Error(w, fmt.Sprintf("complete blob: %v", err), http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Location", fmt.Sprintf("/v2/%s/blobs/%s", repo, digest))
+			w.Header().Set("Docker-Content-Digest", digest)
+			w.WriteHeader(http.StatusCreated)
+			return
+		}
 		loc := fmt.Sprintf("/v2/%s/blobs/uploads/%s", repo, uploadID)
 		w.Header().Set("Location", loc)
 		w.Header().Set("Docker-Upload-UUID", uploadID)
