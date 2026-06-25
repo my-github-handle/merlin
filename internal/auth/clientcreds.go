@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // ClientCredentialsValidator validates an Entra client-id/secret via the OAuth2
@@ -27,9 +28,12 @@ type EntraClientCredentials struct {
 // (scope is typically "<audience>/.default").
 func NewEntraClientCredentials(tenantID, scope string) *EntraClientCredentials {
 	return &EntraClientCredentials{
-		tokenURL:   fmt.Sprintf("https://login.microsoftonline.com/%s/oauth2/v2.0/token", tenantID),
-		scope:      scope,
-		httpClient: http.DefaultClient,
+		tokenURL: fmt.Sprintf("https://login.microsoftonline.com/%s/oauth2/v2.0/token", tenantID),
+		scope:    scope,
+		// Dedicated client with a timeout so a hung Entra connection cannot tie up
+		// the /token handler goroutine indefinitely (the request context governs
+		// cancellation, but /token has no per-request deadline wired).
+		httpClient: &http.Client{Timeout: 15 * time.Second},
 	}
 }
 
