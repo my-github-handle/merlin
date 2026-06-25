@@ -180,6 +180,9 @@ func BuildWithBackends(ctx context.Context, cfg config.Config) (*http.Server, *h
 	handler.SetPool(pool)
 	handler.SetGateTimeout(gateTimeout)
 	handler.SetMaxUploadBytes(cfg.Server.MaxUploadBytes)
+	if cfg.Staging.ScratchDir != "" {
+		handler.SetScratchBaseDir(cfg.Staging.ScratchDir)
+	}
 
 	// Metrics
 	reg := prometheus.NewRegistry()

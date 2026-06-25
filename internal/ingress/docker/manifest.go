@@ -91,7 +91,7 @@ func (h *Handler) handleManifest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Assemble the image
-	scratchDir, err := os.MkdirTemp("", "merlin-assemble-*")
+	scratchDir, err := os.MkdirTemp(h.scratchBaseDir, "merlin-assemble-*")
 	if err != nil {
 		http.Error(w, fmt.Sprintf("create scratch dir: %v", err), http.StatusInternalServerError)
 		return

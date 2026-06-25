@@ -42,6 +42,15 @@ spec:
             # ~/.cache/trivy; point its cache at the writable emptyDir below.
             - name: TRIVY_CACHE_DIR
               value: /var/cache/trivy
+            # TMPDIR: Point trivy's layer extraction to the scratch emptyDir mount.
+            # With readOnlyRootFilesystem=true, /tmp is read-only, so trivy's
+            # temporary layer extraction during scanning would fail. Setting TMPDIR
+            # to the scratch mount ensures trivy writes to a writable location.
+            # This also ensures all image assembly scratch dirs (via SetScratchBaseDir)
+            # and trivy's temporary operations write to the same writable emptyDir,
+            # keeping the root filesystem truly read-only for defense-in-depth.
+            - name: TMPDIR
+              value: {{ .Values.merlin.staging.scratchDir | quote }}
             {{- if .Values.externalSecrets.enabled }}
             # CRITICAL: ClickHouse password injection via secretKeyRef.
             # The ConfigMap renders clickhouse_dsn with the literal ${CLICKHOUSE_PASSWORD} placeholder.
