@@ -40,7 +40,7 @@ merlin:
   trivy: { severityThreshold: CRITICAL }
   baseImage: { allowedIDs: [rhel, wolfi, chainguard] }
   acr: { registry: "" }                 # required: <acr>.azurecr.io
-  auth: { issuer: "", audience: "", jwksURL: "" }   # required (Entra)
+  auth: { issuer: "", audience: "", jwksURL: "", tenantID: "", service: merlin, registryTokenTTL: "5m" }   # required (Entra)
   staging:
     blobAccountURL: ""                  # required: https://<acct>.blob.core.windows.net
     blobContainer: merlin-staging
@@ -53,6 +53,7 @@ merlin:
     metricsAddr: ":9090"
     maxUploadBytes: 2147483648
     gateTimeout: 5m
+    externalURL: ""
 # Valkey via Hyperspike valkey-operator (hyperspike.io/v1 Valkey CR).
 valkey:
   enabled: true

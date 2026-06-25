@@ -70,6 +70,16 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.clickhouse.passwordSecret | default (printf "%s-secrets" (include "merlin.fullname" .)) }}
                   key: clickhouse-password
+            # REGISTRY_TOKEN_SECRET: Shared secret for signing/verifying Docker registry tokens.
+            # The ConfigMap renders registry_token_secret with the literal ${REGISTRY_TOKEN_SECRET} placeholder.
+            # At runtime, Merlin's config loader expands this env var via os.Expand.
+            # This keeps the secret out of the ConfigMap (no secret in git/etcd plaintext).
+            # The secret key is registry-token-secret in the same Secret as the ClickHouse password.
+            - name: REGISTRY_TOKEN_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.clickhouse.passwordSecret | default (printf "%s-secrets" (include "merlin.fullname" .)) }}
+                  key: registry-token-secret
             {{- end }}
           {{- if .Values.externalSecrets.enabled }}
           # envFrom makes all ESO-synced secret keys available as env vars.
