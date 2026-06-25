@@ -27,6 +27,18 @@ type dockerManifest struct {
 }
 
 // handleManifest runs the gate on push completion and renders the Decision.
+//
+// TODO(I-2, staged-blob leak): the early-return 4xx paths below (invalid path,
+// auth, read/parse error, ErrIncompletePush) return BEFORE Assemble/Cleanup, so
+// any blobs already uploaded under blob/<digest> for this push are never deleted
+// and leak in the shared Blob store. Needs a TTL/GC sweep of staged-but-
+// unmanifested blobs (a normal client-retry pattern produces these). Tracked for
+// post-Phase-6 hardening; do not assume cleanup happens on the reject paths.
+//
+// TODO(I-3, shared-blob cleanup): staging.Cleanup deletes blobs by content digest,
+// so two concurrent pushes sharing a base layer can have one delete a blob the
+// other still needs (spurious 500, not a security issue). Needs content-addressed
+// ref-counting or TTL-GC instead of per-push deletion. Tracked for hardening.
 func (h *Handler) handleManifest(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
