@@ -99,3 +99,17 @@ func TestTokenMissingBasicReturns401(t *testing.T) {
 		t.Errorf("code = %d, want 401", rec.Code)
 	}
 }
+
+func TestTokenEmptyPasswordReturns401(t *testing.T) {
+	// Empty Basic password: not a valid Entra token, and an empty client secret
+	// must not authenticate -> 401 (fail closed). Even with both validators "ok",
+	// the empty credential must be rejected.
+	h := newTokenHandler(true, true)
+	req := httptest.NewRequest(http.MethodGet, "/token?service=merlin", nil)
+	req.Header.Set("Authorization", basic("cid", ""))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("empty password: code = %d, want 401 (fail closed)", rec.Code)
+	}
+}
