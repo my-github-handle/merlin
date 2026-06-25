@@ -30,12 +30,7 @@ func (h *Handler) forwardManifest(w http.ResponseWriter, ctx context.Context, re
 	// Address the manifest in ACR exactly as the client addressed it here: a
 	// digest ref (sha256:...) pushes by digest; anything else is a tag.
 	repoRef := h.registry + "/" + repo
-	var target string
-	if strings.HasPrefix(ref, "sha256:") {
-		target = repoRef + "@" + ref
-	} else {
-		target = repoRef + ":" + ref
-	}
+	target := targetRef(h.registry, repo, ref)
 
 	// An attestation manifest references its own blobs (config + in-toto layers)
 	// that Merlin staged but never forwarded; the registry rejects the manifest
@@ -190,8 +185,10 @@ func (h *Handler) handleManifest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build gate request
-	target := h.registry + "/" + repo + ":" + ref
+	// Build gate request. The target must address ACR the same way the client
+	// addressed Merlin: by digest (buildx pushes the image manifest by digest) or
+	// by tag. A digest ref needs "@", not ":", or the reference is unparseable.
+	target := targetRef(h.registry, repo, ref)
 	req := router.GateRequest{
 		Source:   "docker",
 		Identity: identity.Subject,
@@ -248,6 +245,16 @@ func (h *Handler) handleManifest(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(code)
 	_, _ = w.Write([]byte(d.Summary))
+}
+
+// targetRef builds the ACR reference for a manifest, mirroring how the client
+// addressed it: a digest ref (sha256:...) uses "@" (by-digest); a tag uses ":".
+// Using ":" for a digest produces an unparseable reference (repo:sha256:...).
+func targetRef(registry, repo, ref string) string {
+	if strings.HasPrefix(ref, "sha256:") {
+		return registry + "/" + repo + "@" + ref
+	}
+	return registry + "/" + repo + ":" + ref
 }
 
 // parseManifestPath extracts (repo, ref) from /v2/<repo>/manifests/<ref>

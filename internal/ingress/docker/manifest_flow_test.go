@@ -125,6 +125,40 @@ func TestManifestPUTUBILayerAccepted(t *testing.T) {
 	}
 }
 
+// TestManifestPUTImageByDigestUsesDigestRef verifies that a gated image pushed by
+// digest (as buildx does) is forwarded to ACR by digest (@), not as repo:sha256:...
+// which is an unparseable reference and 500s.
+func TestManifestPUTImageByDigestGated(t *testing.T) {
+	h, fp := buildIntegrationHandler(t, trivy.Report{}, 2)
+	layer := layerWithOSID(t, "rhel")
+	layerDigest := uploadLayer(t, h, "app", layer)
+
+	manifest := map[string]interface{}{
+		"schemaVersion": 2,
+		"mediaType":     "application/vnd.oci.image.manifest.v1+json",
+		"config":        map[string]interface{}{"mediaType": "application/vnd.oci.image.config.v1+json", "digest": layerDigest},
+		"layers":        []map[string]interface{}{{"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip", "digest": layerDigest}},
+	}
+	manifestBytes, _ := json.Marshal(manifest)
+	imgDigest := dg(manifestBytes)
+
+	// Push the IMAGE manifest by digest (buildx behavior).
+	req := httptest.NewRequest(http.MethodPut, "/v2/app/manifests/"+imgDigest, bytes.NewReader(manifestBytes))
+	req.Header.Set("Authorization", "Bearer good")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Errorf("by-digest image PUT: status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	if len(fp.Pushed) != 1 {
+		t.Fatalf("expected 1 ACR image push, got %d", len(fp.Pushed))
+	}
+	if want := "myreg.azurecr.io/app@" + imgDigest; fp.Pushed[0] != want {
+		t.Errorf("ACR target = %q, want by-digest %q", fp.Pushed[0], want)
+	}
+}
+
 // TestManifestPUTAttestationForwarded verifies a buildx SLSA attestation manifest
 // (in-toto layer, no filesystem) is forwarded to ACR verbatim — NOT run through the
 // gate (which would tar-extract the in-toto JSON and 500).

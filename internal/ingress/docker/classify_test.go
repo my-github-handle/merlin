@@ -75,3 +75,19 @@ func TestClassifyManifestRejectsBadJSON(t *testing.T) {
 		t.Error("expected parse error for invalid JSON")
 	}
 }
+
+func TestTargetRef(t *testing.T) {
+	tests := []struct {
+		ref  string
+		want string
+	}{
+		{"v1", "myreg.azurecr.io/app:v1"},                       // tag
+		{"2.13.25-as", "myreg.azurecr.io/app:2.13.25-as"},       // tag
+		{"sha256:abc123", "myreg.azurecr.io/app@sha256:abc123"}, // digest -> @
+	}
+	for _, tc := range tests {
+		if got := targetRef("myreg.azurecr.io", "app", tc.ref); got != tc.want {
+			t.Errorf("targetRef(ref=%q) = %q, want %q", tc.ref, got, tc.want)
+		}
+	}
+}
