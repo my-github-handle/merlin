@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "merlin.fullname" . }}-config
+  labels: {{- include "merlin.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    # Merlin configuration (snake_case keys match internal/config/config.go yaml tags)
+    trivy:
+      severity_threshold: {{ .Values.merlin.trivy.severityThreshold }}
+    base_image:
+      allowed_ids: {{ toJson .Values.merlin.baseImage.allowedIDs }}
+    acr:
+      registry: {{ .Values.merlin.acr.registry | quote }}
+    auth:
+      issuer: {{ .Values.merlin.auth.issuer | quote }}
+      audience: {{ .Values.merlin.auth.audience | quote }}
+      jwks_url: {{ .Values.merlin.auth.jwksURL | quote }}
+    staging:
+      blob_account_url: {{ .Values.merlin.staging.blobAccountURL | quote }}
+      blob_container: {{ .Values.merlin.staging.blobContainer | quote }}
+      valkey_addr: {{ include "merlin.valkeyAddr" . | quote }}
+      scratch_dir: {{ .Values.merlin.staging.scratchDir | quote }}
+      scan_pool_size: {{ .Values.merlin.staging.scanPoolSize }}
+    audit:
+      # NOTE(Task 4 / Phase 8): This clickhouse_dsn is PASSWORD-FREE. The ClickHouse Go driver
+      # (clickhouse-go/v2) requires a full DSN string with the embedded password in the form:
+      #   clickhouse://user:password@host:port/database
+      # Since the password must NOT appear in this ConfigMap, the Deployment (Task 4) will
+      # override the MERLIN_AUDIT_CLICKHOUSE_DSN environment variable with a value that injects
+      # the ESO-synced clickhouse-password from the <fullname>-secrets Secret. This can be done
+      # via an init container that templates the full DSN, or by setting an env var that the
+      # application code reads and appends to the base DSN. The final mechanism is implemented
+      # in Task 4 (Deployment template).
+      clickhouse_dsn: {{ include "merlin.clickhouseDSN" . | quote }}
+      queue_size: {{ .Values.merlin.audit.queueSize }}
+    server:
+      addr: {{ .Values.merlin.server.addr | quote }}
+      metrics_addr: {{ .Values.merlin.server.metricsAddr | quote }}
+      max_upload_bytes: {{ .Values.merlin.server.maxUploadBytes }}
+      gate_timeout: {{ .Values.merlin.server.gateTimeout | quote }}
