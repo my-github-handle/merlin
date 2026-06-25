@@ -218,6 +218,24 @@ func (r *Reader) queryDecisions(ctx context.Context, q, arg string) ([]Decision,
 	return out, rows.Err()
 }
 
+// FindingsByImageRef serves the scan-report endpoint by image reference instead of
+// push_id, so a caller can use the repo:tag (or repo@sha256) they pushed. It
+// resolves the MOST RECENT push for that repo whose tag or digest matches ref, then
+// returns that push's findings. ref matches either image_tag (a tag, or the
+// manifest digest when the client pushed by digest, e.g. buildx) or image_digest.
+func (r *Reader) FindingsByImageRef(ctx context.Context, repo, ref string) ([]policy.Finding, error) {
+	var pushID string
+	row := r.conn.QueryRow(ctx,
+		`SELECT toString(push_id) FROM gate_decisions
+		 WHERE image_repo = ? AND (image_tag = ? OR image_digest = ?)
+		 ORDER BY ts DESC LIMIT 1`, repo, ref, ref)
+	if err := row.Scan(&pushID); err != nil {
+		// No matching push (incl. no rows) -> empty report, not an error.
+		return nil, nil
+	}
+	return r.FindingsByPush(ctx, pushID)
+}
+
 // FindingsByPush serves the scan-report endpoint.
 func (r *Reader) FindingsByPush(ctx context.Context, pushID string) ([]policy.Finding, error) {
 	rows, err := r.conn.Query(ctx,
