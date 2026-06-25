@@ -224,14 +224,25 @@ func (r *Reader) queryDecisions(ctx context.Context, q, arg string) ([]Decision,
 // returns that push's findings. ref matches either image_tag (a tag, or the
 // manifest digest when the client pushed by digest, e.g. buildx) or image_digest.
 func (r *Reader) FindingsByImageRef(ctx context.Context, repo, ref string) ([]policy.Finding, error) {
+	// Prefer an exact tag/digest match for the repo.
 	var pushID string
 	row := r.conn.QueryRow(ctx,
 		`SELECT toString(push_id) FROM gate_decisions
 		 WHERE image_repo = ? AND (image_tag = ? OR image_digest = ?)
 		 ORDER BY ts DESC LIMIT 1`, repo, ref, ref)
 	if err := row.Scan(&pushID); err != nil {
-		// No matching push (incl. no rows) -> empty report, not an error.
-		return nil, nil
+		// No exact match. A buildx/attested push records the image manifest by
+		// DIGEST (the tag lives only on the index, which is never scanned), so the
+		// human tag won't match. Fall back to the most recent push for the repo —
+		// the common "one image in flight per repo" case. (Caveat: concurrent
+		// pushes of different images to the same repo may return a sibling push's
+		// report; use the by-digest form repo@sha256:... to disambiguate.)
+		row2 := r.conn.QueryRow(ctx,
+			`SELECT toString(push_id) FROM gate_decisions
+			 WHERE image_repo = ? ORDER BY ts DESC LIMIT 1`, repo)
+		if err2 := row2.Scan(&pushID); err2 != nil {
+			return nil, nil
+		}
 	}
 	return r.FindingsByPush(ctx, pushID)
 }
