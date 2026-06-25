@@ -76,12 +76,12 @@ interface (see [design.md](./design.md) for internals).
 |---|---|
 | `router` | Maps event source → {ingress, outcome, gate profile}; drives the trigger-agnostic gate core (extension seam for new CI sources) |
 | `ingress/docker` (`registryv2`) | Inbound Docker Registry V2 HTTP API; report endpoint — the v1 ingress adapter |
-| `auth` | Entra ID bearer-token validation |
+| `auth` | Docker token handshake — Entra validation at `/token`, mints/verifies Merlin's short-lived registry token used on `/v2/` |
 | `staging` | Buffered blob/manifest store (Blob + Valkey); image assembly |
 | `policy` | Extensible gate engine; runs registered policies, aggregates verdicts |
 | `policies/trivy` | Trivy scan policy (fail on CRITICAL) |
 | `policies/baseimage` | Base-image policy (UBI / Chainguard-Wolfi only) |
-| `acr` | Outbound pusher to ACR via Managed Identity |
+| `acr` | Outbound pusher to ACR via Azure Workload Identity |
 | `observability` | OTel metrics/traces, Prometheus `/metrics`, structured logs |
 | `audit` | Append-only decision + finding writer (ClickHouse) |
 | `config` | Startup configuration loading |
@@ -109,13 +109,16 @@ the core is unaffected. See [specs.md §10](./specs.md).
 
 ## 4. Request Lifecycle (high level)
 
-1. **Authenticate** — validate the Entra ID token on every `/v2/` request.
+1. **Authenticate** — Docker runs the registry token handshake: it presents the
+   developer's Entra credential to `GET /token` (the sole Entra-validation point),
+   which mints a short-lived registry token; every `/v2/` request is then authorized
+   by verifying that registry token. See [specs.md §6](./specs.md).
 2. **Buffer** — accept parallel blob uploads into shared Blob staging; track
    session state in Valkey.
 3. **Assemble** — on manifest PUT (completion signal), assemble the full image to
    local scratch.
 4. **Gate** — run all policies; aggregate `passed = AND(verdicts)`.
-5. **Publish or reject** — on pass, push to ACR with Managed Identity and return
+5. **Publish or reject** — on pass, push to ACR with Workload Identity and return
    `201`; on fail, reject with a scan summary. Either way, emit metrics/traces and
    write the decision + findings to ClickHouse, and surface the Trivy scan result
    (summary inline + `X-Merlin-Scan-Report-URL`).
@@ -137,9 +140,10 @@ See [specs.md §9](./specs.md) for the full scalability & concurrency model.
 
 ## 6. Security Posture
 
-- **Inbound:** Entra ID identity required on every request.
-- **Outbound:** Merlin's Managed Identity is the **only** writer to ACR — the gate
-  cannot be bypassed.
+- **Inbound:** Entra ID identity required — validated once at `/token`, which mints a
+  short-lived registry token that `/v2/` requests must present.
+- **Outbound:** Merlin's Azure Workload Identity is the **only** writer to ACR — the
+  gate cannot be bypassed.
 - **Auditability:** every decision (pass and fail) and every vulnerability finding
   is recorded immutably in ClickHouse, supporting reverse lookups (CVE → images,
   package/base → images, digest history, identity activity).

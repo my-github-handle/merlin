@@ -153,14 +153,16 @@ Adding a future check = implement `Policy` and register it. The gate is unchange
 
 ### v1 Policy 2 — `baseimage`
 
-- Reads `/etc/os-release` (and `/etc/redhat-release`) from the assembled filesystem.
-- Passes only if:
-  - **RedHat UBI** — `os-release` has `ID="rhel"` / `PLATFORM_ID="platform:el*"` and
-    `/etc/redhat-release` is present, **or**
-  - **Chainguard/Wolfi** — `os-release` has `ID=wolfi` or `ID=chainguard`.
-- Anything else → `Passed=false`, reason:
-  `base image not permitted: detected <id>, allowed: rhel(ubi), wolfi/chainguard`.
-- Accepted-base matchers are defined in config (extensible list of detection rules).
+- Reads `os-release` from the assembled filesystem, checking both `/etc/os-release`
+  and `/usr/lib/os-release` (UBI/Chainguard ship `/etc/os-release` as a symlink to
+  `../usr/lib/os-release`, and layer extraction skips symlinks, so only the
+  `/usr/lib` copy survives in the assembled rootfs).
+- Passes only if the parsed `ID` is in the configured allow-list — by default
+  **RedHat UBI** (`ID=rhel`) or **Chainguard/Wolfi** (`ID=wolfi` / `ID=chainguard`).
+- Anything else (or missing os-release) → `Passed=false`, reason:
+  `base image not permitted: detected <id>, allowed: rhel, wolfi, chainguard`.
+- The allowed `ID` set is config-driven (`baseImage.allowedIDs`), matched
+  case-insensitively.
 
 ### Scan result in the response
 
@@ -194,11 +196,24 @@ Keeping these in config means policy tuning does not require a rebuild.
 
 ## 6. Authentication
 
-- **Inbound (developer → Merlin):** Entra ID bearer tokens. Devs `docker login` with
-  their Entra identity; Merlin validates the token on every `/v2/` request.
-- **Outbound (Merlin → ACR):** Merlin uses its own Azure Managed Identity / service
-  principal. This is the only identity with write access to ACR, so the gate is the
-  sole publish path — developers cannot bypass it.
+Merlin implements the standard Docker registry **token handshake**, so the native
+`docker login` / `docker push` flow works unchanged:
+
+- **Token endpoint (`GET /token`).** This is the **sole** Entra-validation point.
+  Docker sends the developer's credentials here (Basic auth); Merlin validates them
+  against Entra ID — first as a bearer token (JWKS signature, issuer, audience,
+  expiry), falling back to the OAuth2 client-credentials grant — and on success
+  **mints a short-lived registry token** (HMAC HS256, default 5-minute TTL) scoped
+  to the requested repository.
+- **Registry endpoints (`/v2/...`).** Every `/v2/` request is authenticated by
+  verifying **Merlin's own registry token** (not the Entra token). An unauthenticated
+  request gets `401` + a `WWW-Authenticate: Bearer realm="<externalURL>/token",...`
+  challenge that points Docker at the token endpoint. This clean separation keeps
+  Entra validation in one place and the hot push path on a cheap local HMAC check.
+- **Outbound (Merlin → ACR):** Merlin uses its own Azure Workload Identity (federated
+  managed identity), exchanging an AAD token for an ACR refresh token. This is the
+  only identity with write access to ACR, so the gate is the sole publish path —
+  developers cannot bypass it.
 
 ## 7. Testing Strategy
 

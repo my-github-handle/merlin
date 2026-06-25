@@ -48,12 +48,14 @@ staging); its paired `outcome/docker` blocks the push or forwards to ACR.
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /v2/` | Version check; returns `401` + `WWW-Authenticate` to trigger login |
-| `POST /v2/<repo>/blobs/uploads/` | Begin a blob upload; returns a server-issued upload UUID + `Location` |
+| `GET /token` | Docker token handshake — validates Entra credentials, mints a short-lived registry token (see [`auth`](#auth)) |
+| `GET /v2/` | Version check; returns `401` + `WWW-Authenticate` (realm → `/token`) to trigger login |
+| `POST /v2/<repo>/blobs/uploads/` | Begin a blob upload; returns a server-issued upload UUID + `Location` (monolithic `?digest=` also supported) |
 | `PATCH /v2/<repo>/blobs/uploads/<uuid>` | Upload a chunk (`Content-Range`) |
 | `PUT /v2/<repo>/blobs/uploads/<uuid>?digest=` | Complete a blob; verify digest |
-| `HEAD /v2/<repo>/blobs/<digest>` | Blob existence check (dedupe) |
-| `PUT /v2/<repo>/manifests/<ref>` | **Completion signal** — triggers the gate |
+| `HEAD /v2/<repo>/blobs/<digest>` | Blob existence check (dedupe) — `404` (push gate holds no blobs) |
+| `HEAD/GET /v2/<repo>/manifests/<ref>` | Manifest existence check — `404` so the client proceeds with the push |
+| `PUT /v2/<repo>/manifests/<ref>` | **Completion signal** — triggers the gate; echoes `Docker-Content-Digest` on success |
 | `GET /reports/<push_id>` | Retrieve full Trivy JSON report from the audit store |
 
 The handler is thin: it translates HTTP to `staging`/`policy`/`acr` calls and maps
@@ -61,40 +63,64 @@ verdicts to v2 error envelopes. No business logic lives here.
 
 ### `auth`
 
+Merlin runs the standard Docker registry token handshake with a **clean separation**:
+the `/token` endpoint is the sole Entra-validation point, and `/v2/` requests verify
+only Merlin's own short-lived registry token.
+
 ```go
+// Authenticator validates an Entra ID credential (used at the /token endpoint).
 type Authenticator interface {
     // Validate returns the caller identity or an error if the token is invalid.
     Validate(ctx context.Context, bearer string) (Identity, error)
 }
+
+// RegistryTokenIssuer mints + verifies Merlin's own registry tokens (used on /v2/).
+type RegistryTokenIssuer interface {
+    Mint(subject, scope string) (token string, expiresIn int, err error)
+    Verify(token string) (subject, scope string, err error)
+}
 ```
 
-Validates Entra ID JWTs: signature against cached Entra JWKS, issuer, audience,
-expiry. JWKS fetch is cached with refresh. Injected into `registryv2` so tests use a
-fake authenticator.
+- **At `/token`:** the developer's credential is validated against Entra ID — JWT
+  signature against cached Entra JWKS (issuer, audience, expiry), with a fallback to
+  the OAuth2 client-credentials grant for non-interactive callers. On success a
+  registry token is minted (HMAC HS256, configurable TTL).
+- **On `/v2/`:** the bearer is verified as a registry token (local HMAC check —
+  issuer `merlin`, audience = service, expiry). Entra tokens are not accepted here.
+
+Both the `Authenticator` and the issuer are injected into `registryv2`, so tests use
+a fake authenticator and an in-process issuer.
 
 ### `staging`
 
 Backs in-flight pushes on shared infrastructure so replicas are stateless.
 
 ```go
-type Store interface {
-    BeginUpload(ctx context.Context, repo string) (uploadID string, err error)
-    WriteChunk(ctx context.Context, uploadID string, offset int64, r io.Reader) (newOffset int64, err error)
-    CompleteBlob(ctx context.Context, uploadID, digest string) error
-    PutManifest(ctx context.Context, repo, ref string, manifest []byte) (StagedImage, error)
-    Assemble(ctx context.Context, img StagedImage) (localPath string, err error) // to scratch for scanning
-    Cleanup(ctx context.Context, pushID string) error
-}
+type Store struct { /* Blob + Valkey backends, behind BlobStore/SessionStore interfaces */ }
+
+func (s *Store) BeginUpload(ctx context.Context, repo string) (uploadID string, err error)
+func (s *Store) WriteChunk(ctx context.Context, uploadID string, offset int64, r io.Reader) (newOffset int64, err error)
+func (s *Store) CompleteBlob(ctx context.Context, uploadID, digest string, r io.Reader) error
+func (s *Store) PutManifest(ctx context.Context, repo, ref string, manifest []byte, configDigest string, layerDigests []string) (ManifestRef, error)
+func (s *Store) Assemble(ctx context.Context, mr ManifestRef, scratchDir string) (policy.StagedImage, error)
+func (s *Store) Cleanup(ctx context.Context, mr ManifestRef, scratchDir string) error
 ```
 
-- **Blob payloads → Azure Blob Storage**, keyed by upload UUID.
+- **Blob payloads → Azure Blob Storage**, keyed by upload UUID (in flight) then by
+  content digest (on completion). `CompleteBlob` verifies the digest before storing.
 - **Session state → Valkey**: per-upload blob list, byte offsets, completion flags.
   Chunk ordering enforced with an **atomic compare-and-set on the offset**;
   out-of-order chunks rejected with `416`.
-- `PutManifest` checks (atomically in Valkey) that every referenced blob digest is
-  marked complete before producing a `StagedImage`.
-- `Assemble` streams the image from Blob to **local scratch** (Trivy needs a local
-  path); scratch is reclaimed after scanning. A TTL sweep reclaims abandoned uploads.
+- `PutManifest` takes the config digest separately from the layer digests (the config
+  is JSON, not a filesystem layer) and checks (atomically in Valkey) that every
+  referenced blob is complete before producing a `ManifestRef`.
+- `Assemble` reads the staged blobs into **local scratch** and produces two views:
+  a valid **OCI image layout** (`oci-layout` + `index.json` + `blobs/sha256/`, with
+  the index descriptor carrying the manifest's real media type) for `trivy image
+  --input`, and an extracted **rootfs** for the base-image os-release check. Layers
+  are gunzipped (real layers are `tar+gzip`) before extraction; the config blob is
+  placed in the layout verbatim, never tar-extracted. Scratch is reclaimed after
+  scanning; a TTL sweep reclaims abandoned uploads.
 
 ### `policy`
 
@@ -139,24 +165,28 @@ type Runner interface { // injected, mockable
 
 ### `policies/baseimage`
 
-- Reads `/etc/os-release` and `/etc/redhat-release` from the assembled filesystem.
-- Passes only for **RedHat UBI** (`ID="rhel"` / `PLATFORM_ID="platform:el*"` +
-  `redhat-release` present) or **Chainguard/Wolfi** (`ID=wolfi`/`ID=chainguard`).
-- Otherwise fails with `base image not permitted: detected <id>, allowed: rhel(ubi),
-  wolfi/chainguard`.
-- Matchers are config-driven (an extensible list of detection rules).
+- Reads `os-release` from the assembled filesystem — `/etc/os-release` first, then
+  `/usr/lib/os-release` (UBI/Chainguard symlink `/etc/os-release` →
+  `../usr/lib/os-release`, and layer extraction skips symlinks, so only the
+  `/usr/lib` copy lands in the rootfs).
+- Passes only when the parsed `ID` is in the configured allow-list — by default
+  **RedHat UBI** (`ID=rhel`) or **Chainguard/Wolfi** (`ID=wolfi`/`ID=chainguard`).
+- Otherwise fails with `base image not permitted: detected <id>, allowed: rhel,
+  wolfi, chainguard`.
+- The allowed-ID set is config-driven (`baseImage.allowedIDs`) and matched
+  case-insensitively.
 
 ### `acr`
 
 ```go
 type Pusher interface {
-    Push(ctx context.Context, img StagedImage, target string) error
+    Push(ctx context.Context, ociPath, target string) error
 }
 ```
 
-Pushes the assembled image to ACR using `go-containerregistry` with Azure Managed
-Identity. Behind an interface so tests use a fake registry (go-containerregistry
-`httptest`).
+Pushes the assembled OCI layout to ACR using `go-containerregistry`, authenticating
+with Azure Workload Identity (AAD token exchanged for an ACR refresh token). Behind
+an interface so tests use a fake registry (go-containerregistry `httptest`).
 
 ### `observability`
 
