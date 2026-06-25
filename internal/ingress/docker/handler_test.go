@@ -44,14 +44,17 @@ func TestV2BaseReturns200WhenAuthenticated(t *testing.T) {
 	}
 }
 
-func TestManifestPathRejectsNonPUT(t *testing.T) {
+func TestManifestPathRejectsUnsupportedMethod(t *testing.T) {
+	// GET/HEAD on a manifest is a docker existence check → 404 (see
+	// TestManifestGetHeadReturns404NotMethodNotAllowed). A truly unsupported method
+	// (e.g. DELETE) on the manifest path → 405.
 	h := NewHandler(fakeAuth{ok: true}, nil, nil, nil, "myreg.azurecr.io", nil)
-	req := httptest.NewRequest(http.MethodGet, "/v2/repo/manifests/sha256:abc", nil)
+	req := httptest.NewRequest(http.MethodDelete, "/v2/repo/manifests/sha256:abc", nil)
 	req.Header.Set("Authorization", "Bearer good")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusMethodNotAllowed {
-		t.Errorf("GET to manifest path: code = %d, want 405", rec.Code)
+		t.Errorf("DELETE to manifest path: code = %d, want 405", rec.Code)
 	}
 }
 
