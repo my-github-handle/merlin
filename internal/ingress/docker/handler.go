@@ -11,13 +11,14 @@ import (
 
 // Handler implements the inbound Docker Registry V2 surface.
 type Handler struct {
-	auth     auth.Authenticator
-	store    *staging.Store
-	router   *router.Router
-	outcome  *Outcome
-	registry string
-	reports  ReportSource
-	mux      *http.ServeMux
+	auth           auth.Authenticator
+	store          *staging.Store
+	router         *router.Router
+	outcome        *Outcome
+	registry       string
+	reports        ReportSource
+	mux            *http.ServeMux
+	maxUploadBytes int64
 }
 
 // NewHandler builds the V2 handler. reports backs GET /reports/<push_id>.
@@ -29,6 +30,18 @@ func NewHandler(a auth.Authenticator, st *staging.Store, r *router.Router, o *Ou
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) { h.mux.ServeHTTP(w, r) }
+
+// SetMaxUploadBytes configures the maximum upload chunk size (default 2 GiB).
+func (h *Handler) SetMaxUploadBytes(n int64) {
+	h.maxUploadBytes = n
+}
+
+func (h *Handler) getMaxUploadBytes() int64 {
+	if h.maxUploadBytes == 0 {
+		return 2 << 30 // 2 GiB default
+	}
+	return h.maxUploadBytes
+}
 
 func (h *Handler) route(w http.ResponseWriter, r *http.Request) {
 	if !h.authenticate(w, r) {
