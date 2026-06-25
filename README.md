@@ -3,7 +3,9 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 Transparent Docker Registry V2 proxy that gates image publishing to ACR.
-See [docs/specs.md](docs/specs.md) for the design.
+
+- **[docs/USAGE.md](docs/USAGE.md)** — how to publish an image and get Trivy scan results.
+- **[docs/specs.md](docs/specs.md)** — design and requirements.
 
 ## Building
 
