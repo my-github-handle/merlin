@@ -19,7 +19,7 @@ func (f fakeAuth) Validate(_ context.Context, bearer string) (auth.Identity, err
 }
 
 func TestV2BaseReturns401WhenUnauthenticated(t *testing.T) {
-	h := NewHandler(fakeAuth{ok: false}, nil, nil, nil, "myreg.azurecr.io")
+	h := NewHandler(fakeAuth{ok: false}, nil, nil, nil, "myreg.azurecr.io", nil)
 	req := httptest.NewRequest(http.MethodGet, "/v2/", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -32,7 +32,7 @@ func TestV2BaseReturns401WhenUnauthenticated(t *testing.T) {
 }
 
 func TestV2BaseReturns200WhenAuthenticated(t *testing.T) {
-	h := NewHandler(fakeAuth{ok: true}, nil, nil, nil, "myreg.azurecr.io")
+	h := NewHandler(fakeAuth{ok: true}, nil, nil, nil, "myreg.azurecr.io", nil)
 	req := httptest.NewRequest(http.MethodGet, "/v2/", nil)
 	req.Header.Set("Authorization", "Bearer good")
 	rec := httptest.NewRecorder()

@@ -16,13 +16,15 @@ type Handler struct {
 	router   *router.Router
 	outcome  *Outcome
 	registry string
+	reports  ReportSource
 	mux      *http.ServeMux
 }
 
-// NewHandler builds the V2 handler.
-func NewHandler(a auth.Authenticator, st *staging.Store, r *router.Router, o *Outcome, registry string) *Handler {
-	h := &Handler{auth: a, store: st, router: r, outcome: o, registry: registry, mux: http.NewServeMux()}
+// NewHandler builds the V2 handler. reports backs GET /reports/<push_id>.
+func NewHandler(a auth.Authenticator, st *staging.Store, r *router.Router, o *Outcome, registry string, reports ReportSource) *Handler {
+	h := &Handler{auth: a, store: st, router: r, outcome: o, registry: registry, reports: reports, mux: http.NewServeMux()}
 	h.mux.HandleFunc("/v2/", h.route)
+	h.mux.HandleFunc("/reports/", h.handleReport)
 	return h
 }
 
