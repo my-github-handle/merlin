@@ -1,6 +1,7 @@
 package docker
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -23,6 +24,10 @@ type Handler struct {
 	pool           *router.Pool
 	gateTimeout    time.Duration
 	scratchBaseDir string
+	regIssuer      *auth.RegistryTokenIssuer
+	tokenRealm     string
+	service        string
+	tokenHandler   *TokenHandler
 }
 
 // NewHandler builds the V2 handler. reports backs GET /reports/<push_id>.
@@ -65,6 +70,20 @@ func (h *Handler) SetScratchBaseDir(dir string) {
 	h.scratchBaseDir = dir
 }
 
+// SetRegistryAuth switches /v2/ to verify Merlin's registry token (instead of a
+// raw Entra token) and points the WWW-Authenticate realm at the /token endpoint.
+func (h *Handler) SetRegistryAuth(issuer *auth.RegistryTokenIssuer, tokenRealm, service string) {
+	h.regIssuer = issuer
+	h.tokenRealm = tokenRealm
+	h.service = service
+}
+
+// SetTokenHandler registers the GET /token endpoint.
+func (h *Handler) SetTokenHandler(th *TokenHandler) {
+	h.tokenHandler = th
+	h.mux.HandleFunc("/token", th.ServeHTTP)
+}
+
 func (h *Handler) route(w http.ResponseWriter, r *http.Request) {
 	if !h.authenticate(w, r) {
 		return
@@ -93,6 +112,15 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) authenticate(w http.ResponseWriter, r *http.Request) bool {
+	if h.regIssuer != nil {
+		bearer := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if _, _, err := h.regIssuer.Verify(bearer); err != nil {
+			h.challenge(w, r)
+			return false
+		}
+		return true
+	}
+	// Legacy path: validate the Entra token directly (pre-Phase-9 behavior).
 	bearer := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if _, err := h.auth.Validate(r.Context(), bearer); err != nil {
 		w.Header().Set("WWW-Authenticate", `Bearer realm="merlin",service="registry"`)
@@ -100,6 +128,34 @@ func (h *Handler) authenticate(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	return true
+}
+
+// challenge writes the Docker token-flow WWW-Authenticate pointing at /token.
+func (h *Handler) challenge(w http.ResponseWriter, r *http.Request) {
+	repo := repoFromV2Path(r.URL.Path) // best-effort; "" if not a repo path
+	scope := ""
+	if repo != "" {
+		scope = fmt.Sprintf(`,scope="repository:%s:push,pull"`, repo)
+	}
+	w.Header().Set("WWW-Authenticate",
+		fmt.Sprintf(`Bearer realm="%s",service="%s"%s`, h.tokenRealm, h.service, scope))
+	w.WriteHeader(http.StatusUnauthorized)
+}
+
+// repoFromV2Path extracts <repo> from /v2/<repo>/... paths (returns "" for bare /v2/).
+func repoFromV2Path(path string) string {
+	path = strings.TrimPrefix(path, "/v2/")
+	if path == "" || path == "/" {
+		return ""
+	}
+	// Extract repo before /manifests/, /blobs/, or any other Docker API path segment.
+	for _, seg := range []string{"/manifests/", "/blobs/"} {
+		if idx := strings.Index(path, seg); idx != -1 {
+			return path[:idx]
+		}
+	}
+	// If no known segment found, return the whole path (might be a plain repo name).
+	return strings.TrimSuffix(path, "/")
 }
 
 // validatedIdentity re-validates the bearer token and returns the identity.
