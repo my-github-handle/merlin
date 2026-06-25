@@ -64,16 +64,16 @@ Otherwise, default to the operator-CR generated service: <fullname>-valkey:6379
 {{/*
 ClickHouse DSN helper.
 If .Values.merlin.audit.clickhouseDSN is set, use it.
-Otherwise, build from operator-CR defaults: clickhouse://<user>@clickhouse-<fullname>-ch:9000/merlin
-NOTE: This DSN is the no-password form. The password is injected at runtime via environment
-variable from the ESO secret (CLICKHOUSE_PASSWORD). The Merlin app must append the password
-to the DSN when establishing the connection.
+Otherwise, build from operator-CR defaults with ${CLICKHOUSE_PASSWORD} placeholder.
+The literal ${CLICKHOUSE_PASSWORD} is NOT expanded by Helm — it stays in the rendered YAML.
+At runtime, Merlin's config loader expands it from the CLICKHOUSE_PASSWORD env var
+(injected by the Deployment from the ESO secret). This keeps the password out of the ConfigMap.
 IMPORTANT: The operator Service name format must be confirmed in Phase 8; adjust if needed.
 */}}
 {{- define "merlin.clickhouseDSN" -}}
 {{- if .Values.merlin.audit.clickhouseDSN }}
 {{- .Values.merlin.audit.clickhouseDSN }}
 {{- else }}
-{{- printf "clickhouse://%s@clickhouse-%s-ch:9000/merlin" .Values.clickhouse.user (include "merlin.fullname" .) }}
+{{- printf "clickhouse://%s:${CLICKHOUSE_PASSWORD}@clickhouse-%s-ch:9000/merlin" .Values.clickhouse.user (include "merlin.fullname" .) }}
 {{- end }}
 {{- end }}

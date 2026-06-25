@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -63,8 +64,12 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("read config: %w", err)
 	}
+	expanded, err := expandEnvStrict(string(raw))
+	if err != nil {
+		return Config{}, fmt.Errorf("expand config env: %w", err)
+	}
 	var cfg Config
-	if err := yaml.Unmarshal(raw, &cfg); err != nil {
+	if err := yaml.Unmarshal([]byte(expanded), &cfg); err != nil {
 		return Config{}, fmt.Errorf("parse config: %w", err)
 	}
 	cfg.applyDefaults()
@@ -119,4 +124,22 @@ func (c *Config) validate() error {
 		return fmt.Errorf("config: trivy.severity_threshold %q is not a valid severity (UNKNOWN, LOW, MEDIUM, HIGH, CRITICAL)", c.Trivy.SeverityThreshold)
 	}
 	return nil
+}
+
+// expandEnvStrict replaces ${VAR}/$VAR with os.Getenv(VAR), erroring if any
+// referenced variable is unset (so a missing secret fails fast, not silently).
+func expandEnvStrict(s string) (string, error) {
+	var missing []string
+	out := os.Expand(s, func(key string) string {
+		v, ok := os.LookupEnv(key)
+		if !ok {
+			missing = append(missing, key)
+			return ""
+		}
+		return v
+	})
+	if len(missing) > 0 {
+		return "", fmt.Errorf("unset config env var(s): %s", strings.Join(missing, ", "))
+	}
+	return out, nil
 }
