@@ -26,7 +26,7 @@ type Decision struct {
 // Writer persists decisions and findings (e.g. to ClickHouse).
 type Writer interface {
 	WriteDecision(ctx context.Context, d Decision) error
-	WriteFindings(ctx context.Context, pushID string, findings []policy.Finding) error
+	WriteFindings(ctx context.Context, d Decision, findings []policy.Finding) error
 }
 
 var errQueueFull = errors.New("audit: queue full, decision dropped")

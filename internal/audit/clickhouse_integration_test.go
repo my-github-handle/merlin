@@ -25,14 +25,17 @@ func TestClickHouseReverseLookups(t *testing.T) {
 		t.Fatal(err)
 	}
 	finds := []policy.Finding{{CVE: "CVE-2024-1", Severity: "CRITICAL", Pkg: "openssl", Version: "1.1.1"}}
-	if err := w.WriteFindings(ctx, dec.PushID, finds); err != nil {
+	if err := w.WriteFindings(ctx, dec, finds); err != nil {
 		t.Fatal(err)
 	}
 
 	r := &Reader{conn: w.(*clickhouseWriter).conn}
 	imgs, err := r.ImagesByCVE(ctx, "CVE-2024-1") // A
 	if err != nil || len(imgs) == 0 {
-		t.Errorf("ImagesByCVE: imgs=%v err=%v", imgs, err)
+		t.Fatalf("ImagesByCVE: imgs=%v err=%v", imgs, err)
+	}
+	if imgs[0] != dec.Digest {
+		t.Errorf("ImagesByCVE returned %q, want digest %q (findings must carry image_digest)", imgs[0], dec.Digest)
 	}
 	decs, err := r.DecisionsByDigest(ctx, "sha256:abc") // B
 	if err != nil || len(decs) == 0 {

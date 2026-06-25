@@ -39,7 +39,7 @@ VALUES (now64(3), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		d.FailedPolicies, d.Reasons, d.BaseImageID, d.TrivyDBVersion, d.DurationMS)
 }
 
-func (c *clickhouseWriter) WriteFindings(ctx context.Context, pushID string, findings []policy.Finding) error {
+func (c *clickhouseWriter) WriteFindings(ctx context.Context, d Decision, findings []policy.Finding) error {
 	batch, err := c.conn.PrepareBatch(ctx, `
 INSERT INTO vulnerability_findings
 (ts, push_id, image_digest, image_repo, cve_id, severity, pkg_name, pkg_version, fixed_version, base_image_id, identity)`)
@@ -47,7 +47,11 @@ INSERT INTO vulnerability_findings
 		return fmt.Errorf("prepare findings batch: %w", err)
 	}
 	for _, f := range findings {
-		if err := batch.Append(nowFn(), pushID, "", "", f.CVE, f.Severity, f.Pkg, f.Version, f.FixedVersion, "", ""); err != nil {
+		if err := batch.Append(
+			nowFn(), d.PushID, d.Digest, d.Repo,
+			f.CVE, f.Severity, f.Pkg, f.Version, f.FixedVersion,
+			d.BaseImageID, d.Identity,
+		); err != nil {
 			return fmt.Errorf("append finding: %w", err)
 		}
 	}

@@ -26,7 +26,7 @@ func (s *spyWriter) WriteDecision(_ context.Context, d Decision) error {
 	return nil
 }
 
-func (s *spyWriter) WriteFindings(_ context.Context, _ string, _ []policy.Finding) error {
+func (s *spyWriter) WriteFindings(_ context.Context, _ Decision, _ []policy.Finding) error {
 	return s.err
 }
 

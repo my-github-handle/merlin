@@ -45,7 +45,7 @@ func (a *Auditor) run() {
 			continue
 		}
 		if len(j.findings) > 0 {
-			if err := a.w.WriteFindings(ctx, j.decision.PushID, j.findings); err != nil {
+			if err := a.w.WriteFindings(ctx, j.decision, j.findings); err != nil {
 				a.onDrop(err)
 			}
 		}
