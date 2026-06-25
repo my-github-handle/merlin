@@ -114,6 +114,13 @@ func TestManifestPUTUBILayerAccepted(t *testing.T) {
 	if reportURL == "" {
 		t.Error("missing X-Merlin-Scan-Report-URL header")
 	}
+	// Docker clients reject a manifest PUT 201 unless the response echoes the
+	// canonical manifest digest in Docker-Content-Digest ("invalid checksum digest
+	// format" otherwise). It must be the sha256 of the exact manifest bytes.
+	wantDigest := dg(manifestBytes)
+	if got := rec.Header().Get("Docker-Content-Digest"); got != wantDigest {
+		t.Errorf("Docker-Content-Digest = %q, want %q", got, wantDigest)
+	}
 }
 
 // TestManifestPUTPoolSaturated tests that when the pool is saturated, the handler returns 503 + Retry-After.

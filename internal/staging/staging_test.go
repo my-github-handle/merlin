@@ -39,7 +39,7 @@ func TestCompleteBlobThenManifest(t *testing.T) {
 	if err := s.CompleteBlob(ctx, up, dg, bytes.NewReader(nil)); err != nil {
 		t.Fatalf("complete blob: %v", err)
 	}
-	mr, err := s.PutManifest(ctx, "repo", "v1", []byte(`{"manifest":true}`), []string{dg})
+	mr, err := s.PutManifest(ctx, "repo", "v1", []byte(`{"manifest":true}`), "", []string{dg})
 	if err != nil {
 		t.Fatalf("put manifest: %v", err)
 	}
@@ -51,7 +51,7 @@ func TestCompleteBlobThenManifest(t *testing.T) {
 func TestPutManifestFailsWhenBlobMissing(t *testing.T) {
 	s := newTestStore()
 	ctx := context.Background()
-	_, err := s.PutManifest(ctx, "repo", "v1", []byte(`{}`), []string{"sha256:missing"})
+	_, err := s.PutManifest(ctx, "repo", "v1", []byte(`{}`), "", []string{"sha256:missing"})
 	if !errors.Is(err, ErrIncompletePush) {
 		t.Errorf("expected ErrIncompletePush, got %v", err)
 	}
@@ -103,7 +103,7 @@ func TestCompleteBlobVerifiesAccumulatedChunks(t *testing.T) {
 	if err := s.CompleteBlob(ctx, up, dg, bytes.NewReader(nil)); err != nil {
 		t.Fatalf("accumulated chunks should verify: %v", err)
 	}
-	mr, err := s.PutManifest(ctx, "repo", "v1", []byte(`{}`), []string{dg})
+	mr, err := s.PutManifest(ctx, "repo", "v1", []byte(`{}`), "", []string{dg})
 	if err != nil {
 		t.Fatalf("put manifest: %v", err)
 	}

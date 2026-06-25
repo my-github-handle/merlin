@@ -2,10 +2,13 @@ package docker
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -73,14 +76,17 @@ func (h *Handler) handleManifest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Collect all referenced digests (config + layers)
-	digests := []string{manifest.Config.Digest}
+	// Separate the config blob (JSON image config) from the filesystem layers.
+	// Only layers are tar+gzip archives to be extracted; the config goes into the
+	// OCI layout verbatim. Lumping them together caused Assemble to tar-extract
+	// the JSON config and fail with "invalid tar header".
+	layerDigests := make([]string, 0, len(manifest.Layers))
 	for _, layer := range manifest.Layers {
-		digests = append(digests, layer.Digest)
+		layerDigests = append(layerDigests, layer.Digest)
 	}
 
-	// PutManifest checks that all blobs are complete
-	mr, err := h.store.PutManifest(ctx, repo, ref, manifestBytes, digests)
+	// PutManifest checks that all blobs (config + layers) are complete
+	mr, err := h.store.PutManifest(ctx, repo, ref, manifestBytes, manifest.Config.Digest, layerDigests)
 	if errors.Is(err, staging.ErrIncompletePush) {
 		http.Error(w, "incomplete push: some referenced blobs were not uploaded", http.StatusBadRequest)
 		return
@@ -140,14 +146,25 @@ func (h *Handler) handleManifest(w http.ResponseWriter, r *http.Request) {
 
 	// Build the Decision from the gate result. Other infra errors are rendered as
 	// 500/502 by Apply. An ACR push failure surfaces as a returned error (502);
-	// the Decision still carries the right status to render, so it is ignored here.
-	d, _ := h.outcome.Apply(ctx, req, res, gateErr)
+	// the Decision still carries the right status to render. Log the infra error so
+	// an operator can diagnose a 500/502 (the client only sees a terse summary).
+	d, applyErr := h.outcome.Apply(ctx, req, res, gateErr)
+	if applyErr != nil {
+		log.Printf("manifest %s gate outcome infra error: %v", target, applyErr)
+	}
 	if d.ReportURL != "" {
 		w.Header().Set("X-Merlin-Scan-Report-URL", d.ReportURL)
 	}
 	code := d.StatusCode
 	if code == 0 {
 		code = http.StatusCreated
+	}
+	// On success the Docker client requires the canonical manifest digest echoed in
+	// Docker-Content-Digest; without it `docker push` fails the manifest commit with
+	// "invalid checksum digest format". The digest is over the exact manifest bytes.
+	if code >= 200 && code < 300 {
+		sum := sha256.Sum256(manifestBytes)
+		w.Header().Set("Docker-Content-Digest", "sha256:"+hex.EncodeToString(sum[:]))
 	}
 	w.WriteHeader(code)
 	_, _ = w.Write([]byte(d.Summary))

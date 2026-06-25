@@ -2,6 +2,7 @@ package docker
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -38,7 +39,39 @@ func NewHandler(a auth.Authenticator, st *staging.Store, r *router.Router, o *Ou
 	return h
 }
 
-func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) { h.mux.ServeHTTP(w, r) }
+func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+	start := time.Now()
+	h.mux.ServeHTTP(sw, r)
+	log.Printf("v2 %s %s%s -> %d (%dB, %s)",
+		r.Method, r.URL.Path, queryForLog(r.URL.RawQuery), sw.status, sw.written, time.Since(start).Round(time.Millisecond))
+}
+
+// statusWriter records the response status and byte count for request logging.
+type statusWriter struct {
+	http.ResponseWriter
+	status  int
+	written int64
+}
+
+func (s *statusWriter) WriteHeader(code int) {
+	s.status = code
+	s.ResponseWriter.WriteHeader(code)
+}
+
+func (s *statusWriter) Write(b []byte) (int, error) {
+	n, err := s.ResponseWriter.Write(b)
+	s.written += int64(n)
+	return n, err
+}
+
+// queryForLog formats a raw query string for the access log (leading "?" or "").
+func queryForLog(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	return "?" + raw
+}
 
 // SetMaxUploadBytes configures the maximum upload chunk size (default 2 GiB).
 func (h *Handler) SetMaxUploadBytes(n int64) {

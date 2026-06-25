@@ -3,7 +3,11 @@ package staging
 import (
 	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -13,8 +17,13 @@ import (
 	"github.com/merlin-gate/merlin/internal/policy"
 )
 
-// Assemble writes the staged blobs into an OCI layout under scratchDir/oci and
-// extracts the layered root filesystem into scratchDir/rootfs.
+// Assemble writes the staged blobs into a valid OCI image layout under
+// scratchDir/oci (consumable by `trivy image --input`) and extracts the layered
+// root filesystem into scratchDir/rootfs (for the base-image os-release check).
+//
+// A real Docker/OCI push references a JSON config blob plus tar+gzip filesystem
+// layers. The config is placed in the OCI layout verbatim and is NOT tar-
+// extracted; each layer is gunzipped (if gzip-compressed) before tar extraction.
 func (s *Store) Assemble(ctx context.Context, mr ManifestRef, scratchDir string) (policy.StagedImage, error) {
 	ociPath := filepath.Join(scratchDir, "oci")
 	rootfs := filepath.Join(scratchDir, "rootfs")
@@ -23,40 +32,142 @@ func (s *Store) Assemble(ctx context.Context, mr ManifestRef, scratchDir string)
 			return policy.StagedImage{}, fmt.Errorf("mkdir %s: %w", d, err)
 		}
 	}
+
+	// The config blob (when present) goes into the OCI layout verbatim — it is
+	// JSON, not a filesystem layer, so it must never be tar-extracted.
+	if mr.ConfigDigest != "" {
+		raw, err := s.fetchVerified(ctx, mr.ConfigDigest)
+		if err != nil {
+			return policy.StagedImage{}, err
+		}
+		if err := writeOCIBlob(ociPath, mr.ConfigDigest, raw); err != nil {
+			return policy.StagedImage{}, err
+		}
+	}
+
 	// Write each layer blob into the OCI layout and extract it into rootfs.
 	for _, dg := range mr.LayerDigests {
-		rc, err := s.blobs.Get(ctx, blobKey(dg))
+		raw, err := s.fetchVerified(ctx, dg)
 		if err != nil {
-			return policy.StagedImage{}, fmt.Errorf("get blob %s: %w", dg, err)
+			return policy.StagedImage{}, err
 		}
-		raw, err := io.ReadAll(rc)
-		rc.Close()
-		if err != nil {
-			return policy.StagedImage{}, fmt.Errorf("read blob %s: %w", dg, err)
-		}
-		// Re-verify the digest: with the shared Azure backend a blob could be
-		// corrupted or overwritten between CompleteBlob and Assemble.
-		if err := VerifyDigest(bytes.NewReader(raw), dg); err != nil {
-			return policy.StagedImage{}, fmt.Errorf("assemble: layer %s failed digest re-verification: %w", dg, err)
-		}
-		// Persist the blob into the OCI layout's blobs/sha256 dir.
+		// Persist the layer into the OCI layout's blobs/sha256 dir (verbatim,
+		// still compressed — the layout records the compressed-blob digest).
 		if err := writeOCIBlob(ociPath, dg, raw); err != nil {
 			return policy.StagedImage{}, err
 		}
-		if err := extractTar(raw, rootfs); err != nil {
+		// Decompress gzip layers before tar extraction (real layers are tar+gzip).
+		tarBytes, err := maybeGunzip(raw)
+		if err != nil {
+			return policy.StagedImage{}, fmt.Errorf("decompress layer %s: %w", dg, err)
+		}
+		if err := extractTar(tarBytes, rootfs); err != nil {
 			return policy.StagedImage{}, fmt.Errorf("extract layer %s: %w", dg, err)
 		}
 	}
-	// Persist the manifest into the OCI layout.
-	if err := os.WriteFile(filepath.Join(ociPath, "manifest.json"), mr.Manifest, 0o644); err != nil {
-		return policy.StagedImage{}, fmt.Errorf("write manifest: %w", err)
+
+	// Persist the manifest as an OCI blob and reference it from index.json, so
+	// the directory is a valid OCI image layout.
+	manifestDigest, err := sha256Digest(mr.Manifest)
+	if err != nil {
+		return policy.StagedImage{}, err
 	}
+	if err := writeOCIBlob(ociPath, manifestDigest, mr.Manifest); err != nil {
+		return policy.StagedImage{}, err
+	}
+	if err := writeOCILayout(ociPath, manifestDigest, len(mr.Manifest), mr.Ref, manifestMediaType(mr.Manifest)); err != nil {
+		return policy.StagedImage{}, err
+	}
+
 	return policy.StagedImage{
 		Repo:    mr.Repo,
 		Tag:     mr.Ref,
 		OCIPath: ociPath,
 		FSPath:  rootfs,
 	}, nil
+}
+
+// fetchVerified reads a staged blob and re-verifies its digest. With the shared
+// Azure backend a blob could be corrupted or overwritten between CompleteBlob
+// and Assemble, so the digest is checked again here.
+func (s *Store) fetchVerified(ctx context.Context, digest string) ([]byte, error) {
+	rc, err := s.blobs.Get(ctx, blobKey(digest))
+	if err != nil {
+		return nil, fmt.Errorf("get blob %s: %w", digest, err)
+	}
+	raw, err := io.ReadAll(rc)
+	rc.Close()
+	if err != nil {
+		return nil, fmt.Errorf("read blob %s: %w", digest, err)
+	}
+	if err := VerifyDigest(bytes.NewReader(raw), digest); err != nil {
+		return nil, fmt.Errorf("assemble: blob %s failed digest re-verification: %w", digest, err)
+	}
+	return raw, nil
+}
+
+// maybeGunzip decompresses raw if it is gzip-compressed (magic bytes 0x1f 0x8b),
+// otherwise returns it unchanged. Docker layers are typically tar+gzip, but
+// uncompressed tar layers are also valid.
+func maybeGunzip(raw []byte) ([]byte, error) {
+	if len(raw) < 2 || raw[0] != 0x1f || raw[1] != 0x8b {
+		return raw, nil
+	}
+	gr, err := gzip.NewReader(bytes.NewReader(raw))
+	if err != nil {
+		return nil, err
+	}
+	defer gr.Close()
+	return io.ReadAll(gr)
+}
+
+// sha256Digest returns the "sha256:<hex>" digest of b.
+func sha256Digest(b []byte) (string, error) {
+	sum := sha256.Sum256(b)
+	return "sha256:" + hex.EncodeToString(sum[:]), nil
+}
+
+// manifestMediaType extracts the manifest's declared mediaType, defaulting to the
+// OCI image manifest type when absent. The index descriptor MUST carry the actual
+// type (Docker schema 2 vs OCI) or go-containerregistry pushes the manifest under
+// the wrong Content-Type and the registry rejects it with MANIFEST_INVALID.
+func manifestMediaType(manifest []byte) string {
+	var m struct {
+		MediaType string `json:"mediaType"`
+	}
+	if err := json.Unmarshal(manifest, &m); err == nil && m.MediaType != "" {
+		return m.MediaType
+	}
+	return "application/vnd.oci.image.manifest.v1+json"
+}
+
+// writeOCILayout writes the oci-layout marker and an index.json referencing the
+// image manifest, completing a minimal valid OCI image layout. manifestMediaType
+// is the descriptor media type for the referenced manifest.
+func writeOCILayout(ociPath, manifestDigest string, manifestSize int, ref, manifestMediaType string) error {
+	if err := os.WriteFile(filepath.Join(ociPath, "oci-layout"),
+		[]byte(`{"imageLayoutVersion":"1.0.0"}`), 0o644); err != nil {
+		return fmt.Errorf("write oci-layout: %w", err)
+	}
+	index := map[string]any{
+		"schemaVersion": 2,
+		"manifests": []map[string]any{{
+			"mediaType": manifestMediaType,
+			"digest":    manifestDigest,
+			"size":      manifestSize,
+			"annotations": map[string]string{
+				"org.opencontainers.image.ref.name": ref,
+			},
+		}},
+	}
+	raw, err := json.Marshal(index)
+	if err != nil {
+		return fmt.Errorf("marshal index.json: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(ociPath, "index.json"), raw, 0o644); err != nil {
+		return fmt.Errorf("write index.json: %w", err)
+	}
+	return nil
 }
 
 func writeOCIBlob(ociPath, digest string, raw []byte) error {
@@ -125,6 +236,9 @@ func extractTar(raw []byte, dest string) error {
 func (s *Store) Cleanup(ctx context.Context, mr ManifestRef, scratchDir string) error {
 	for _, dg := range mr.LayerDigests {
 		_ = s.blobs.Delete(ctx, blobKey(dg))
+	}
+	if mr.ConfigDigest != "" {
+		_ = s.blobs.Delete(ctx, blobKey(mr.ConfigDigest))
 	}
 	return os.RemoveAll(scratchDir)
 }

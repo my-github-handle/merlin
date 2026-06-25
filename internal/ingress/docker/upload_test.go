@@ -267,7 +267,7 @@ func TestMonolithicPostUploadPersistsBlob(t *testing.T) {
 		t.Errorf("Docker-Content-Digest = %q, want %q", rec.Header().Get("Docker-Content-Digest"), dg)
 	}
 	// the blob must now be complete so a manifest referencing it assembles
-	if _, err := st.PutManifest(context.Background(), "app", "v1", []byte(`{}`), []string{dg}); err != nil {
+	if _, err := st.PutManifest(context.Background(), "app", "v1", []byte(`{}`), "", []string{dg}); err != nil {
 		t.Errorf("blob not persisted by monolithic POST: PutManifest err = %v", err)
 	}
 }

@@ -3,7 +3,9 @@ package staging
 import (
 	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -27,6 +29,137 @@ func makeLayerTar(t *testing.T, osID string) []byte {
 	return buf.Bytes()
 }
 
+// gzipBytes gzip-compresses raw, matching a real Docker tar+gzip layer.
+func gzipBytes(t *testing.T, raw []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	if _, err := gw.Write(raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// TestAssembleRealImageShape mirrors a real Docker push: a JSON config blob plus
+// a gzip-compressed tar layer. The config must NOT be tar-extracted, the layer
+// must be gunzipped before extraction, and the OCI layout must be valid.
+func TestAssembleRealImageShape(t *testing.T) {
+	s := newTestStore()
+	ctx := context.Background()
+
+	config := []byte(`{"architecture":"amd64","os":"linux","rootfs":{"type":"layers"}}`)
+	configDg := digestOf(config)
+	layer := gzipBytes(t, makeLayerTar(t, "rhel"))
+	layerDg := digestOf(layer)
+	manifest := []byte(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json"}`)
+
+	for _, b := range [][]byte{config, layer} {
+		up, _ := s.BeginUpload(ctx, "repo")
+		if err := s.CompleteBlob(ctx, up, digestOf(b), bytes.NewReader(b)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	mr, err := s.PutManifest(ctx, "repo", "v1", manifest, configDg, []string{layerDg})
+	if err != nil {
+		t.Fatalf("put manifest: %v", err)
+	}
+
+	scratch := t.TempDir()
+	img, err := s.Assemble(ctx, mr, scratch)
+	if err != nil {
+		t.Fatalf("assemble: %v", err)
+	}
+
+	// rootfs: the gzip layer must be decompressed and extracted.
+	got, err := os.ReadFile(filepath.Join(img.FSPath, "etc", "os-release"))
+	if err != nil {
+		t.Fatalf("read os-release from gunzipped layer: %v", err)
+	}
+	if string(got) != "ID=rhel\n" {
+		t.Errorf("os-release = %q, want ID=rhel", got)
+	}
+
+	// OCI layout: oci-layout marker, index.json, and all three blobs present.
+	if b, err := os.ReadFile(filepath.Join(img.OCIPath, "oci-layout")); err != nil {
+		t.Errorf("missing oci-layout: %v", err)
+	} else if !bytes.Contains(b, []byte("imageLayoutVersion")) {
+		t.Errorf("oci-layout = %q", b)
+	}
+
+	idxRaw, err := os.ReadFile(filepath.Join(img.OCIPath, "index.json"))
+	if err != nil {
+		t.Fatalf("missing index.json: %v", err)
+	}
+	var idx struct {
+		Manifests []struct {
+			Digest string `json:"digest"`
+		} `json:"manifests"`
+	}
+	if err := json.Unmarshal(idxRaw, &idx); err != nil {
+		t.Fatalf("index.json invalid: %v", err)
+	}
+	if len(idx.Manifests) != 1 {
+		t.Fatalf("index.json manifests = %d, want 1", len(idx.Manifests))
+	}
+	wantManifestDg := digestOf(manifest)
+	if idx.Manifests[0].Digest != wantManifestDg {
+		t.Errorf("index manifest digest = %q, want %q", idx.Manifests[0].Digest, wantManifestDg)
+	}
+
+	// config, layer, and manifest blobs must all be in blobs/sha256/<hex>.
+	for _, dg := range []string{configDg, layerDg, wantManifestDg} {
+		hex := dg[len("sha256:"):]
+		if _, err := os.Stat(filepath.Join(img.OCIPath, "blobs", "sha256", hex)); err != nil {
+			t.Errorf("missing OCI blob %s: %v", dg, err)
+		}
+	}
+}
+
+// TestAssembleIndexUsesManifestMediaType verifies the OCI index descriptor's
+// mediaType reflects the actual manifest media type (Docker schema 2 vs OCI), not
+// a hardcoded value. A mismatch makes go-containerregistry push the manifest under
+// the wrong Content-Type, and ACR rejects it with MANIFEST_INVALID.
+func TestAssembleIndexUsesManifestMediaType(t *testing.T) {
+	s := newTestStore()
+	ctx := context.Background()
+
+	// A Docker schema 2 manifest (as produced by `docker push` of many base images).
+	manifest := []byte(`{"schemaVersion":2,"mediaType":"application/vnd.docker.distribution.manifest.v2+json","config":{},"layers":[]}`)
+	layer := gzipBytes(t, makeLayerTar(t, "rhel"))
+	up, _ := s.BeginUpload(ctx, "repo")
+	if err := s.CompleteBlob(ctx, up, digestOf(layer), bytes.NewReader(layer)); err != nil {
+		t.Fatal(err)
+	}
+	mr, err := s.PutManifest(ctx, "repo", "v1", manifest, "", []string{digestOf(layer)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	img, err := s.Assemble(ctx, mr, t.TempDir())
+	if err != nil {
+		t.Fatalf("assemble: %v", err)
+	}
+	idxRaw, err := os.ReadFile(filepath.Join(img.OCIPath, "index.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var idx struct {
+		Manifests []struct {
+			MediaType string `json:"mediaType"`
+		} `json:"manifests"`
+	}
+	if err := json.Unmarshal(idxRaw, &idx); err != nil {
+		t.Fatal(err)
+	}
+	want := "application/vnd.docker.distribution.manifest.v2+json"
+	if len(idx.Manifests) != 1 || idx.Manifests[0].MediaType != want {
+		t.Errorf("index mediaType = %v, want %q", idx.Manifests, want)
+	}
+}
+
 func TestAssembleExtractsRootFS(t *testing.T) {
 	s := newTestStore()
 	ctx := context.Background()
@@ -37,7 +170,7 @@ func TestAssembleExtractsRootFS(t *testing.T) {
 	if err := s.CompleteBlob(ctx, up, dg, bytes.NewReader(layer)); err != nil {
 		t.Fatal(err)
 	}
-	mr, err := s.PutManifest(ctx, "repo", "v1", []byte(`{}`), []string{dg})
+	mr, err := s.PutManifest(ctx, "repo", "v1", []byte(`{}`), "", []string{dg})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +209,7 @@ func TestAssembleContainsPathTraversal(t *testing.T) {
 	if err := s.CompleteBlob(ctx, up, dg, bytes.NewReader(layer)); err != nil {
 		t.Fatal(err)
 	}
-	mr, _ := s.PutManifest(ctx, "repo", "v1", []byte(`{}`), []string{dg})
+	mr, _ := s.PutManifest(ctx, "repo", "v1", []byte(`{}`), "", []string{dg})
 	scratch := t.TempDir()
 	img, err := s.Assemble(ctx, mr, scratch)
 	if err != nil {
@@ -109,7 +242,7 @@ func TestAssembleMultiLayerOrderingOverwrites(t *testing.T) {
 	_ = s.CompleteBlob(ctx, up1, digestOf(l1), bytes.NewReader(l1))
 	up2, _ := s.BeginUpload(ctx, "repo")
 	_ = s.CompleteBlob(ctx, up2, digestOf(l2), bytes.NewReader(l2))
-	mr, _ := s.PutManifest(ctx, "repo", "v1", []byte(`{}`), []string{digestOf(l1), digestOf(l2)})
+	mr, _ := s.PutManifest(ctx, "repo", "v1", []byte(`{}`), "", []string{digestOf(l1), digestOf(l2)})
 	img, err := s.Assemble(ctx, mr, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -130,7 +263,7 @@ func TestAssembleSkipsSymlinkEntries(t *testing.T) {
 	ctx := context.Background()
 	up, _ := s.BeginUpload(ctx, "repo")
 	_ = s.CompleteBlob(ctx, up, digestOf(layer), bytes.NewReader(layer))
-	mr, _ := s.PutManifest(ctx, "repo", "v1", []byte(`{}`), []string{digestOf(layer)})
+	mr, _ := s.PutManifest(ctx, "repo", "v1", []byte(`{}`), "", []string{digestOf(layer)})
 	img, err := s.Assemble(ctx, mr, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -159,7 +292,7 @@ func TestAssembleRejectsTamperedBlob(t *testing.T) {
 	if err := s.CompleteBlob(ctx, up, dg, bytes.NewReader(layer)); err != nil {
 		t.Fatal(err)
 	}
-	mr, err := s.PutManifest(ctx, "repo", "v1", []byte(`{}`), []string{dg})
+	mr, err := s.PutManifest(ctx, "repo", "v1", []byte(`{}`), "", []string{dg})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +317,7 @@ func TestCleanupRemovesScratchAndBlobs(t *testing.T) {
 	if err := s.CompleteBlob(ctx, up, dg, bytes.NewReader(layer)); err != nil {
 		t.Fatal(err)
 	}
-	mr, err := s.PutManifest(ctx, "repo", "v1", []byte(`{}`), []string{dg})
+	mr, err := s.PutManifest(ctx, "repo", "v1", []byte(`{}`), "", []string{dg})
 	if err != nil {
 		t.Fatal(err)
 	}

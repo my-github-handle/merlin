@@ -68,7 +68,7 @@ func TestPushGoodUBIForwarded(t *testing.T) {
 	if err := st.CompleteBlob(ctx, up, dg(layer), bytes.NewReader(layer)); err != nil {
 		t.Fatal(err)
 	}
-	mr, err := st.PutManifest(ctx, "app", "v1", []byte(`{}`), []string{dg(layer)})
+	mr, err := st.PutManifest(ctx, "app", "v1", []byte(`{}`), "", []string{dg(layer)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestPushCriticalCVERejected(t *testing.T) {
 	if err := st.CompleteBlob(ctx, up, dg(layer), bytes.NewReader(layer)); err != nil {
 		t.Fatal(err)
 	}
-	mr, err := st.PutManifest(ctx, "app", "v1", []byte(`{}`), []string{dg(layer)})
+	mr, err := st.PutManifest(ctx, "app", "v1", []byte(`{}`), "", []string{dg(layer)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +136,7 @@ func TestPushAlpineRejectedByBasePolicy(t *testing.T) {
 	if err := st.CompleteBlob(ctx, up, dg(layer), bytes.NewReader(layer)); err != nil {
 		t.Fatal(err)
 	}
-	mr, err := st.PutManifest(ctx, "app", "v1", []byte(`{}`), []string{dg(layer)})
+	mr, err := st.PutManifest(ctx, "app", "v1", []byte(`{}`), "", []string{dg(layer)})
 	if err != nil {
 		t.Fatal(err)
 	}

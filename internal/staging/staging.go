@@ -13,11 +13,15 @@ var (
 	ErrIncompletePush = errors.New("staging: not all blobs complete")
 )
 
-// ManifestRef identifies a staged manifest and its referenced layers.
+// ManifestRef identifies a staged manifest and its referenced blobs. The config
+// blob (JSON image config) is tracked separately from the filesystem layers
+// because only layers are tar+gzip archives to be extracted into the rootfs; the
+// config must be placed in the OCI layout verbatim, never tar-extracted.
 type ManifestRef struct {
 	Repo         string
 	Ref          string
 	Manifest     []byte
+	ConfigDigest string
 	LayerDigests []string
 }
 
@@ -115,13 +119,21 @@ func (s *Store) CompleteBlob(ctx context.Context, uploadID, digest string, r io.
 	return nil
 }
 
-func (s *Store) PutManifest(ctx context.Context, repo, ref string, manifest []byte, layerDigests []string) (ManifestRef, error) {
-	all, err := s.sessions.AllComplete(ctx, layerDigests)
+// PutManifest verifies all referenced blobs (config + layers) have completed
+// staging, then returns the assembled ManifestRef. configDigest is the image
+// config blob; layerDigests are the filesystem layers. configDigest may be empty
+// for manifests that reference no config (e.g. test fixtures).
+func (s *Store) PutManifest(ctx context.Context, repo, ref string, manifest []byte, configDigest string, layerDigests []string) (ManifestRef, error) {
+	required := layerDigests
+	if configDigest != "" {
+		required = append([]string{configDigest}, layerDigests...)
+	}
+	all, err := s.sessions.AllComplete(ctx, required)
 	if err != nil {
 		return ManifestRef{}, fmt.Errorf("check completeness: %w", err)
 	}
 	if !all {
 		return ManifestRef{}, ErrIncompletePush
 	}
-	return ManifestRef{Repo: repo, Ref: ref, Manifest: manifest, LayerDigests: layerDigests}, nil
+	return ManifestRef{Repo: repo, Ref: ref, Manifest: manifest, ConfigDigest: configDigest, LayerDigests: layerDigests}, nil
 }
