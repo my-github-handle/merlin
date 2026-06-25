@@ -26,18 +26,20 @@ func NewClickHouseWriter(dsn string) (Writer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse clickhouse dsn: %w", err)
 	}
+	// Bootstrap FIRST (via a connection scoped to the "default" database): the target
+	// database may not exist yet, so opening+pinging a connection scoped to it would
+	// fail with "Database <db> does not exist". bootstrapSchema creates the database
+	// and the idempotent schema tables before we open the target-scoped connection.
+	if err := bootstrapSchema(opts); err != nil {
+		return nil, fmt.Errorf("bootstrap schema: %w", err)
+	}
 	conn, err := clickhouse.Open(opts)
 	if err != nil {
 		return nil, fmt.Errorf("open clickhouse: %w", err)
 	}
 	if err := conn.Ping(context.Background()); err != nil {
-		return nil, fmt.Errorf("ping clickhouse: %w", err)
-	}
-
-	// Bootstrap schema: create database + tables idempotently
-	if err := bootstrapSchema(opts); err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("bootstrap schema: %w", err)
+		return nil, fmt.Errorf("ping clickhouse: %w", err)
 	}
 
 	return &clickhouseWriter{conn: conn}, nil
