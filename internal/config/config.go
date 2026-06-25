@@ -58,6 +58,7 @@ type AuditConfig struct {
 type ServerConfig struct {
 	Addr           string `yaml:"addr"`
 	MetricsAddr    string `yaml:"metrics_addr"`
+	ExternalURL    string `yaml:"external_url"`
 	MaxUploadBytes int64  `yaml:"max_upload_bytes"`
 	GateTimeout    string `yaml:"gate_timeout"`
 }
