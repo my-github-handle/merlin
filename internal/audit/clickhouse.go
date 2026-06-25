@@ -2,7 +2,9 @@ package audit
 
 import (
 	"context"
+	_ "embed"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
@@ -10,11 +12,15 @@ import (
 	"github.com/merlin-gate/merlin/internal/policy"
 )
 
+//go:embed schema.sql
+var schemaSQL string
+
 type clickhouseWriter struct {
 	conn driver.Conn
 }
 
-// NewClickHouseWriter connects to ClickHouse via a DSN.
+// NewClickHouseWriter connects to ClickHouse via a DSN and self-bootstraps the schema.
+// The writer creates the target database and schema tables idempotently on first construction.
 func NewClickHouseWriter(dsn string) (Writer, error) {
 	opts, err := clickhouse.ParseDSN(dsn)
 	if err != nil {
@@ -27,7 +33,73 @@ func NewClickHouseWriter(dsn string) (Writer, error) {
 	if err := conn.Ping(context.Background()); err != nil {
 		return nil, fmt.Errorf("ping clickhouse: %w", err)
 	}
+
+	// Bootstrap schema: create database + tables idempotently
+	if err := bootstrapSchema(opts); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("bootstrap schema: %w", err)
+	}
+
 	return &clickhouseWriter{conn: conn}, nil
+}
+
+// bootstrapSchema creates the target database and schema tables idempotently.
+// Uses a separate connection to the "default" database to execute CREATE DATABASE,
+// then applies the embedded schema.sql statements. This is safe to call repeatedly.
+func bootstrapSchema(opts *clickhouse.Options) error {
+	ctx := context.Background()
+	targetDB := opts.Auth.Database
+	if targetDB == "" {
+		return fmt.Errorf("target database not specified in DSN")
+	}
+
+	// Create a connection to the "default" database to run CREATE DATABASE.
+	// This avoids the issue of connecting to a database that doesn't exist yet.
+	bootstrapOpts := *opts
+	bootstrapOpts.Auth.Database = "default"
+	bootstrapConn, err := clickhouse.Open(&bootstrapOpts)
+	if err != nil {
+		return fmt.Errorf("open bootstrap connection: %w", err)
+	}
+	defer bootstrapConn.Close()
+
+	// Create the target database if it doesn't exist
+	createDB := fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", targetDB)
+	if err := bootstrapConn.Exec(ctx, createDB); err != nil {
+		return fmt.Errorf("create database %q: %w", targetDB, err)
+	}
+
+	// Now connect to the target database and apply the schema
+	conn, err := clickhouse.Open(opts)
+	if err != nil {
+		return fmt.Errorf("open target connection: %w", err)
+	}
+	defer conn.Close()
+
+	// Split schema.sql into individual statements and execute each
+	statements := splitStatements(schemaSQL)
+	for _, stmt := range statements {
+		if err := conn.Exec(ctx, stmt); err != nil {
+			return fmt.Errorf("exec schema statement: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// splitStatements splits a SQL script into individual statements on semicolons.
+// Filters out empty or whitespace-only statements. Does not handle SQL comments.
+func splitStatements(sql string) []string {
+	parts := strings.Split(sql, ";")
+	var stmts []string
+	for _, p := range parts {
+		trimmed := strings.TrimSpace(p)
+		if trimmed == "" {
+			continue
+		}
+		stmts = append(stmts, trimmed)
+	}
+	return stmts
 }
 
 func (c *clickhouseWriter) WriteDecision(ctx context.Context, d Decision) error {

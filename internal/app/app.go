@@ -132,6 +132,7 @@ func BuildWithBackends(ctx context.Context, cfg config.Config) (*http.Server, *h
 	store := staging.New(blobStore, sessionStore, generatePushID)
 
 	// Audit: ClickHouse writer + auditor + reader
+	// IMPORTANT: Writer must be constructed first — it bootstraps the schema (CREATE DATABASE + tables).
 	auditWriter, err := audit.NewClickHouseWriter(cfg.Audit.ClickHouseDSN)
 	if err != nil {
 		return fail(fmt.Errorf("create audit writer: %w", err))
