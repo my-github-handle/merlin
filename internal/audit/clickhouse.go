@@ -63,6 +63,22 @@ type Reader struct {
 	conn driver.Conn
 }
 
+// NewClickHouseReader connects to ClickHouse for read-only queries.
+func NewClickHouseReader(dsn string) (*Reader, error) {
+	opts, err := clickhouse.ParseDSN(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("parse clickhouse dsn: %w", err)
+	}
+	conn, err := clickhouse.Open(opts)
+	if err != nil {
+		return nil, fmt.Errorf("open clickhouse: %w", err)
+	}
+	if err := conn.Ping(context.Background()); err != nil {
+		return nil, fmt.Errorf("ping clickhouse: %w", err)
+	}
+	return &Reader{conn: conn}, nil
+}
+
 // ImagesByCVE (A): which image digests contained a given CVE.
 func (r *Reader) ImagesByCVE(ctx context.Context, cve string) ([]string, error) {
 	return r.queryStrings(ctx,

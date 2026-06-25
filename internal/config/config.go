@@ -38,6 +38,7 @@ type AuthConfig struct {
 
 type StagingConfig struct {
 	BlobConnString string `yaml:"blob_conn_string"`
+	BlobAccountURL string `yaml:"blob_account_url"`
 	BlobContainer  string `yaml:"blob_container"`
 	ValkeyAddr     string `yaml:"valkey_addr"`
 	ScratchDir     string `yaml:"scratch_dir"`
@@ -46,11 +47,14 @@ type StagingConfig struct {
 
 type AuditConfig struct {
 	ClickHouseDSN string `yaml:"clickhouse_dsn"`
+	QueueSize     int    `yaml:"queue_size"`
 }
 
 type ServerConfig struct {
-	Addr        string `yaml:"addr"`
-	MetricsAddr string `yaml:"metrics_addr"`
+	Addr           string `yaml:"addr"`
+	MetricsAddr    string `yaml:"metrics_addr"`
+	MaxUploadBytes int64  `yaml:"max_upload_bytes"`
+	GateTimeout    string `yaml:"gate_timeout"`
 }
 
 // Load reads a YAML config file, applies defaults, and validates required fields.
@@ -77,11 +81,20 @@ func (c *Config) applyDefaults() {
 	if c.Staging.ScanPoolSize == 0 {
 		c.Staging.ScanPoolSize = 4
 	}
+	if c.Audit.QueueSize == 0 {
+		c.Audit.QueueSize = 1024
+	}
 	if c.Server.Addr == "" {
 		c.Server.Addr = ":5000"
 	}
 	if c.Server.MetricsAddr == "" {
 		c.Server.MetricsAddr = ":9090"
+	}
+	if c.Server.MaxUploadBytes == 0 {
+		c.Server.MaxUploadBytes = 1 << 30 // 1 GiB default
+	}
+	if c.Server.GateTimeout == "" {
+		c.Server.GateTimeout = "5m"
 	}
 }
 
