@@ -17,6 +17,10 @@ func (h *Handler) handleUpload(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		// POST /v2/<repo>/blobs/uploads/ → begin upload
 		repo := parseUploadRepo(r.URL.Path)
+		if repo == "" {
+			http.Error(w, "missing repository name", http.StatusBadRequest)
+			return
+		}
 		uploadID, err := h.store.BeginUpload(ctx, repo)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("begin upload: %v", err), http.StatusInternalServerError)

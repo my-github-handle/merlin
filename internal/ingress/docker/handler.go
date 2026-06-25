@@ -3,6 +3,7 @@ package docker
 import (
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/merlin-gate/merlin/internal/auth"
 	"github.com/merlin-gate/merlin/internal/router"
@@ -19,6 +20,8 @@ type Handler struct {
 	reports        ReportSource
 	mux            *http.ServeMux
 	maxUploadBytes int64
+	pool           *router.Pool
+	gateTimeout    time.Duration
 }
 
 // NewHandler builds the V2 handler. reports backs GET /reports/<push_id>.
@@ -41,6 +44,16 @@ func (h *Handler) getMaxUploadBytes() int64 {
 		return 2 << 30 // 2 GiB default
 	}
 	return h.maxUploadBytes
+}
+
+// SetPool configures the gate pool for concurrent scan limiting.
+func (h *Handler) SetPool(p *router.Pool) {
+	h.pool = p
+}
+
+// SetGateTimeout configures the gate timeout (default 5 minutes when pool is used).
+func (h *Handler) SetGateTimeout(d time.Duration) {
+	h.gateTimeout = d
 }
 
 func (h *Handler) route(w http.ResponseWriter, r *http.Request) {
@@ -78,6 +91,16 @@ func (h *Handler) authenticate(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	return true
+}
+
+// validatedIdentity re-validates the bearer token and returns the identity.
+func (h *Handler) validatedIdentity(r *http.Request) (auth.Identity, bool) {
+	bearer := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	identity, err := h.auth.Validate(r.Context(), bearer)
+	if err != nil {
+		return auth.Identity{}, false
+	}
+	return identity, true
 }
 
 // handleUpload and handleManifest are implemented in upload.go / manifest.go.
