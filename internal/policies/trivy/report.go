@@ -43,9 +43,13 @@ func ParseReport(raw []byte) (Report, error) {
 	rep := Report{DBVersion: tj.Metadata.DBVersion}
 	for _, res := range tj.Results {
 		for _, v := range res.Vulnerabilities {
+			sev := strings.ToUpper(strings.TrimSpace(v.Severity))
+			if sev == "" {
+				sev = "UNKNOWN"
+			}
 			rep.Findings = append(rep.Findings, policy.Finding{
 				CVE:          v.VulnerabilityID,
-				Severity:     strings.ToUpper(strings.TrimSpace(v.Severity)),
+				Severity:     sev,
 				Pkg:          v.PkgName,
 				Version:      v.InstalledVersion,
 				FixedVersion: v.FixedVersion,

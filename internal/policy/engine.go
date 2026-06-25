@@ -5,6 +5,14 @@ import (
 	"fmt"
 )
 
+// FindingsReporter is an optional capability: a policy that produces vulnerability
+// findings (e.g. the Trivy scanner) implements it so the engine can aggregate them
+// into Result.Findings for the audit trail and response summary.
+type FindingsReporter interface {
+	ReportedFindings() []Finding
+	ScannerDBVersion() string
+}
+
 // Engine runs a fixed, ordered set of policies against a staged image.
 type Engine struct {
 	policies []Policy
@@ -32,6 +40,13 @@ func (e *Engine) Run(ctx context.Context, img StagedImage) (Result, error) {
 		res.Verdicts[p.Name()] = v
 		if !v.Passed {
 			res.Passed = false
+		}
+		// Collect findings from policies that produce vulnerability reports.
+		if reporter, ok := p.(FindingsReporter); ok {
+			res.Findings = append(res.Findings, reporter.ReportedFindings()...)
+			if dbv := reporter.ScannerDBVersion(); dbv != "" {
+				res.TrivyDBVersion = dbv
+			}
 		}
 	}
 	if infraErr != nil {

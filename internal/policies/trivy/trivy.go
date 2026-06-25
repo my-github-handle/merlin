@@ -34,6 +34,12 @@ func (p *Policy) Name() string { return "trivy" }
 // LastReport returns the most recent scan report (findings + DB version).
 func (p *Policy) LastReport() Report { return p.lastReport }
 
+// ReportedFindings implements policy.FindingsReporter.
+func (p *Policy) ReportedFindings() []policy.Finding { return p.lastReport.Findings }
+
+// ScannerDBVersion implements policy.FindingsReporter.
+func (p *Policy) ScannerDBVersion() string { return p.lastReport.DBVersion }
+
 func (p *Policy) Evaluate(ctx context.Context, img policy.StagedImage) (policy.Verdict, error) {
 	if img.OCIPath == "" {
 		return policy.Verdict{}, fmt.Errorf("trivy scan: empty OCI path for image")
