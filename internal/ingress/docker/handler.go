@@ -101,11 +101,18 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) {
 		}
 		h.handleUpload(w, r)
 	case strings.Contains(r.URL.Path, "/manifests/"):
-		if r.Method != http.MethodPut {
+		switch r.Method {
+		case http.MethodPut:
+			h.handleManifest(w, r)
+		case http.MethodGet, http.MethodHead:
+			// Docker issues a GET/HEAD manifest existence check during push. Merlin
+			// is a push gate, not a pull-through registry, so it holds no manifest
+			// until one passes the gate and is forwarded to ACR. Report 404 (not
+			// 405) so the docker client proceeds with the upload+PUT.
+			w.WriteHeader(http.StatusNotFound)
+		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
 		}
-		h.handleManifest(w, r)
 	default:
 		http.NotFound(w, r)
 	}

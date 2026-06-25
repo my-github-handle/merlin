@@ -144,3 +144,19 @@ func TestRepoFromV2Path(t *testing.T) {
 		}
 	}
 }
+
+func TestManifestGetHeadReturns404NotMethodNotAllowed(t *testing.T) {
+	iss := auth.NewRegistryTokenIssuer([]byte("s"), "merlin", time.Minute)
+	h := NewHandler(fakeAuth{ok: true}, nil, nil, nil, "myreg.azurecr.io", nil)
+	h.SetRegistryAuth(iss, "https://merlin.example/token", "merlin")
+	tok, _, _ := iss.Mint("u@x", "")
+	for _, m := range []string{http.MethodGet, http.MethodHead} {
+		req := httptest.NewRequest(m, "/v2/app/manifests/v1", nil)
+		req.Header.Set("Authorization", "Bearer "+tok)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("%s manifest: code = %d, want 404 (so docker proceeds with push)", m, rec.Code)
+		}
+	}
+}
