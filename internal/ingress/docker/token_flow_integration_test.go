@@ -35,7 +35,9 @@ func TestDockerTokenHandshake(t *testing.T) {
 	if err != nil || tokResp.StatusCode != http.StatusOK {
 		t.Fatalf("/token code = %v err=%v", tokResp.StatusCode, err)
 	}
-	var body struct{ Token string `json:"token"` }
+	var body struct {
+		Token string `json:"token"`
+	}
 	_ = json.NewDecoder(tokResp.Body).Decode(&body)
 	if body.Token == "" {
 		t.Fatal("no token issued")
