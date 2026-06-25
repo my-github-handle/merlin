@@ -51,7 +51,7 @@ A rejected image is **not** published.
 ## 2. Get the Trivy scan results
 
 Every push (pass or fail) records the full Trivy report. Retrieve it from the
-report endpoint, keyed by the push ID:
+report endpoint, addressed by **the image reference you pushed** — no push ID needed:
 
 ```bash
 # Get a registry token scoped to your repo (pull scope is enough for reports).
@@ -60,13 +60,22 @@ REG=$(curl -s -u "00000000-0000-0000-0000-000000000000:$TOKEN" \
   "https://merlin.example.com/token?service=merlin&scope=repository:app:pull" \
   | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
 
-# Fetch the scan report (JSON array of findings).
+# Fetch the scan report by the tag you pushed (JSON array of findings).
 curl -s -H "Authorization: Bearer $REG" \
-  "https://merlin.example.com/reports/<push_id>"
+  "https://merlin.example.com/reports/app:v1"
 ```
 
-The `<push_id>` is the last path segment of the `X-Merlin-Scan-Report-URL`
-header returned on the manifest PUT. Example response:
+The report path accepts any of:
+
+- **`app:v1`** — the `repo:tag` you pushed. If no exact tag match exists (e.g. a
+  `docker buildx` push records the image by digest, not tag), it returns the most
+  recent push for that repo.
+- **`app@sha256:<digest>`** — exact, unambiguous lookup by manifest digest (the
+  digest is shown in the `docker push` output).
+- **`<push_id>`** — the opaque ID from the `X-Merlin-Scan-Report-URL` response
+  header on the manifest PUT.
+
+Example response:
 
 ```json
 [
