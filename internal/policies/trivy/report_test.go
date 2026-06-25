@@ -56,3 +56,31 @@ func TestParseReportRejectsMissingSchemaVersion(t *testing.T) {
 		t.Fatal("expected error for missing SchemaVersion")
 	}
 }
+
+func TestParseReportEmptySeverityBecomesUNKNOWN(t *testing.T) {
+	const emptySevJSON = `{
+	  "SchemaVersion": 2,
+	  "Metadata": {"DBVersion": "2024-06-24"},
+	  "Results": [
+	    {
+	      "Vulnerabilities": [
+	        {"VulnerabilityID":"CVE-EMPTY","Severity":"","PkgName":"pkg1","InstalledVersion":"1.0.0"},
+	        {"VulnerabilityID":"CVE-WHITESPACE","Severity":"  ","PkgName":"pkg2","InstalledVersion":"2.0.0"}
+	      ]
+	    }
+	  ]
+	}`
+	r, err := ParseReport([]byte(emptySevJSON))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(r.Findings) != 2 {
+		t.Fatalf("findings = %d, want 2", len(r.Findings))
+	}
+	if r.Findings[0].Severity != "UNKNOWN" {
+		t.Errorf("empty severity finding[0].Severity = %q, want UNKNOWN", r.Findings[0].Severity)
+	}
+	if r.Findings[1].Severity != "UNKNOWN" {
+		t.Errorf("whitespace severity finding[1].Severity = %q, want UNKNOWN", r.Findings[1].Severity)
+	}
+}

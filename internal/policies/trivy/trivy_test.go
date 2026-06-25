@@ -83,3 +83,37 @@ func TestEvaluateEmptyOCIPathIsError(t *testing.T) {
 		t.Error("empty OCIPath must return an error, not pass")
 	}
 }
+
+func TestReportedFindings(t *testing.T) {
+	findings := []policy.Finding{
+		{CVE: "CVE-2024-1111", Severity: "CRITICAL", Pkg: "curl", Version: "8.0.0"},
+		{CVE: "CVE-2024-2222", Severity: "HIGH", Pkg: "nginx", Version: "1.24.0"},
+	}
+	r := fakeRunner{report: Report{Findings: findings, DBVersion: "db-2024-06-23"}}
+	p := New(r, "HIGH")
+	_, err := p.Evaluate(context.Background(), policy.StagedImage{OCIPath: "/oci"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	reported := p.ReportedFindings()
+	if len(reported) != 2 {
+		t.Errorf("ReportedFindings() = %d, want 2", len(reported))
+	}
+	if reported[0].CVE != "CVE-2024-1111" {
+		t.Errorf("first finding CVE = %q, want CVE-2024-1111", reported[0].CVE)
+	}
+	dbv := p.ScannerDBVersion()
+	if dbv != "db-2024-06-23" {
+		t.Errorf("ScannerDBVersion() = %q, want db-2024-06-23", dbv)
+	}
+}
+
+func TestReportedFindingsBeforeEvaluate(t *testing.T) {
+	p := New(fakeRunner{}, "CRITICAL")
+	if len(p.ReportedFindings()) != 0 {
+		t.Error("ReportedFindings() before Evaluate should return empty slice")
+	}
+	if p.ScannerDBVersion() != "" {
+		t.Error("ScannerDBVersion() before Evaluate should return empty string")
+	}
+}

@@ -16,13 +16,15 @@ type Handler struct {
 	router   *router.Router
 	outcome  *Outcome
 	registry string
+	reports  ReportSource
 	mux      *http.ServeMux
 }
 
-// NewHandler builds the V2 handler.
-func NewHandler(a auth.Authenticator, st *staging.Store, r *router.Router, o *Outcome, registry string) *Handler {
-	h := &Handler{auth: a, store: st, router: r, outcome: o, registry: registry, mux: http.NewServeMux()}
+// NewHandler builds the V2 handler. reports backs GET /reports/<push_id>.
+func NewHandler(a auth.Authenticator, st *staging.Store, r *router.Router, o *Outcome, registry string, reports ReportSource) *Handler {
+	h := &Handler{auth: a, store: st, router: r, outcome: o, registry: registry, reports: reports, mux: http.NewServeMux()}
 	h.mux.HandleFunc("/v2/", h.route)
+	h.mux.HandleFunc("/reports/", h.handleReport)
 	return h
 }
 
@@ -39,8 +41,16 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case strings.Contains(r.URL.Path, "/blobs/uploads/"):
+		if r.Method != http.MethodPost && r.Method != http.MethodPatch && r.Method != http.MethodPut {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
 		h.handleUpload(w, r)
 	case strings.Contains(r.URL.Path, "/manifests/"):
+		if r.Method != http.MethodPut {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
 		h.handleManifest(w, r)
 	default:
 		http.NotFound(w, r)
