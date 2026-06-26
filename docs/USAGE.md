@@ -92,10 +92,11 @@ Each finding has `CVE`, `Severity` (`LOW`/`MEDIUM`/`HIGH`/`CRITICAL`), `Pkg`,
 
 ## Observability Dashboard
 
-Merlin ships a built-in, read-only dashboard. It is **off by default** and turns on
-when you set `server.dashboard_addr` in config (e.g. `:8080`). It is served on its
-own port — keep that port network-restricted (it exposes who pushed what and your
-vulnerability posture; there is no application-level auth in this version).
+Merlin ships a built-in, read-only dashboard. It is **on by default**, served on
+`:8080` (override with `server.dashboard_addr`, or set it to `off` to disable). It
+is served on its own port — keep that port network-restricted (it exposes who
+pushed what and your vulnerability posture; there is no application-level auth in
+this version).
 
 Tabs:
 - **Activity** — live feed of gate decisions (streams over SSE) plus headline KPIs.
@@ -120,7 +121,7 @@ exist only for images Merlin has gated (pass or reject).
 
 ```yaml
 server:
-  dashboard_addr: ":8080"   # empty/unset = dashboard disabled
+  dashboard_addr: ":8080"   # default :8080; set "off" to disable
 audit:
   retention_days: 30        # audit + findings TTL
 ```

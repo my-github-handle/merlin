@@ -6,8 +6,9 @@ Transparent Docker Registry V2 proxy that gates image publishing to ACR.
 
 - **[docs/USAGE.md](docs/USAGE.md)** — how to publish an image and get Trivy scan results.
 - **[docs/specs.md](docs/specs.md)** — design and requirements.
-- **Built-in dashboard** — set `server.dashboard_addr` to serve a read-only
-  observability UI (activity, health, vulnerabilities, scan reports). See
+- **Built-in dashboard** — a read-only observability UI (activity, health,
+  vulnerabilities, scan reports) served on `:8080` by default
+  (`server.dashboard_addr`, or `off` to disable). See
   [docs/USAGE.md](docs/USAGE.md#observability-dashboard).
 
 ## Building

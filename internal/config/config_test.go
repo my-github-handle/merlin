@@ -285,11 +285,32 @@ func TestDashboardAndRetentionDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if cfg.Server.DashboardAddr != "" {
-		t.Errorf("DashboardAddr default = %q, want empty (disabled)", cfg.Server.DashboardAddr)
+	if cfg.Server.DashboardAddr != ":8080" {
+		t.Errorf("DashboardAddr default = %q, want :8080 (on by default)", cfg.Server.DashboardAddr)
 	}
 	if cfg.Audit.RetentionDays != 30 {
 		t.Errorf("RetentionDays default = %d, want 30", cfg.Audit.RetentionDays)
+	}
+}
+
+func TestDashboardAddrOffPreserved(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	// "off" is the explicit disable sentinel; applyDefaults must NOT override it.
+	yaml := "" +
+		"acr:\n  registry: example.azurecr.io\n" +
+		"auth:\n  issuer: https://issuer\n  audience: api://merlin\n" +
+		"base_image:\n  allowed_ids: [\"ubi9\"]\n" +
+		"server:\n  dashboard_addr: \"off\"\n"
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Server.DashboardAddr != "off" {
+		t.Errorf("DashboardAddr = %q, want \"off\" (explicit disable preserved)", cfg.Server.DashboardAddr)
 	}
 }
 

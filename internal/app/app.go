@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -213,9 +214,9 @@ func BuildWithBackends(ctx context.Context, cfg config.Config) (*http.Server, *h
 	mainSrv := &http.Server{Addr: cfg.Server.Addr, Handler: handler}
 	metricsSrv := &http.Server{Addr: cfg.Server.MetricsAddr, Handler: metrics.Handler()}
 
-	// Optional dashboard server (off unless dashboard_addr is set).
+	// Dashboard server: on by default, built unless dashboard_addr is "off".
 	var dashSrv *http.Server
-	if cfg.Server.DashboardAddr != "" {
+	if !strings.EqualFold(cfg.Server.DashboardAddr, "off") && cfg.Server.DashboardAddr != "" {
 		broadcaster := dashboard.NewBroadcaster(64)
 		// Tee gate decisions into the live feed without changing the audit path.
 		outcome.Recorder = dashboard.NewTeeRecorder(auditor, broadcaster)

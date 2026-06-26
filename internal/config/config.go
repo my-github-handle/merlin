@@ -59,7 +59,7 @@ type AuditConfig struct {
 type ServerConfig struct {
 	Addr           string `yaml:"addr"`
 	MetricsAddr    string `yaml:"metrics_addr"`
-	DashboardAddr  string `yaml:"dashboard_addr"`
+	DashboardAddr  string `yaml:"dashboard_addr"` // default ":8080"; set "off" to disable
 	ExternalURL    string `yaml:"external_url"`
 	MaxUploadBytes int64  `yaml:"max_upload_bytes"`
 	GateTimeout    string `yaml:"gate_timeout"`
@@ -104,6 +104,10 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Server.MetricsAddr == "" {
 		c.Server.MetricsAddr = ":9090"
+	}
+	if c.Server.DashboardAddr == "" {
+		// Dashboard is on by default. Set dashboard_addr to "off" to disable it.
+		c.Server.DashboardAddr = ":8080"
 	}
 	if c.Server.MaxUploadBytes == 0 {
 		c.Server.MaxUploadBytes = 1 << 30 // 1 GiB default
