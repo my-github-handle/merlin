@@ -13,6 +13,8 @@ import (
 	dto "github.com/prometheus/client_model/go"
 )
 
+const imagesPerPage = 10
+
 // Service turns the audit Reader + Prometheus gatherer into view models.
 type Service struct {
 	r   audit.DashboardReader
@@ -278,4 +280,47 @@ func matchLabel(m *dto.Metric, label, value string) bool {
 		}
 	}
 	return false
+}
+
+func (s *Service) Images(ctx context.Context, rng Range, f audit.ImageFilter, page int) (ImagesVM, error) {
+	if page < 1 {
+		page = 1
+	}
+	vm := ImagesVM{Range: rng, PageMeta: PageMeta{Page: page, PerPage: imagesPerPage}}
+	pg, err := s.r.ImagesPage(ctx, s.sinceFor(rng), f, imagesPerPage, (page-1)*imagesPerPage)
+	if err != nil {
+		vm.Errored = true
+		return vm, nil
+	}
+	vm.Total = pg.Total
+	vm.HasPrev = page > 1
+	vm.HasNext = uint64(page*imagesPerPage) < pg.Total
+	for _, ir := range pg.Rows {
+		vm.Images = append(vm.Images, ImageVM(ir))
+	}
+	return vm, nil
+}
+
+func (s *Service) Overview(ctx context.Context, rng Range) (OverviewVM, error) {
+	vm := OverviewVM{Range: rng, PageMeta: PageMeta{Page: 1, PerPage: imagesPerPage}}
+	if st, err := s.r.DecisionStatsSince(ctx, s.sinceFor(rng)); err != nil {
+		vm.Errored = true
+	} else {
+		vm.Stats = toStatsVM(st)
+	}
+	vm.TrivyDBAgeDays = s.gaugeValue("merlin_trivy_db_age_days")
+	ok := s.counterValue("merlin_acr_push_total", "result", "ok")
+	errc := s.counterValue("merlin_acr_push_total", "result", "error")
+	if ok+errc > 0 {
+		vm.ACRPushSuccess = ok / (ok + errc) * 100
+	}
+	img, _ := s.Images(ctx, rng, audit.ImageFilter{}, 1)
+	if img.Errored {
+		vm.Errored = true
+	}
+	vm.Images = img.Images
+	vm.Total = img.Total
+	vm.HasPrev = img.HasPrev
+	vm.HasNext = img.HasNext
+	return vm, nil
 }

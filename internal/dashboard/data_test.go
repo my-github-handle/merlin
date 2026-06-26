@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -85,6 +86,15 @@ func (f fakeReader) FindingsByPush(context.Context, string) ([]policy.Finding, e
 }
 func (f fakeReader) FindingsByImageRef(context.Context, string, string) ([]policy.Finding, error) {
 	return f.finds, f.err
+}
+func (f fakeReader) ImagesPage(_ context.Context, _ time.Time, _ audit.ImageFilter, limit, offset int) (audit.ImagePage, error) {
+	if f.err != nil {
+		return audit.ImagePage{}, f.err
+	}
+	return audit.ImagePage{
+		Total: 1,
+		Rows:  []audit.ImageRow{{Repo: "a/b", Tag: "v1", Identity: "ci", Passed: false, Crit: 1, High: 2}},
+	}, nil
 }
 
 func newTestService(fr audit.DashboardReader) *Service {
@@ -334,5 +344,47 @@ func TestSeverityRankUnknown(t *testing.T) {
 	}
 	if vm.Counts.Unknown != 1 {
 		t.Errorf("Unknown count=%v want 1", vm.Counts.Unknown)
+	}
+}
+
+func TestOverviewViewModel(t *testing.T) {
+	svc := newTestService(fakeReader{stats: audit.DecisionStats{Total: 10, Passed: 8, Rejected: 2}})
+	vm, err := svc.Overview(context.Background(), Range7d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vm.Stats.PassRate != 80 {
+		t.Errorf("PassRate=%v want 80", vm.Stats.PassRate)
+	}
+	if len(vm.Images) != 1 || vm.Images[0].Repo != "a/b" {
+		t.Errorf("expected one image row, got %+v", vm.Images)
+	}
+	if vm.Total != 1 || vm.Page != 1 {
+		t.Errorf("pagination meta wrong: total=%d page=%d", vm.Total, vm.Page)
+	}
+}
+
+func TestImagesPagination(t *testing.T) {
+	svc := newTestService(fakeReader{})
+	vm, err := svc.Images(context.Background(), Range1d, audit.ImageFilter{}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vm.Page != 1 || vm.PerPage != 10 {
+		t.Errorf("page=%d perPage=%d want 1/10", vm.Page, vm.PerPage)
+	}
+	if len(vm.Images) != 1 {
+		t.Errorf("want 1 row, got %d", len(vm.Images))
+	}
+}
+
+func TestImagesDegradesOnError(t *testing.T) {
+	svc := newTestService(fakeReader{err: errors.New("ch down")})
+	vm, err := svc.Images(context.Background(), Range1d, audit.ImageFilter{}, 1)
+	if err != nil {
+		t.Fatalf("Images must not return error on backend failure: %v", err)
+	}
+	if !vm.Errored {
+		t.Error("expected Errored=true when reader fails")
 	}
 }

@@ -131,3 +131,40 @@ type ReportVM struct {
 type FindingVM struct {
 	CVE, Severity, Pkg, Version, FixedVersion string
 }
+
+// ImageVM is one row in the Overview images table.
+type ImageVM struct {
+	Ts                        time.Time
+	PushID, Repo, Tag, Digest string
+	Identity                  string
+	Passed                    bool
+	Crit, High, Med, Low      uint64
+}
+
+// pagination meta shared by Overview + Images.
+type PageMeta struct {
+	Page    int // 1-based
+	PerPage int // 10
+	Total   uint64
+	HasPrev bool
+	HasNext bool
+}
+
+// ImagesVM is a page of images for the AJAX/JSON endpoint.
+type ImagesVM struct {
+	Range  Range
+	Images []ImageVM
+	PageMeta
+	Errored bool
+}
+
+// OverviewVM is the single landing page: hero KPIs + first page of images.
+type OverviewVM struct {
+	Range          Range
+	Stats          StatsVM // pass rate + latency (existing)
+	TrivyDBAgeDays float64
+	ACRPushSuccess float64
+	Images         []ImageVM
+	PageMeta
+	Errored bool
+}
