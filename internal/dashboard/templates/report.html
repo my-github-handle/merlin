@@ -12,7 +12,7 @@
   <span class="chip warn">{{.VM.Counts.High}} High</span>
   <span class="chip">{{.VM.Counts.Medium}} Medium</span>
   <span class="chip muted">{{.VM.Counts.Low}} Low</span>
-  <a class="chip" href="/api/dashboard/report.json?ref={{.VM.Repo}}:{{.VM.Tag}}">Export JSON</a>
+  <a class="chip" href="/api/dashboard/report.json?push_id={{.VM.PushID}}">Export JSON</a>
 </section>
 <section class="panel"><h4>Findings</h4>
   <input id="filter" class="filterbox" placeholder="filter by CVE, package, or severity…">

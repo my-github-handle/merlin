@@ -9,10 +9,29 @@
         var row = document.createElement('div');
         row.className = 'row ' + (d.passed ? 'pass' : 'fail');
         var ref = (d.repo || '') + (d.tag ? ':' + d.tag : '');
-        row.innerHTML = '<span class="led"></span>' +
-          '<a class="ref" href="/report?ref=' + encodeURIComponent(ref) + '">' + ref + '</a>' +
-          '<span class="who">' + (d.identity || '') + '</span>' +
-          '<span class="badge">' + (d.passed ? 'PASS' : 'REJECT') + '</span>';
+
+        // Build row with DOM APIs to prevent XSS from user-controlled fields
+        var led = document.createElement('span');
+        led.className = 'led';
+
+        var refLink = document.createElement('a');
+        refLink.className = 'ref';
+        refLink.href = '/report?ref=' + encodeURIComponent(ref);
+        refLink.textContent = ref;  // textContent escapes HTML
+
+        var who = document.createElement('span');
+        who.className = 'who';
+        who.textContent = d.identity || '';  // textContent escapes HTML
+
+        var badge = document.createElement('span');
+        badge.className = 'badge';
+        badge.textContent = d.passed ? 'PASS' : 'REJECT';  // boolean-derived, safe
+
+        row.appendChild(led);
+        row.appendChild(refLink);
+        row.appendChild(who);
+        row.appendChild(badge);
+
         feed.insertBefore(row, feed.firstChild);
         while (feed.children.length > 100) { feed.removeChild(feed.lastChild); }
       } catch (_) {}
