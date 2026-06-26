@@ -267,3 +267,66 @@ func (r *Reader) scanHeader(ctx context.Context, q string, args ...any) (Decisio
 	h.Found = true
 	return h, nil
 }
+
+// ImagesPage returns one page of gated images (newest first) with severity tallies,
+// plus the total matching count. All caller input is bound as parameters.
+func (r *Reader) ImagesPage(ctx context.Context, since time.Time, f ImageFilter, limit, offset int) (ImagePage, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	// Build the WHERE clause from bound predicates.
+	where := "ts >= ?"
+	args := []any{since}
+	if f.Text != "" {
+		where += " AND (positionCaseInsensitive(image_repo, ?) > 0 OR positionCaseInsensitive(image_tag, ?) > 0 OR positionCaseInsensitive(identity, ?) > 0)"
+		args = append(args, f.Text, f.Text, f.Text)
+	}
+	if f.RejectedOnly {
+		where += " AND passed = false"
+	}
+
+	var page ImagePage
+	// Total count (pre-pagination). hasCritical needs the findings join, so count from the same CTE.
+	// Use a subquery that resolves per-push severity tallies, then filter/count.
+	base := `
+WITH per_push AS (
+  SELECT d.ts AS ts, d.push_id AS push_id, d.image_repo AS image_repo, d.image_tag AS image_tag,
+         d.image_digest AS image_digest, d.identity AS identity, d.passed AS passed,
+         countIf(f.severity = 'CRITICAL') AS crit, countIf(f.severity = 'HIGH') AS high,
+         countIf(f.severity = 'MEDIUM') AS med, countIf(f.severity = 'LOW') AS low
+  FROM gate_decisions d
+  LEFT JOIN vulnerability_findings f ON f.push_id = d.push_id
+  WHERE ` + where + `
+  GROUP BY ts, push_id, image_repo, image_tag, image_digest, identity, passed
+)`
+	having := ""
+	if f.HasCritical {
+		having = " WHERE crit > 0"
+	}
+
+	// Total.
+	if err := r.conn.QueryRow(ctx, base+" SELECT count() FROM per_push"+having, args...).Scan(&page.Total); err != nil {
+		return ImagePage{}, err
+	}
+	// Page rows.
+	rowArgs := append(append([]any{}, args...), limit, offset)
+	rows, err := r.conn.Query(ctx, base+
+		" SELECT ts, toString(push_id), image_repo, image_tag, image_digest, identity, passed, crit, high, med, low FROM per_push"+
+		having+" ORDER BY ts DESC LIMIT ? OFFSET ?", rowArgs...)
+	if err != nil {
+		return ImagePage{}, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var ir ImageRow
+		if err := rows.Scan(&ir.Ts, &ir.PushID, &ir.Repo, &ir.Tag, &ir.Digest, &ir.Identity, &ir.Passed,
+			&ir.Crit, &ir.High, &ir.Med, &ir.Low); err != nil {
+			return ImagePage{}, err
+		}
+		page.Rows = append(page.Rows, ir)
+	}
+	return page, rows.Err()
+}

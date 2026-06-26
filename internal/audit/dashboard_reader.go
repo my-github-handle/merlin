@@ -102,6 +102,34 @@ type DecisionHeader struct {
 	Ts             time.Time
 }
 
+// ImageRow is one gated image (one push) with its severity tallies.
+type ImageRow struct {
+	Ts       time.Time
+	PushID   string
+	Repo     string
+	Tag      string
+	Digest   string
+	Identity string
+	Passed   bool
+	Crit     uint64
+	High     uint64
+	Med      uint64
+	Low      uint64
+}
+
+// ImageFilter narrows the images page. Text matches repo/tag/identity (substring).
+type ImageFilter struct {
+	Text         string
+	HasCritical  bool
+	RejectedOnly bool
+}
+
+// ImagePage is one page of images plus the total matching count (for pagination).
+type ImagePage struct {
+	Rows  []ImageRow
+	Total uint64
+}
+
 // DashboardReader is the read surface the dashboard data service depends on.
 // `since` bounds each query to a time window; `limit` caps row counts.
 type DashboardReader interface {
@@ -118,4 +146,5 @@ type DashboardReader interface {
 	DecisionHeaderByPush(ctx context.Context, pushID string) (DecisionHeader, error)
 	FindingsByPush(ctx context.Context, pushID string) ([]policy.Finding, error)
 	FindingsByImageRef(ctx context.Context, repo, ref string) ([]policy.Finding, error)
+	ImagesPage(ctx context.Context, since time.Time, f ImageFilter, limit, offset int) (ImagePage, error)
 }

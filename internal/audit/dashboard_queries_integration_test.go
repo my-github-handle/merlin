@@ -68,4 +68,16 @@ func TestDashboardQueriesRoundTrip(t *testing.T) {
 	if err != nil || !hdr.Found || hdr.BaseImageID != "ubi9" {
 		t.Fatalf("DecisionHeaderByRef err=%v found=%v base=%q", err, hdr.Found, hdr.BaseImageID)
 	}
+
+	pg, err := r.ImagesPage(ctx, since, ImageFilter{}, 10, 0)
+	if err != nil || pg.Total == 0 || len(pg.Rows) == 0 {
+		t.Fatalf("ImagesPage err=%v total=%d rows=%d", err, pg.Total, len(pg.Rows))
+	}
+	if pg.Rows[0].Crit == 0 {
+		t.Errorf("expected the CRITICAL finding tallied on the row, got crit=0")
+	}
+	// hasCritical filter keeps it; rejectedOnly keeps it (the fixture decision failed).
+	if pgc, err := r.ImagesPage(ctx, since, ImageFilter{HasCritical: true, RejectedOnly: true}, 10, 0); err != nil || pgc.Total == 0 {
+		t.Fatalf("filtered ImagesPage err=%v total=%d", err, pgc.Total)
+	}
 }
