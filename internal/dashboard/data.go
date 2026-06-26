@@ -1,0 +1,281 @@
+// Package dashboard serves Merlin's built-in observability UI.
+package dashboard
+
+import (
+	"context"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/merlin-gate/merlin/internal/audit"
+	"github.com/merlin-gate/merlin/internal/policy"
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
+)
+
+// Service turns the audit Reader + Prometheus gatherer into view models.
+type Service struct {
+	r   audit.DashboardReader
+	g   prometheus.Gatherer
+	now func() time.Time
+}
+
+// NewService builds the data service. now defaults to time.Now when nil.
+func NewService(r audit.DashboardReader, g prometheus.Gatherer, now func() time.Time) *Service {
+	if now == nil {
+		now = time.Now
+	}
+	return &Service{r: r, g: g, now: now}
+}
+
+func (s *Service) sinceFor(rng Range) time.Time {
+	switch rng {
+	case Range7d:
+		return s.now().Add(-7 * 24 * time.Hour)
+	case Range30d:
+		return s.now().Add(-30 * 24 * time.Hour)
+	default:
+		return s.now().Add(-24 * time.Hour)
+	}
+}
+
+func toStatsVM(st audit.DecisionStats) StatsVM {
+	vm := StatsVM{
+		Total: st.Total, Passed: st.Passed, Rejected: st.Rejected,
+		PassRate: PassRate(st.Passed, st.Total),
+		P50:      st.Latency.P50, P95: st.Latency.P95, P99: st.Latency.P99,
+	}
+	for _, rr := range st.RejectReasons {
+		pct := 0.0
+		if st.Rejected > 0 {
+			pct = float64(rr.Count) / float64(st.Rejected) * 100
+		}
+		vm.RejectReasons = append(vm.RejectReasons, LabeledVM{Label: rr.Label, Count: rr.Count, Pct: pct})
+	}
+	return vm
+}
+
+func (s *Service) Activity(ctx context.Context, rng Range) (ActivityVM, error) {
+	vm := ActivityVM{Range: rng}
+	since := s.sinceFor(rng)
+	st, err := s.r.DecisionStatsSince(ctx, since)
+	if err != nil {
+		vm.Errored = true
+	} else {
+		vm.Stats = toStatsVM(st)
+	}
+	recent, err := s.r.RecentDecisions(ctx, 50)
+	if err != nil {
+		vm.Errored = true
+	}
+	for _, d := range recent {
+		vm.Recent = append(vm.Recent, DecisionVM{
+			Ts: d.Ts, PushID: d.PushID, Repo: d.Repo, Tag: d.Tag, Digest: d.Digest,
+			Identity: d.Identity, Passed: d.Passed, Reasons: d.Reasons,
+		})
+	}
+	return vm, nil
+}
+
+func (s *Service) Health(ctx context.Context, rng Range) (HealthVM, error) {
+	vm := HealthVM{Range: rng}
+	since := s.sinceFor(rng)
+	if st, err := s.r.DecisionStatsSince(ctx, since); err != nil {
+		vm.Errored = true
+	} else {
+		vm.Stats = toStatsVM(st)
+	}
+	if bases, err := s.r.BaseImagePosture(ctx, since); err != nil {
+		vm.Errored = true
+	} else {
+		for _, b := range bases {
+			vm.BaseImages = append(vm.BaseImages, BaseImageVM{
+				BaseImageID: b.BaseImageID, Total: b.Total, Passed: b.Passed,
+				PassRate: PassRate(b.Passed, b.Total),
+			})
+		}
+	}
+	// Prometheus-sourced KPIs (in-process gather; missing metric -> zero).
+	vm.TrivyDBAgeDays = s.gaugeValue("merlin_trivy_db_age_days")
+	ok := s.counterValue("merlin_acr_push_total", "result", "ok")
+	errc := s.counterValue("merlin_acr_push_total", "result", "error")
+	if ok+errc > 0 {
+		vm.ACRPushSuccess = ok / (ok + errc) * 100
+	}
+	return vm, nil
+}
+
+func (s *Service) Vulnerabilities(ctx context.Context, rng Range) (VulnVM, error) {
+	vm := VulnVM{Range: rng}
+	since := s.sinceFor(rng)
+	if sev, err := s.r.SeverityTotalsSince(ctx, since); err != nil {
+		vm.Errored = true
+	} else {
+		vm.Severity = SeverityVM(sev)
+	}
+	if cves, err := s.r.TopCVEs(ctx, since, 20); err != nil {
+		vm.Errored = true
+	} else {
+		for _, c := range cves {
+			vm.TopCVEs = append(vm.TopCVEs, CVEVM(c))
+		}
+	}
+	if fa, err := s.r.FixAvailabilitySince(ctx, since, 10); err != nil {
+		vm.Errored = true
+	} else {
+		for _, fr := range fa.BySeverity {
+			pct := 0.0
+			if fr.Total > 0 {
+				pct = float64(fr.Fixable) / float64(fr.Total) * 100
+			}
+			vm.Fix.BySeverity = append(vm.Fix.BySeverity, FixRowVM{
+				Severity: fr.Severity, Total: fr.Total, Fixable: fr.Fixable, Pct: pct})
+		}
+		for _, c := range fa.TopFixable {
+			vm.Fix.TopFixable = append(vm.Fix.TopFixable, CVEVM(c))
+		}
+	}
+	return vm, nil
+}
+
+func (s *Service) Identities(ctx context.Context, rng Range) (IdentitiesVM, error) {
+	vm := IdentitiesVM{Range: rng}
+	since := s.sinceFor(rng)
+	if ids, err := s.r.ByIdentity(ctx, since, 20); err != nil {
+		vm.Errored = true
+	} else {
+		for _, i := range ids {
+			vm.Identities = append(vm.Identities, EntityVM{
+				Name: i.Identity, Total: i.Total, Passed: i.Passed, PassRate: PassRate(i.Passed, i.Total)})
+		}
+	}
+	if repos, err := s.r.ByRepo(ctx, since, 20); err != nil {
+		vm.Errored = true
+	} else {
+		for _, rp := range repos {
+			vm.Repos = append(vm.Repos, EntityVM{
+				Name: rp.Repo, Total: rp.Total, Passed: rp.Passed, PassRate: PassRate(rp.Passed, rp.Total)})
+		}
+	}
+	return vm, nil
+}
+
+// Report builds the per-image scan report. Provide either pushID, or repo+ref.
+func (s *Service) Report(ctx context.Context, repo, ref, pushID string) (ReportVM, error) {
+	var (
+		hdr      audit.DecisionHeader
+		findings []policy.Finding
+		err      error
+	)
+	if pushID != "" {
+		hdr, err = s.r.DecisionHeaderByPush(ctx, pushID)
+		if err == nil && hdr.Found {
+			findings, err = s.r.FindingsByPush(ctx, hdr.PushID)
+		}
+	} else {
+		hdr, err = s.r.DecisionHeaderByRef(ctx, repo, ref)
+		if err == nil && hdr.Found {
+			findings, err = s.r.FindingsByImageRef(ctx, repo, ref)
+		}
+	}
+	if err != nil {
+		return ReportVM{}, err
+	}
+	if !hdr.Found {
+		return ReportVM{Found: false}, nil
+	}
+	vm := ReportVM{
+		Found: true, PushID: hdr.PushID, Repo: hdr.Repo, Tag: hdr.Tag, Digest: hdr.Digest,
+		Identity: hdr.Identity, Passed: hdr.Passed, FailedPolicies: hdr.FailedPolicies,
+		Reasons: hdr.Reasons, BaseImageID: hdr.BaseImageID, TrivyDBVersion: hdr.TrivyDBVersion, Ts: hdr.Ts,
+	}
+	for _, f := range findings {
+		vm.Findings = append(vm.Findings, FindingVM{
+			CVE: f.CVE, Severity: f.Severity, Pkg: f.Pkg, Version: f.Version, FixedVersion: f.FixedVersion})
+		switch strings.ToUpper(f.Severity) {
+		case "CRITICAL":
+			vm.Counts.Critical++
+		case "HIGH":
+			vm.Counts.High++
+		case "MEDIUM":
+			vm.Counts.Medium++
+		case "LOW":
+			vm.Counts.Low++
+		default:
+			vm.Counts.Unknown++
+		}
+	}
+	// Stable order: severity desc, then CVE.
+	sort.SliceStable(vm.Findings, func(i, j int) bool {
+		si, sj := sevRank(vm.Findings[i].Severity), sevRank(vm.Findings[j].Severity)
+		if si != sj {
+			return si > sj
+		}
+		return vm.Findings[i].CVE < vm.Findings[j].CVE
+	})
+	return vm, nil
+}
+
+func sevRank(s string) int {
+	switch strings.ToUpper(s) {
+	case "CRITICAL":
+		return 4
+	case "HIGH":
+		return 3
+	case "MEDIUM":
+		return 2
+	case "LOW":
+		return 1
+	default:
+		return 0
+	}
+}
+
+// gaugeValue reads the newest sample of a gauge metric family (0 if absent).
+func (s *Service) gaugeValue(name string) float64 {
+	mfs, err := s.g.Gather()
+	if err != nil {
+		return 0
+	}
+	for _, mf := range mfs {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			if g := m.GetGauge(); g != nil {
+				return g.GetValue()
+			}
+		}
+	}
+	return 0
+}
+
+// counterValue reads a counter with a matching label pair (0 if absent).
+func (s *Service) counterValue(name, label, value string) float64 {
+	mfs, err := s.g.Gather()
+	if err != nil {
+		return 0
+	}
+	for _, mf := range mfs {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			if matchLabel(m, label, value) {
+				if c := m.GetCounter(); c != nil {
+					return c.GetValue()
+				}
+			}
+		}
+	}
+	return 0
+}
+
+func matchLabel(m *dto.Metric, label, value string) bool {
+	for _, lp := range m.GetLabel() {
+		if lp.GetName() == label && lp.GetValue() == value {
+			return true
+		}
+	}
+	return false
+}
