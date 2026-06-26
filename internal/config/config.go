@@ -53,11 +53,13 @@ type StagingConfig struct {
 type AuditConfig struct {
 	ClickHouseDSN string `yaml:"clickhouse_dsn"`
 	QueueSize     int    `yaml:"queue_size"`
+	RetentionDays int    `yaml:"retention_days"`
 }
 
 type ServerConfig struct {
 	Addr           string `yaml:"addr"`
 	MetricsAddr    string `yaml:"metrics_addr"`
+	DashboardAddr  string `yaml:"dashboard_addr"`
 	ExternalURL    string `yaml:"external_url"`
 	MaxUploadBytes int64  `yaml:"max_upload_bytes"`
 	GateTimeout    string `yaml:"gate_timeout"`
@@ -93,6 +95,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Audit.QueueSize == 0 {
 		c.Audit.QueueSize = 1024
+	}
+	if c.Audit.RetentionDays == 0 {
+		c.Audit.RetentionDays = 30
 	}
 	if c.Server.Addr == "" {
 		c.Server.Addr = ":5000"
