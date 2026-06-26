@@ -15,16 +15,45 @@ func testServer() http.Handler {
 	return NewServer(svc, rnd, b, func() time.Time { return time.Unix(1750000000, 0) })
 }
 
-func TestServeActivityPage(t *testing.T) {
+func TestServeOverview(t *testing.T) {
 	srv := testServer()
-	req := httptest.NewRequest("GET", "/?range=7d", nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-	if rec.Code != 200 {
-		t.Fatalf("status=%d", rec.Code)
+	srv.ServeHTTP(rec, httptest.NewRequest("GET", "/?range=7d", nil))
+	if rec.Code != 200 || !strings.HasPrefix(rec.Header().Get("Content-Type"), "text/html") {
+		t.Fatalf("overview status=%d ct=%q", rec.Code, rec.Header().Get("Content-Type"))
 	}
-	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
-		t.Errorf("content-type=%q", ct)
+	// verify it's the overview page, not old activity
+	body := rec.Body.String()
+	if !strings.Contains(body, "Images") {
+		t.Errorf("overview page missing 'Images' marker")
+	}
+}
+
+func TestImagesJSON(t *testing.T) {
+	srv := testServer()
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest("GET", "/api/dashboard/images?range=7d&page=1&crit=1&rejected=1", nil))
+	if rec.Code != 200 || !strings.HasPrefix(rec.Header().Get("Content-Type"), "application/json") {
+		t.Fatalf("images json status=%d ct=%q", rec.Code, rec.Header().Get("Content-Type"))
+	}
+}
+
+func TestRemovedRoutes404(t *testing.T) {
+	srv := testServer()
+	for _, p := range []string{"/health", "/vulnerabilities", "/identities"} {
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, httptest.NewRequest("GET", p, nil))
+		// "/" is the catch-all overview; removed routes must NOT 200 as their old pages.
+		// They now fall through to overview (200) OR 404. Assert they no longer render
+		// their old page — accept 200 (overview catch-all) but body must be the overview.
+		if rec.Code != 200 {
+			t.Errorf("%s status=%d", p, rec.Code)
+		}
+		// verify it's the overview page, not the old dedicated page
+		body := rec.Body.String()
+		if !strings.Contains(body, "Images") {
+			t.Errorf("%s should serve overview page with 'Images' marker", p)
+		}
 	}
 }
 

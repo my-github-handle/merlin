@@ -42,7 +42,6 @@ func TestPassRate(t *testing.T) {
 
 type fakeReader struct {
 	stats audit.DecisionStats
-	cves  []audit.CVECount
 	hdr   audit.DecisionHeader
 	finds []policy.Finding
 	err   error
@@ -53,27 +52,6 @@ func (f fakeReader) RecentDecisions(context.Context, int) ([]audit.DecisionSumma
 }
 func (f fakeReader) DecisionStatsSince(context.Context, time.Time) (audit.DecisionStats, error) {
 	return f.stats, f.err
-}
-func (f fakeReader) TopCVEs(context.Context, time.Time, int) ([]audit.CVECount, error) {
-	return f.cves, f.err
-}
-func (f fakeReader) TopPackages(context.Context, time.Time, int) ([]audit.LabeledCount, error) {
-	return nil, f.err
-}
-func (f fakeReader) SeverityTotalsSince(context.Context, time.Time) (audit.SeverityTotals, error) {
-	return audit.SeverityTotals{Critical: 1}, f.err
-}
-func (f fakeReader) FixAvailabilitySince(context.Context, time.Time, int) (audit.FixAvailability, error) {
-	return audit.FixAvailability{BySeverity: []audit.FixAvailabilityRow{{Severity: "CRITICAL", Total: 2, Fixable: 1}}}, f.err
-}
-func (f fakeReader) BaseImagePosture(context.Context, time.Time) ([]audit.BaseImageStat, error) {
-	return []audit.BaseImageStat{{BaseImageID: "ubi9", Total: 3, Passed: 2}}, f.err
-}
-func (f fakeReader) ByIdentity(context.Context, time.Time, int) ([]audit.IdentityStat, error) {
-	return []audit.IdentityStat{{Identity: "ci", Total: 3, Passed: 3}}, f.err
-}
-func (f fakeReader) ByRepo(context.Context, time.Time, int) ([]audit.RepoStat, error) {
-	return []audit.RepoStat{{Repo: "a/b", Total: 3, Passed: 2}}, f.err
 }
 func (f fakeReader) DecisionHeaderByRef(context.Context, string, string) (audit.DecisionHeader, error) {
 	return f.hdr, f.err
@@ -116,20 +94,6 @@ func newTestServiceWithMetrics(fr audit.DashboardReader, withMetrics bool) *Serv
 	}
 	now := func() time.Time { return time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC) }
 	return NewService(fr, reg, now)
-}
-
-func TestActivityViewModel(t *testing.T) {
-	svc := newTestService(fakeReader{stats: audit.DecisionStats{Total: 10, Passed: 8, Rejected: 2}})
-	vm, err := svc.Activity(context.Background(), Range1d)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if vm.Stats.PassRate != 80 {
-		t.Errorf("PassRate=%v want 80", vm.Stats.PassRate)
-	}
-	if len(vm.Recent) == 0 {
-		t.Error("expected recent decisions")
-	}
 }
 
 func TestReportViewModelNotFound(t *testing.T) {
@@ -209,120 +173,6 @@ func TestReportViewModelByPushID(t *testing.T) {
 	}
 	if vm.PushID != "push456" {
 		t.Errorf("PushID=%v want push456", vm.PushID)
-	}
-}
-
-func TestHealthViewModel(t *testing.T) {
-	svc := newTestService(fakeReader{stats: audit.DecisionStats{Total: 100, Passed: 95, Rejected: 5}})
-	vm, err := svc.Health(context.Background(), Range7d)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if vm.Range != Range7d {
-		t.Errorf("Range=%v want 7d", vm.Range)
-	}
-	if vm.Stats.PassRate != 95 {
-		t.Errorf("PassRate=%v want 95", vm.Stats.PassRate)
-	}
-	if vm.TrivyDBAgeDays != 4 {
-		t.Errorf("TrivyDBAgeDays=%v want 4", vm.TrivyDBAgeDays)
-	}
-	if len(vm.BaseImages) == 0 {
-		t.Error("expected base images")
-	}
-	if vm.BaseImages[0].PassRate != 66.66666666666666 {
-		t.Errorf("BaseImages[0].PassRate=%v want ~66.67", vm.BaseImages[0].PassRate)
-	}
-}
-
-func TestVulnerabilitiesViewModel(t *testing.T) {
-	svc := newTestService(fakeReader{
-		cves: []audit.CVECount{
-			{CVE: "CVE-2024-1", Severity: "CRITICAL", Pkg: "pkg-a", FixedVersion: "2.0", ImageCount: 10},
-		},
-	})
-	vm, err := svc.Vulnerabilities(context.Background(), Range30d)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if vm.Range != Range30d {
-		t.Errorf("Range=%v want 30d", vm.Range)
-	}
-	if vm.Severity.Critical != 1 {
-		t.Errorf("Severity.Critical=%v want 1", vm.Severity.Critical)
-	}
-	if len(vm.TopCVEs) != 1 {
-		t.Fatalf("TopCVEs count=%v want 1", len(vm.TopCVEs))
-	}
-	if vm.TopCVEs[0].CVE != "CVE-2024-1" {
-		t.Errorf("TopCVEs[0].CVE=%v want CVE-2024-1", vm.TopCVEs[0].CVE)
-	}
-	if len(vm.Fix.BySeverity) != 1 {
-		t.Fatalf("Fix.BySeverity count=%v want 1", len(vm.Fix.BySeverity))
-	}
-	if vm.Fix.BySeverity[0].Pct != 50 {
-		t.Errorf("Fix.BySeverity[0].Pct=%v want 50", vm.Fix.BySeverity[0].Pct)
-	}
-}
-
-func TestIdentitiesViewModel(t *testing.T) {
-	svc := newTestService(fakeReader{})
-	vm, err := svc.Identities(context.Background(), Range1d)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(vm.Identities) != 1 {
-		t.Fatalf("Identities count=%v want 1", len(vm.Identities))
-	}
-	if vm.Identities[0].Name != "ci" {
-		t.Errorf("Identities[0].Name=%v want ci", vm.Identities[0].Name)
-	}
-	if vm.Identities[0].PassRate != 100 {
-		t.Errorf("Identities[0].PassRate=%v want 100", vm.Identities[0].PassRate)
-	}
-	if len(vm.Repos) != 1 {
-		t.Fatalf("Repos count=%v want 1", len(vm.Repos))
-	}
-	if vm.Repos[0].PassRate != 66.66666666666666 {
-		t.Errorf("Repos[0].PassRate=%v want ~66.67", vm.Repos[0].PassRate)
-	}
-}
-
-func TestGracefulDegradation(t *testing.T) {
-	// Verify that per-panel errors set Errored=true but don't fail the entire request
-	svc := newTestService(fakeReader{err: context.DeadlineExceeded})
-	vm, err := svc.Activity(context.Background(), Range1d)
-	if err != nil {
-		t.Fatal("Activity should not error on reader failure")
-	}
-	if !vm.Errored {
-		t.Error("expected Errored=true when reader fails")
-	}
-}
-
-func TestPrometheusCounters(t *testing.T) {
-	svc := newTestServiceWithMetrics(fakeReader{}, true)
-	vm, err := svc.Health(context.Background(), Range1d)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if vm.ACRPushSuccess != 95 {
-		t.Errorf("ACRPushSuccess=%v want 95", vm.ACRPushSuccess)
-	}
-}
-
-func TestPrometheusMetricsMissing(t *testing.T) {
-	// Empty registry should return zero values, not error
-	svc := newTestServiceWithMetrics(fakeReader{}, false)
-	vm, err := svc.Health(context.Background(), Range1d)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if vm.TrivyDBAgeDays != 0 {
-		t.Errorf("TrivyDBAgeDays=%v want 0 when metric absent", vm.TrivyDBAgeDays)
-	}
-	if vm.ACRPushSuccess != 0 {
-		t.Errorf("ACRPushSuccess=%v want 0 when metric absent", vm.ACRPushSuccess)
 	}
 }
 

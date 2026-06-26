@@ -66,7 +66,9 @@ function openReport(tr) {
 
           // Remove empty state row if present
           var emptyRow = tbody.querySelector('td.empty');
-          if (emptyRow) tbody.innerHTML = '';
+          if (emptyRow) {
+            while (tbody.firstChild) tbody.removeChild(tbody.firstChild);
+          }
 
           var tr = imageRow(d);
           tbody.insertBefore(tr, tbody.firstChild);

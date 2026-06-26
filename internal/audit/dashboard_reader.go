@@ -39,53 +39,6 @@ type LabeledCount struct {
 	Count uint64
 }
 
-// CVECount is a top-CVE row.
-type CVECount struct {
-	CVE          string
-	Severity     string
-	Pkg          string
-	FixedVersion string
-	ImageCount   uint64 // distinct image digests affected
-}
-
-// SeverityTotals counts findings by severity over a window.
-type SeverityTotals struct {
-	Critical, High, Medium, Low, Unknown uint64
-}
-
-// FixAvailability reports remediation gap: of findings at each severity, how many
-// have a non-empty fixed_version.
-type FixAvailability struct {
-	BySeverity []FixAvailabilityRow
-	TopFixable []CVECount // highest-impact CVEs that have a fix available
-}
-
-type FixAvailabilityRow struct {
-	Severity string
-	Total    uint64
-	Fixable  uint64 // fixed_version != ''
-}
-
-// BaseImageStat is one base image's usage + pass rate.
-type BaseImageStat struct {
-	BaseImageID string
-	Total       uint64
-	Passed      uint64
-}
-
-// IdentityStat / RepoStat are pass/reject breakdowns per identity or repo.
-type IdentityStat struct {
-	Identity string
-	Total    uint64
-	Passed   uint64
-}
-
-type RepoStat struct {
-	Repo   string
-	Total  uint64
-	Passed uint64
-}
-
 // DecisionHeader is the report header (verdict + provenance) for one image.
 type DecisionHeader struct {
 	Found          bool
@@ -135,13 +88,6 @@ type ImagePage struct {
 type DashboardReader interface {
 	RecentDecisions(ctx context.Context, limit int) ([]DecisionSummary, error)
 	DecisionStatsSince(ctx context.Context, since time.Time) (DecisionStats, error)
-	TopCVEs(ctx context.Context, since time.Time, limit int) ([]CVECount, error)
-	TopPackages(ctx context.Context, since time.Time, limit int) ([]LabeledCount, error)
-	SeverityTotalsSince(ctx context.Context, since time.Time) (SeverityTotals, error)
-	FixAvailabilitySince(ctx context.Context, since time.Time, limit int) (FixAvailability, error)
-	BaseImagePosture(ctx context.Context, since time.Time) ([]BaseImageStat, error)
-	ByIdentity(ctx context.Context, since time.Time, limit int) ([]IdentityStat, error)
-	ByRepo(ctx context.Context, since time.Time, limit int) ([]RepoStat, error)
 	DecisionHeaderByRef(ctx context.Context, repo, ref string) (DecisionHeader, error)
 	DecisionHeaderByPush(ctx context.Context, pushID string) (DecisionHeader, error)
 	FindingsByPush(ctx context.Context, pushID string) ([]policy.Finding, error)

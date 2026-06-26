@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/merlin-gate/merlin/internal/audit"
 )
 
 // Server is the dashboard HTTP handler (UI + JSON API).
@@ -26,12 +29,9 @@ func NewServer(svc *Service, rnd *Renderer, b *Broadcaster, now func() time.Time
 		now = time.Now
 	}
 	s := &Server{svc: svc, rnd: rnd, b: b, now: now, mux: http.NewServeMux()}
-	s.mux.HandleFunc("/", s.handleActivity) // also catches unknown paths -> activity
-	s.mux.HandleFunc("/health", s.handleHealth)
-	s.mux.HandleFunc("/vulnerabilities", s.handleVulnerabilities)
-	s.mux.HandleFunc("/identities", s.handleIdentities)
+	s.mux.HandleFunc("/", s.handleOverview) // catch-all -> overview
 	s.mux.HandleFunc("/report", s.handleReport)
-	s.mux.HandleFunc("/api/dashboard/recent", s.handleRecentJSON)
+	s.mux.HandleFunc("/api/dashboard/images", s.handleImagesJSON)
 	s.mux.HandleFunc("/api/dashboard/report.json", s.handleReportJSON)
 	s.mux.HandleFunc("/api/dashboard/stream", s.handleStream)
 	s.mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(StaticFS()))))
@@ -54,32 +54,18 @@ func (s *Server) renderPage(w http.ResponseWriter, page string, vm any) {
 	_ = s.rnd.Render(w, page, vm)
 }
 
-func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := s.ctx(r)
 	defer cancel()
-	vm, _ := s.svc.Activity(ctx, s.rangeParam(r))
-	s.renderPage(w, "activity", vm)
-}
-
-func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := s.ctx(r)
-	defer cancel()
-	vm, _ := s.svc.Health(ctx, s.rangeParam(r))
-	s.renderPage(w, "health", vm)
-}
-
-func (s *Server) handleVulnerabilities(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := s.ctx(r)
-	defer cancel()
-	vm, _ := s.svc.Vulnerabilities(ctx, s.rangeParam(r))
-	s.renderPage(w, "vulnerabilities", vm)
-}
-
-func (s *Server) handleIdentities(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := s.ctx(r)
-	defer cancel()
-	vm, _ := s.svc.Identities(ctx, s.rangeParam(r))
-	s.renderPage(w, "identities", vm)
+	// honor ?page= on the catch-all overview (filter via the images endpoint/AJAX)
+	vm, _ := s.svc.Overview(ctx, s.rangeParam(r))
+	if p := pageParam(r); p > 1 {
+		// re-fetch the requested page with current filter for server-rendered paging
+		f := imageFilter(r)
+		iv, _ := s.svc.Images(ctx, s.rangeParam(r), f, p)
+		vm.Images, vm.Page, vm.Total, vm.HasPrev, vm.HasNext = iv.Images, iv.Page, iv.Total, iv.HasPrev, iv.HasNext
+	}
+	s.renderPage(w, "overview", vm)
 }
 
 func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
@@ -104,11 +90,11 @@ func (s *Server) reportVM(ctx context.Context, r *http.Request) ReportVM {
 	return vm
 }
 
-func (s *Server) handleRecentJSON(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleImagesJSON(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := s.ctx(r)
 	defer cancel()
-	vm, _ := s.svc.Activity(ctx, s.rangeParam(r))
-	writeJSON(w, vm.Recent)
+	vm, _ := s.svc.Images(ctx, s.rangeParam(r), imageFilter(r), pageParam(r))
+	writeJSON(w, vm)
 }
 
 func (s *Server) handleReportJSON(w http.ResponseWriter, r *http.Request) {
@@ -200,4 +186,20 @@ func splitImageRef(id string) (repo, ref string, ok bool) {
 		return id[:lastColon], id[lastColon+1:], true
 	}
 	return "", "", false
+}
+
+func pageParam(r *http.Request) int {
+	if n, err := strconv.Atoi(r.URL.Query().Get("page")); err == nil && n > 0 {
+		return n
+	}
+	return 1
+}
+
+func imageFilter(r *http.Request) audit.ImageFilter {
+	q := r.URL.Query()
+	return audit.ImageFilter{
+		Text:         q.Get("q"),
+		HasCritical:  q.Get("crit") == "1",
+		RejectedOnly: q.Get("rejected") == "1",
+	}
 }

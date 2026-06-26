@@ -46,76 +46,7 @@ type LabeledVM struct {
 	Pct   float64
 }
 
-type ActivityVM struct {
-	Range   Range
-	Stats   StatsVM
-	Recent  []DecisionVM
-	Errored bool // a backend query failed; render degraded panels
-}
-
-type DecisionVM struct {
-	Ts                        time.Time
-	PushID, Repo, Tag, Digest string
-	Identity                  string
-	Passed                    bool
-	Reasons                   []string
-}
-
-// Health KPIs sourced from the Prometheus gatherer + decision stats.
-type HealthVM struct {
-	Range          Range
-	Stats          StatsVM
-	TrivyDBAgeDays float64
-	ACRPushSuccess float64 // percentage
-	PushErrors     uint64  // scans that failed to run (error), distinct from rejects
-	BaseImages     []BaseImageVM
-	Errored        bool
-}
-
-type BaseImageVM struct {
-	BaseImageID   string
-	Total, Passed uint64
-	PassRate      float64
-}
-
-type VulnVM struct {
-	Range    Range
-	Severity SeverityVM
-	TopCVEs  []CVEVM
-	Fix      FixVM
-	Errored  bool
-}
-
 type SeverityVM struct{ Critical, High, Medium, Low, Unknown uint64 }
-
-type CVEVM struct {
-	CVE, Severity, Pkg, FixedVersion string
-	ImageCount                       uint64
-}
-
-type FixVM struct {
-	BySeverity []FixRowVM
-	TopFixable []CVEVM
-}
-
-type FixRowVM struct {
-	Severity       string
-	Total, Fixable uint64
-	Pct            float64
-}
-
-type IdentitiesVM struct {
-	Range      Range
-	Identities []EntityVM
-	Repos      []EntityVM
-	Errored    bool
-}
-
-type EntityVM struct {
-	Name          string
-	Total, Passed uint64
-	PassRate      float64
-}
 
 type ReportVM struct {
 	Found                               bool
