@@ -226,7 +226,7 @@ Alternatively, create a `ServiceMonitor` resource if you use the Prometheus Oper
 ## Dashboard
 
 Merlin serves a built-in, read-only observability dashboard on `:8080` **by default**
-(activity feed, health, vulnerabilities, identities, and per-image scan reports). It
+(a single Overview page showing health hero, gated images table, and per-image scan reports). It
 is exposed via the Service (cluster-internal), like the metrics port. Disable it by
 setting `merlin.server.dashboardAddr: "off"` — the container/Service ports are then
 omitted.

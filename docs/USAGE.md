@@ -98,13 +98,9 @@ is served on its own port — keep that port network-restricted (it exposes who
 pushed what and your vulnerability posture; there is no application-level auth in
 this version).
 
-Tabs:
-- **Activity** — live feed of gate decisions (streams over SSE) plus headline KPIs.
-- **Health** — pass rate, scan latency percentiles, ACR push success, Trivy DB age,
-  reject-reason breakdown, and base-image posture.
-- **Vulnerabilities** — severity totals, top CVEs across all gated images, and the
-  remediation gap (how many findings have a fix available).
-- **Identities & Repos** — top pushers and busiest repos with pass rates.
+The dashboard is a single **Overview** page displaying:
+- **Health hero** — pass-rate gauge, push volume and scan latency percentiles, infrastructure health (ACR success rate, Trivy DB age).
+- **Gated images table** — one row per image (repo:tag + pusher), verdict, severity counts (Critical/High/Medium/Low), and image age. Paginated 10 per page, newest first. Filter by repo, tag, or identity; toggle to show only CRITICAL images or rejected-only. Click any row to open its scan report. New decisions stream live via SSE.
 
 Time range: **1d / 7d / 30d** (header toggle). Data is retained for
 `audit.retention_days` days (default 30); wider ranges show only retained data.
