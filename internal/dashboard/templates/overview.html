@@ -35,7 +35,7 @@
     <thead><tr><th>Image</th><th>Verdict</th><th>Critical</th><th>High</th><th>Medium</th><th>Low</th><th>Pushed</th></tr></thead>
     <tbody>
     {{range .VM.Images}}
-      <tr data-ref="{{.Repo}}{{if .Tag}}:{{.Tag}}{{end}}" data-pushid="{{.PushID}}" onclick="openReport(this)">
+      <tr data-ref="{{.Repo}}{{if .Tag}}:{{.Tag}}{{end}}" data-pushid="{{.PushID}}" role="button" tabindex="0" aria-label="Scan report for {{.Repo}}{{if .Tag}}:{{.Tag}}{{end}}, {{if .Passed}}passed{{else}}rejected{{end}}" onclick="openReport(this)" onkeydown="rowKey(event,this)">
         <td class="img">{{.Repo}}{{if .Tag}}:{{.Tag}}{{end}}<div class="who">{{.Identity}}</div></td>
         <td>{{if .Passed}}<span class="badge pass">PASS</span>{{else}}<span class="badge fail">REJECT</span>{{end}}</td>
         <td>{{if .Crit}}<span class="sv c">{{.Crit}}</span>{{else}}<span class="sv z">0</span>{{end}}</td>

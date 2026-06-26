@@ -6,6 +6,14 @@ function openReport(tr) {
   if (ref) { window.location = '/report?ref=' + encodeURIComponent(ref); }
 }
 
+// Keyboard activation for focusable rows: Enter or Space opens the report.
+function rowKey(e, tr) {
+  if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+    e.preventDefault();
+    openReport(tr);
+  }
+}
+
 (function () {
   // Overview filter toggles: reload page with query params
   var imgfilter = document.getElementById('imgfilter');
@@ -87,7 +95,12 @@ function openReport(tr) {
     tr.setAttribute('data-pushid', d.push_id || '');
     var ref = (d.repo || '') + (d.tag ? ':' + d.tag : '');
     tr.setAttribute('data-ref', ref);
-    tr.setAttribute('onclick', 'openReport(this)');
+    // Match the server-rendered rows: keyboard-focusable, activates on Enter/Space.
+    tr.setAttribute('role', 'button');
+    tr.setAttribute('tabindex', '0');
+    tr.setAttribute('aria-label', 'Scan report for ' + ref + ', ' + (d.passed ? 'passed' : 'rejected'));
+    tr.addEventListener('click', function () { openReport(tr); });
+    tr.addEventListener('keydown', function (e) { rowKey(e, tr); });
 
     var img = document.createElement('td');
     img.className = 'img';
