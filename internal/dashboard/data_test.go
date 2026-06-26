@@ -88,10 +88,22 @@ func (f fakeReader) FindingsByImageRef(context.Context, string, string) ([]polic
 }
 
 func newTestService(fr audit.DashboardReader) *Service {
+	return newTestServiceWithMetrics(fr, true)
+}
+
+func newTestServiceWithMetrics(fr audit.DashboardReader, withMetrics bool) *Service {
 	reg := prometheus.NewRegistry()
-	g := prometheus.NewGauge(prometheus.GaugeOpts{Name: "merlin_trivy_db_age_days", Help: "x"})
-	g.Set(4)
-	reg.MustRegister(g)
+	if withMetrics {
+		g := prometheus.NewGauge(prometheus.GaugeOpts{Name: "merlin_trivy_db_age_days", Help: "x"})
+		g.Set(4)
+		reg.MustRegister(g)
+		cOk := prometheus.NewCounter(prometheus.CounterOpts{Name: "merlin_acr_push_total", Help: "x", ConstLabels: prometheus.Labels{"result": "ok"}})
+		cOk.Add(95)
+		reg.MustRegister(cOk)
+		cErr := prometheus.NewCounter(prometheus.CounterOpts{Name: "merlin_acr_push_total", Help: "x", ConstLabels: prometheus.Labels{"result": "error"}})
+		cErr.Add(5)
+		reg.MustRegister(cErr)
+	}
 	now := func() time.Time { return time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC) }
 	return NewService(fr, reg, now)
 }
@@ -118,5 +130,209 @@ func TestReportViewModelNotFound(t *testing.T) {
 	}
 	if vm.Found {
 		t.Error("expected Found=false for missing report")
+	}
+}
+
+func TestReportViewModelWithFindings(t *testing.T) {
+	hdr := audit.DecisionHeader{
+		Found:          true,
+		PushID:         "push123",
+		Repo:           "a/b",
+		Tag:            "v1",
+		Digest:         "sha256:abc",
+		Identity:       "ci",
+		Passed:         false,
+		FailedPolicies: []string{"cve-policy"},
+		Reasons:        []string{"CRITICAL CVE found"},
+		BaseImageID:    "ubi9",
+		TrivyDBVersion: "2.0",
+		Ts:             time.Date(2026, 6, 25, 10, 0, 0, 0, time.UTC),
+	}
+	findings := []policy.Finding{
+		{CVE: "CVE-2024-2", Severity: "HIGH", Pkg: "pkg-b", Version: "1.0", FixedVersion: "1.1"},
+		{CVE: "CVE-2024-1", Severity: "CRITICAL", Pkg: "pkg-a", Version: "1.0", FixedVersion: "2.0"},
+		{CVE: "CVE-2024-3", Severity: "MEDIUM", Pkg: "pkg-c", Version: "1.0", FixedVersion: ""},
+	}
+	svc := newTestService(fakeReader{hdr: hdr, finds: findings})
+	vm, err := svc.Report(context.Background(), "a/b", "v1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !vm.Found {
+		t.Fatal("expected Found=true")
+	}
+	if vm.Counts.Critical != 1 {
+		t.Errorf("Critical count=%v want 1", vm.Counts.Critical)
+	}
+	if vm.Counts.High != 1 {
+		t.Errorf("High count=%v want 1", vm.Counts.High)
+	}
+	if vm.Counts.Medium != 1 {
+		t.Errorf("Medium count=%v want 1", vm.Counts.Medium)
+	}
+	// Verify sort: severity desc, then CVE asc
+	if len(vm.Findings) != 3 {
+		t.Fatalf("findings count=%v want 3", len(vm.Findings))
+	}
+	if vm.Findings[0].CVE != "CVE-2024-1" {
+		t.Errorf("first finding CVE=%v want CVE-2024-1", vm.Findings[0].CVE)
+	}
+	if vm.Findings[1].CVE != "CVE-2024-2" {
+		t.Errorf("second finding CVE=%v want CVE-2024-2", vm.Findings[1].CVE)
+	}
+}
+
+func TestReportViewModelByPushID(t *testing.T) {
+	hdr := audit.DecisionHeader{
+		Found:  true,
+		PushID: "push456",
+		Repo:   "x/y",
+		Tag:    "v2",
+	}
+	svc := newTestService(fakeReader{hdr: hdr})
+	vm, err := svc.Report(context.Background(), "", "", "push456")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !vm.Found {
+		t.Fatal("expected Found=true")
+	}
+	if vm.PushID != "push456" {
+		t.Errorf("PushID=%v want push456", vm.PushID)
+	}
+}
+
+func TestHealthViewModel(t *testing.T) {
+	svc := newTestService(fakeReader{stats: audit.DecisionStats{Total: 100, Passed: 95, Rejected: 5}})
+	vm, err := svc.Health(context.Background(), Range7d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vm.Range != Range7d {
+		t.Errorf("Range=%v want 7d", vm.Range)
+	}
+	if vm.Stats.PassRate != 95 {
+		t.Errorf("PassRate=%v want 95", vm.Stats.PassRate)
+	}
+	if vm.TrivyDBAgeDays != 4 {
+		t.Errorf("TrivyDBAgeDays=%v want 4", vm.TrivyDBAgeDays)
+	}
+	if len(vm.BaseImages) == 0 {
+		t.Error("expected base images")
+	}
+	if vm.BaseImages[0].PassRate != 66.66666666666666 {
+		t.Errorf("BaseImages[0].PassRate=%v want ~66.67", vm.BaseImages[0].PassRate)
+	}
+}
+
+func TestVulnerabilitiesViewModel(t *testing.T) {
+	svc := newTestService(fakeReader{
+		cves: []audit.CVECount{
+			{CVE: "CVE-2024-1", Severity: "CRITICAL", Pkg: "pkg-a", FixedVersion: "2.0", ImageCount: 10},
+		},
+	})
+	vm, err := svc.Vulnerabilities(context.Background(), Range30d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vm.Range != Range30d {
+		t.Errorf("Range=%v want 30d", vm.Range)
+	}
+	if vm.Severity.Critical != 1 {
+		t.Errorf("Severity.Critical=%v want 1", vm.Severity.Critical)
+	}
+	if len(vm.TopCVEs) != 1 {
+		t.Fatalf("TopCVEs count=%v want 1", len(vm.TopCVEs))
+	}
+	if vm.TopCVEs[0].CVE != "CVE-2024-1" {
+		t.Errorf("TopCVEs[0].CVE=%v want CVE-2024-1", vm.TopCVEs[0].CVE)
+	}
+	if len(vm.Fix.BySeverity) != 1 {
+		t.Fatalf("Fix.BySeverity count=%v want 1", len(vm.Fix.BySeverity))
+	}
+	if vm.Fix.BySeverity[0].Pct != 50 {
+		t.Errorf("Fix.BySeverity[0].Pct=%v want 50", vm.Fix.BySeverity[0].Pct)
+	}
+}
+
+func TestIdentitiesViewModel(t *testing.T) {
+	svc := newTestService(fakeReader{})
+	vm, err := svc.Identities(context.Background(), Range1d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(vm.Identities) != 1 {
+		t.Fatalf("Identities count=%v want 1", len(vm.Identities))
+	}
+	if vm.Identities[0].Name != "ci" {
+		t.Errorf("Identities[0].Name=%v want ci", vm.Identities[0].Name)
+	}
+	if vm.Identities[0].PassRate != 100 {
+		t.Errorf("Identities[0].PassRate=%v want 100", vm.Identities[0].PassRate)
+	}
+	if len(vm.Repos) != 1 {
+		t.Fatalf("Repos count=%v want 1", len(vm.Repos))
+	}
+	if vm.Repos[0].PassRate != 66.66666666666666 {
+		t.Errorf("Repos[0].PassRate=%v want ~66.67", vm.Repos[0].PassRate)
+	}
+}
+
+func TestGracefulDegradation(t *testing.T) {
+	// Verify that per-panel errors set Errored=true but don't fail the entire request
+	svc := newTestService(fakeReader{err: context.DeadlineExceeded})
+	vm, err := svc.Activity(context.Background(), Range1d)
+	if err != nil {
+		t.Fatal("Activity should not error on reader failure")
+	}
+	if !vm.Errored {
+		t.Error("expected Errored=true when reader fails")
+	}
+}
+
+func TestPrometheusCounters(t *testing.T) {
+	svc := newTestServiceWithMetrics(fakeReader{}, true)
+	vm, err := svc.Health(context.Background(), Range1d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vm.ACRPushSuccess != 95 {
+		t.Errorf("ACRPushSuccess=%v want 95", vm.ACRPushSuccess)
+	}
+}
+
+func TestPrometheusMetricsMissing(t *testing.T) {
+	// Empty registry should return zero values, not error
+	svc := newTestServiceWithMetrics(fakeReader{}, false)
+	vm, err := svc.Health(context.Background(), Range1d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vm.TrivyDBAgeDays != 0 {
+		t.Errorf("TrivyDBAgeDays=%v want 0 when metric absent", vm.TrivyDBAgeDays)
+	}
+	if vm.ACRPushSuccess != 0 {
+		t.Errorf("ACRPushSuccess=%v want 0 when metric absent", vm.ACRPushSuccess)
+	}
+}
+
+func TestSeverityRankUnknown(t *testing.T) {
+	// Verify unknown severity gets lowest rank
+	findings := []policy.Finding{
+		{CVE: "CVE-1", Severity: "UNKNOWN", Pkg: "a", Version: "1", FixedVersion: ""},
+		{CVE: "CVE-2", Severity: "LOW", Pkg: "b", Version: "1", FixedVersion: ""},
+	}
+	hdr := audit.DecisionHeader{Found: true, PushID: "p1"}
+	svc := newTestService(fakeReader{hdr: hdr, finds: findings})
+	vm, err := svc.Report(context.Background(), "", "", "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// LOW (rank 1) should sort before UNKNOWN (rank 0)
+	if vm.Findings[0].Severity != "LOW" {
+		t.Errorf("First finding severity=%v want LOW", vm.Findings[0].Severity)
+	}
+	if vm.Counts.Unknown != 1 {
+		t.Errorf("Unknown count=%v want 1", vm.Counts.Unknown)
 	}
 }
