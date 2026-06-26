@@ -50,3 +50,16 @@ func TestTeeRecorderNilInner(t *testing.T) {
 		t.Fatal("no summary published with nil inner")
 	}
 }
+
+func TestTeeRecorderNilBroadcaster(t *testing.T) {
+	spy := &spyRecorder{}
+	tee := NewTeeRecorder(spy, nil) // non-nil inner, nil broadcaster must not panic
+	tee.Record(context.Background(), audit.Decision{
+		PushID: "p1", Repo: "a/b", Tag: "v1", Digest: "sha256:x", Identity: "ci",
+		Passed: false, Reasons: []string{"CRITICAL"},
+	}, nil)
+
+	if !spy.called {
+		t.Error("inner recorder was not called")
+	}
+}
