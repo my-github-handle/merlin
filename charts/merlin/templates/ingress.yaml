@@ -1,4 +1,7 @@
 {{- if .Values.ingress.enabled }}
+{{- $dashOn := ne (lower .Values.merlin.server.dashboardAddr) "off" }}
+{{- $pathRoute := and .Values.ingress.dashboardPathRouting $dashOn }}
+{{- $dashHost := and .Values.ingress.dashboardHost $dashOn }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -16,28 +19,67 @@ spec:
   tls:
     - hosts: [{{ .Values.ingress.host | quote }}]
       secretName: {{ .Values.ingress.tlsSecretName }}
-    {{- if and .Values.ingress.dashboardHost (ne (lower .Values.merlin.server.dashboardAddr) "off") }}
-    - hosts: [{{ .Values.ingress.dashboardHost | quote }}]
-      secretName: {{ .Values.ingress.dashboardTLSSecretName | default .Values.ingress.tlsSecretName }}
-    {{- end }}
   rules:
     - host: {{ .Values.ingress.host | quote }}
       http:
         paths:
+          {{- if $pathRoute }}
+          # Path-routed shared host: only the Docker Registry V2 surface stays on
+          # the gate (:5000) so `docker push`/`pull` is unaffected. Everything else
+          # is served by the SEPARATE dashboard Ingress below (the dashboard backend
+          # needs its own health probe — path "/", status 200 — because this Ingress
+          # carries the gate's /v2/-401 probe annotations, which the dashboard fails).
+          - path: /v2
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "merlin.fullname" . }}
+                port: { number: {{ .Values.service.port }} }
+          - path: /token
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "merlin.fullname" . }}
+                port: { number: {{ .Values.service.port }} }
+          - path: /reports
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "merlin.fullname" . }}
+                port: { number: {{ .Values.service.port }} }
+          {{- else }}
           - path: /
             pathType: Prefix
             backend:
               service:
                 name: {{ include "merlin.fullname" . }}
                 port: { number: {{ .Values.service.port }} }
-    {{- if and .Values.ingress.dashboardHost (ne (lower .Values.merlin.server.dashboardAddr) "off") }}
-    # Dashboard on its own host: it serves "/" (pages + /static + /api/dashboard),
-    # which would collide with the v2 catch-all above on a shared host.
-    # WARNING: the dashboard has NO application-level auth and exposes who pushed
-    # what + vulnerability posture. Only set ingress.dashboardHost if that host is
-    # itself access-controlled (internal-only ingress, IP allowlist, or an auth
-    # proxy in front). Leave it empty to keep the dashboard cluster-internal.
-    - host: {{ .Values.ingress.dashboardHost | quote }}
+          {{- end }}
+{{- if or $pathRoute $dashHost }}
+{{- $dhost := .Values.ingress.host }}{{- if $dashHost }}{{ $dhost = .Values.ingress.dashboardHost }}{{- end }}
+---
+# Separate Ingress for the dashboard backend (:8080). It MUST be its own resource
+# so the ingress controller derives a dashboard-appropriate health probe (path "/",
+# status 200) for the :8080 backend instead of inheriting the gate's /v2/-401 probe
+# (which the dashboard fails -> 502). Annotations come from ingress.dashboardAnnotations.
+# WARNING: the dashboard has NO application-level auth. In path-routing mode it shares
+# the public registry host, exposing vulnerability posture + push activity to anyone
+# who can reach it. Enable only behind an access-controlled ingress.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "merlin.fullname" . }}-dashboard
+  labels: {{- include "merlin.labels" . | nindent 4 }}
+  annotations: {{- toYaml .Values.ingress.dashboardAnnotations | nindent 4 }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  tls:
+    - hosts: [{{ $dhost | quote }}]
+      secretName: {{ .Values.ingress.dashboardTLSSecretName | default .Values.ingress.tlsSecretName }}
+  rules:
+    - host: {{ $dhost | quote }}
       http:
         paths:
           - path: /
@@ -46,5 +88,5 @@ spec:
               service:
                 name: {{ include "merlin.fullname" . }}
                 port: { number: {{ .Values.dashboard.port }} }
-    {{- end }}
+{{- end }}
 {{- end }}

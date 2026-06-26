@@ -26,12 +26,20 @@ ingress:
   host: ""             # e.g. merlin.example.com  (required)
   tlsSecretName: ""    # existing TLS secret OR via cert-manager annotations
   annotations: {}
+  # Annotations for the SEPARATE dashboard Ingress (path-routing or dashboardHost
+  # mode). Give the :8080 backend its own health probe — path "/", expecting 200 —
+  # so it isn't probed with the gate's /v2/-401 settings (which it fails -> 502).
+  dashboardAnnotations: {}
   # Dashboard external exposure (its own host — it serves "/" and would collide
   # with the v2 catch-all on a shared host). Empty = cluster-internal only.
   # WARNING: the dashboard has NO app auth; only set this if the host is itself
   # access-controlled (internal ingress, IP allowlist, or an auth proxy).
   dashboardHost: ""          # e.g. merlin-dashboard.internal.example.com
   dashboardTLSSecretName: "" # defaults to tlsSecretName if empty
+  # Serve the dashboard on the SAME host as the registry (ingress.host), path-routed:
+  # /v2, /token, /reports -> gate (docker push unaffected); everything else -> dashboard.
+  # WARNING: no app auth — this exposes vuln posture + push activity on the registry host.
+  dashboardPathRouting: false
 hpa:
   enabled: true
   minReplicas: 2
