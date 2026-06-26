@@ -1,0 +1,25 @@
+{{define "content"}}
+{{if not .VM.Found}}
+  <section class="panel"><p class="empty">No report found for that image. Reports exist only for images Merlin has gated, and are retained for a limited window.</p></section>
+{{else}}
+<section class="rep-head">
+  <div><div class="img">{{.VM.Repo}}{{if .VM.Tag}}:{{.VM.Tag}}{{end}}</div>
+  <div class="dig">{{.VM.Digest}} · {{.VM.Identity}} · {{.VM.Ts.Format "2006-01-02 15:04:05"}} · base {{.VM.BaseImageID}} · trivy {{.VM.TrivyDBVersion}}</div></div>
+  <div class="verdict {{if .VM.Passed}}ok{{else}}bad{{end}}">{{if .VM.Passed}}PASSED{{else}}REJECTED{{end}}</div>
+</section>
+<section class="chips">
+  <span class="chip bad">{{.VM.Counts.Critical}} Critical</span>
+  <span class="chip warn">{{.VM.Counts.High}} High</span>
+  <span class="chip">{{.VM.Counts.Medium}} Medium</span>
+  <span class="chip muted">{{.VM.Counts.Low}} Low</span>
+  <a class="chip" href="/api/dashboard/report.json?ref={{.VM.Repo}}:{{.VM.Tag}}">Export JSON</a>
+</section>
+<section class="panel"><h4>Findings</h4>
+  <input id="filter" class="filterbox" placeholder="filter by CVE, package, or severity…">
+  <table class="t" id="findings">
+  <tr><th>CVE</th><th>Severity</th><th>Package</th><th>Installed</th><th>Fixed</th></tr>
+  {{range .VM.Findings}}<tr><td>{{.CVE}}</td><td><span class="pill {{.Severity}}">{{.Severity}}</span></td><td>{{.Pkg}}</td><td>{{.Version}}</td><td>{{.FixedVersion}}</td></tr>{{else}}<tr><td class="empty" colspan="5">No findings.</td></tr>{{end}}
+  </table>
+</section>
+{{end}}
+{{end}}

@@ -1,0 +1,17 @@
+{{define "content"}}
+<section class="kpis">
+  <div class="kpi"><div class="lbl">Pass rate</div><div class="val ok">{{printf "%.1f" .VM.Stats.PassRate}}%</div></div>
+  <div class="kpi"><div class="lbl">Scan p50/p95/p99</div><div class="val">{{printf "%.0f" .VM.Stats.P50}}/{{printf "%.0f" .VM.Stats.P95}}/{{printf "%.0f" .VM.Stats.P99}}ms</div></div>
+  <div class="kpi"><div class="lbl">ACR push success</div><div class="val">{{printf "%.1f" .VM.ACRPushSuccess}}%</div></div>
+  <div class="kpi"><div class="lbl">Trivy DB age</div><div class="val">{{printf "%.0f" .VM.TrivyDBAgeDays}}d</div></div>
+</section>
+{{if .VM.Errored}}<p class="degraded">Some data is currently unavailable.</p>{{end}}
+<section class="panel"><h4>Reject reasons</h4><table class="t">
+  <tr><th>Reason</th><th>Count</th><th>%</th></tr>
+  {{range .VM.Stats.RejectReasons}}<tr><td>{{.Label}}</td><td>{{.Count}}</td><td>{{printf "%.0f" .Pct}}%</td></tr>{{else}}<tr><td class="empty" colspan="3">None.</td></tr>{{end}}
+</table></section>
+<section class="panel"><h4>Base-image posture</h4><table class="t">
+  <tr><th>Base image</th><th>Pushes</th><th>Pass rate</th></tr>
+  {{range .VM.BaseImages}}<tr><td>{{.BaseImageID}}</td><td>{{.Total}}</td><td>{{printf "%.0f" .PassRate}}%</td></tr>{{else}}<tr><td class="empty" colspan="3">None.</td></tr>{{end}}
+</table></section>
+{{end}}

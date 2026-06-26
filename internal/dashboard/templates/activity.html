@@ -1,0 +1,23 @@
+{{define "content"}}
+<section class="kpis">
+  <div class="kpi"><div class="lbl">Pushes</div><div class="val">{{.VM.Stats.Total}}</div></div>
+  <div class="kpi"><div class="lbl">Pass rate</div><div class="val ok">{{printf "%.1f" .VM.Stats.PassRate}}%</div></div>
+  <div class="kpi"><div class="lbl">Rejected</div><div class="val bad">{{.VM.Stats.Rejected}}</div></div>
+  <div class="kpi"><div class="lbl">Scan p95</div><div class="val">{{printf "%.0f" .VM.Stats.P95}}ms</div></div>
+</section>
+{{if .VM.Errored}}<p class="degraded">Some data is currently unavailable.</p>{{end}}
+<section class="panel">
+  <h4>● Live gate decisions</h4>
+  <div class="feed" id="feed">
+    {{range .VM.Recent}}
+    <div class="row {{if .Passed}}pass{{else}}fail{{end}}">
+      <span class="led"></span>
+      <a class="ref" href="/report?ref={{.Repo}}:{{.Tag}}">{{.Repo}}:{{.Tag}}</a>
+      <span class="who">{{.Identity}}</span>
+      <span class="badge">{{if .Passed}}PASS{{else}}REJECT{{end}}</span>
+      {{if .Reasons}}<div class="reason">{{range .Reasons}}{{.}} {{end}}</div>{{end}}
+    </div>
+    {{else}}<p class="empty">No recent decisions.</p>{{end}}
+  </div>
+</section>
+{{end}}

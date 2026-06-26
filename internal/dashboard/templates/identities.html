@@ -1,0 +1,11 @@
+{{define "content"}}
+{{if .VM.Errored}}<p class="degraded">Some data is currently unavailable.</p>{{end}}
+<section class="panel"><h4>Top pushers</h4><table class="t">
+  <tr><th>Identity</th><th>Pushes</th><th>Pass rate</th></tr>
+  {{range .VM.Identities}}<tr><td>{{.Name}}</td><td>{{.Total}}</td><td>{{printf "%.0f" .PassRate}}%</td></tr>{{else}}<tr><td class="empty" colspan="3">None.</td></tr>{{end}}
+</table></section>
+<section class="panel"><h4>Busiest repos</h4><table class="t">
+  <tr><th>Repo</th><th>Pushes</th><th>Pass rate</th></tr>
+  {{range .VM.Repos}}<tr><td>{{.Name}}</td><td>{{.Total}}</td><td>{{printf "%.0f" .PassRate}}%</td></tr>{{else}}<tr><td class="empty" colspan="3">None.</td></tr>{{end}}
+</table></section>
+{{end}}
