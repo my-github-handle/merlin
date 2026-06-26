@@ -223,6 +223,27 @@ Merlin exposes Prometheus metrics at `:9090/metrics` (cluster-internal). The met
 
 Alternatively, create a `ServiceMonitor` resource if you use the Prometheus Operator.
 
+## Dashboard
+
+Merlin serves a built-in, read-only observability dashboard on `:8080` **by default**
+(activity feed, health, vulnerabilities, identities, and per-image scan reports). It
+is exposed via the Service (cluster-internal), like the metrics port. Disable it by
+setting `merlin.server.dashboardAddr: "off"` — the container/Service ports are then
+omitted.
+
+Reach it cluster-internally:
+
+```bash
+kubectl -n <ns> port-forward svc/merlin 8080:8080
+# then open http://localhost:8080
+```
+
+To expose it externally, set `ingress.dashboardHost` to a **dedicated** host (it
+serves `/`, which collides with the v2 push path on a shared host). The dashboard
+has **no application-level auth** and reveals who pushed what plus your vulnerability
+posture — only set `dashboardHost` behind an access-controlled ingress (internal-only,
+IP allowlist, or an auth proxy). Leave it empty to keep the dashboard cluster-internal.
+
 ## Usage
 
 After installation, developers can push images through Merlin:

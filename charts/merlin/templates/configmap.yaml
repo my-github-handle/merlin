@@ -37,6 +37,7 @@ data:
     server:
       addr: {{ .Values.merlin.server.addr | quote }}
       metrics_addr: {{ .Values.merlin.server.metricsAddr | quote }}
+      dashboard_addr: {{ .Values.merlin.server.dashboardAddr | quote }}
       max_upload_bytes: {{ .Values.merlin.server.maxUploadBytes }}
       gate_timeout: {{ .Values.merlin.server.gateTimeout | quote }}
       external_url: {{ .Values.merlin.server.externalURL | quote }}

@@ -39,6 +39,10 @@ spec:
               containerPort: 5000
             - name: metrics
               containerPort: 9090
+            {{- if ne (lower .Values.merlin.server.dashboardAddr) "off" }}
+            - name: dashboard
+              containerPort: {{ .Values.dashboard.port }}
+            {{- end }}
           env:
             - name: MERLIN_MODE
               value: production

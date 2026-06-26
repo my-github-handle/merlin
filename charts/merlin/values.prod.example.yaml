@@ -30,6 +30,11 @@ service:
 metrics:
   port: 9090
 
+# Observability dashboard (on by default). Set merlin.server.dashboardAddr to "off"
+# to disable; the Service/containerPort are then omitted.
+dashboard:
+  port: 8080
+
 # Ingress configuration for docker push/pull traffic
 ingress:
   enabled: true
@@ -41,6 +46,11 @@ ingress:
   # REQUIRED: Name of the TLS secret containing the certificate for the host
   # Either pre-created or provisioned via cert-manager
   tlsSecretName: "merlin-tls"  # REQUIRED: Replace with your TLS secret name
+  # OPTIONAL: expose the dashboard on its own host. Leave empty to keep it
+  # cluster-internal (reach it via port-forward / internal Service). The dashboard
+  # has NO app auth — only set this behind an access-controlled ingress/proxy.
+  dashboardHost: ""            # e.g. merlin-dashboard.internal.example.com
+  dashboardTLSSecretName: ""   # defaults to tlsSecretName if empty
   annotations:
     # IMPORTANT: Allow large docker layer uploads (disable size limit)
     nginx.ingress.kubernetes.io/proxy-body-size: "0"
@@ -127,6 +137,7 @@ merlin:
   server:
     addr: ":5000"
     metricsAddr: ":9090"
+    dashboardAddr: ":8080"      # dashboard on by default; set "off" to disable
     maxUploadBytes: 2147483648  # 2GB
     gateTimeout: 5m
     # REQUIRED: External URL for Docker registry (used in token endpoint realm)

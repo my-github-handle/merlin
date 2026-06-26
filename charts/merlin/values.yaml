@@ -16,12 +16,22 @@ service:
   port: 5000
 metrics:
   port: 9090
+dashboard:
+  # Observability dashboard (on by default). The Service/containerPort are emitted
+  # unless merlin.server.dashboardAddr is "off". Port must match dashboardAddr below.
+  port: 8080
 ingress:
   enabled: true
   className: ""        # e.g. nginx / azure-application-gateway
   host: ""             # e.g. merlin.example.com  (required)
   tlsSecretName: ""    # existing TLS secret OR via cert-manager annotations
   annotations: {}
+  # Dashboard external exposure (its own host — it serves "/" and would collide
+  # with the v2 catch-all on a shared host). Empty = cluster-internal only.
+  # WARNING: the dashboard has NO app auth; only set this if the host is itself
+  # access-controlled (internal ingress, IP allowlist, or an auth proxy).
+  dashboardHost: ""          # e.g. merlin-dashboard.internal.example.com
+  dashboardTLSSecretName: "" # defaults to tlsSecretName if empty
 hpa:
   enabled: true
   minReplicas: 2
@@ -51,6 +61,7 @@ merlin:
   server:
     addr: ":5000"
     metricsAddr: ":9090"
+    dashboardAddr: ":8080"   # dashboard on by default; set "off" to disable
     maxUploadBytes: 2147483648
     gateTimeout: 5m
     externalURL: ""

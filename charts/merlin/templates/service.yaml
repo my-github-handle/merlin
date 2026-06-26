@@ -15,3 +15,9 @@ spec:
       port: {{ .Values.metrics.port }}
       targetPort: 9090
       protocol: TCP
+    {{- if ne (lower .Values.merlin.server.dashboardAddr) "off" }}
+    - name: dashboard
+      port: {{ .Values.dashboard.port }}
+      targetPort: dashboard
+      protocol: TCP
+    {{- end }}
