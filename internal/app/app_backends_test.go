@@ -96,7 +96,7 @@ func TestBuildWithBackends_ValidatesRequiredFields(t *testing.T) {
 			cfg := prodConfig()
 			tt.mutate(&cfg)
 
-			_, _, _, err := BuildWithBackends(ctx, cfg)
+			_, _, _, _, err := BuildWithBackends(ctx, cfg)
 			if err == nil {
 				t.Fatalf("expected error for missing %s, got nil", tt.wantField)
 			}

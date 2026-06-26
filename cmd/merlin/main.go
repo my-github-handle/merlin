@@ -25,14 +25,14 @@ func main() {
 
 	// Choose build mode: production (with live backends) or hermetic (for dev/test)
 	mode := os.Getenv("MERLIN_MODE")
-	var mainSrv, metricsSrv *http.Server
+	var mainSrv, metricsSrv, dashboardSrv *http.Server
 	var cleanup func()
 
 	if mode == "production" {
 		log.Println("Starting in production mode with live backends...")
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		mainSrv, metricsSrv, cleanup, err = app.BuildWithBackends(ctx, cfg)
+		mainSrv, metricsSrv, dashboardSrv, cleanup, err = app.BuildWithBackends(ctx, cfg)
 		if err != nil {
 			log.Fatalf("build production: %v", err)
 		}
@@ -50,7 +50,7 @@ func main() {
 	done := make(chan os.Signal, 1)
 	signal.Notify(done, syscall.SIGINT, syscall.SIGTERM)
 
-	// Start both servers
+	// Start servers
 	go func() {
 		log.Printf("Metrics listening on %s", metricsSrv.Addr)
 		if err := metricsSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -64,6 +64,15 @@ func main() {
 			log.Fatalf("main server: %v", err)
 		}
 	}()
+
+	if dashboardSrv != nil {
+		go func() {
+			log.Printf("Dashboard listening on %s", dashboardSrv.Addr)
+			if err := dashboardSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Printf("dashboard server: %v", err) // log, don't Fatal — never take down the gate
+			}
+		}()
+	}
 
 	<-done
 	log.Println("Shutting down gracefully...")

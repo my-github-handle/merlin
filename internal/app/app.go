@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"net/http"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/merlin-gate/merlin/internal/audit"
 	"github.com/merlin-gate/merlin/internal/auth"
 	"github.com/merlin-gate/merlin/internal/config"
+	"github.com/merlin-gate/merlin/internal/dashboard"
 	dockeringress "github.com/merlin-gate/merlin/internal/ingress/docker"
 	"github.com/merlin-gate/merlin/internal/observability"
 	"github.com/merlin-gate/merlin/internal/policies/baseimage"
@@ -72,36 +74,36 @@ func Build(cfg config.Config) (*http.Server, *http.Server, error) {
 // Valkey, ClickHouse, ACR). It validates required production config fields BEFORE constructing
 // any live client, ensuring unit tests can verify config validation without hitting the network.
 //
-// Returns main server, metrics server, cleanup func, and error.
-func BuildWithBackends(ctx context.Context, cfg config.Config) (*http.Server, *http.Server, func(), error) {
+// Returns main server, metrics server, dashboard server (nil if dashboard_addr empty), cleanup func, and error.
+func BuildWithBackends(ctx context.Context, cfg config.Config) (*http.Server, *http.Server, *http.Server, func(), error) {
 	// VALIDATE-FIRST: Check required production fields before constructing live clients.
 	// This allows unit tests to exercise validation logic without network calls.
 	if cfg.Auth.JWKSURL == "" {
-		return nil, nil, nil, fmt.Errorf("production config: Auth.JWKSURL is required")
+		return nil, nil, nil, nil, fmt.Errorf("production config: Auth.JWKSURL is required")
 	}
 	if cfg.Auth.RegistryTokenSecret == "" {
-		return nil, nil, nil, fmt.Errorf("production config: Auth.RegistryTokenSecret is required")
+		return nil, nil, nil, nil, fmt.Errorf("production config: Auth.RegistryTokenSecret is required")
 	}
 	if cfg.Server.ExternalURL == "" {
-		return nil, nil, nil, fmt.Errorf("production config: Server.ExternalURL is required")
+		return nil, nil, nil, nil, fmt.Errorf("production config: Server.ExternalURL is required")
 	}
 	if cfg.Staging.BlobAccountURL == "" {
-		return nil, nil, nil, fmt.Errorf("production config: Staging.BlobAccountURL is required")
+		return nil, nil, nil, nil, fmt.Errorf("production config: Staging.BlobAccountURL is required")
 	}
 	if cfg.Staging.ValkeyAddr == "" {
-		return nil, nil, nil, fmt.Errorf("production config: Staging.ValkeyAddr is required")
+		return nil, nil, nil, nil, fmt.Errorf("production config: Staging.ValkeyAddr is required")
 	}
 	if cfg.Audit.ClickHouseDSN == "" {
-		return nil, nil, nil, fmt.Errorf("production config: Audit.ClickHouseDSN is required")
+		return nil, nil, nil, nil, fmt.Errorf("production config: Audit.ClickHouseDSN is required")
 	}
 	if cfg.ACR.Registry == "" {
-		return nil, nil, nil, fmt.Errorf("production config: ACR.Registry is required")
+		return nil, nil, nil, nil, fmt.Errorf("production config: ACR.Registry is required")
 	}
 
 	// Parse gate timeout
 	gateTimeout, err := time.ParseDuration(cfg.Server.GateTimeout)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("parse gate timeout %q: %w", cfg.Server.GateTimeout, err)
+		return nil, nil, nil, nil, fmt.Errorf("parse gate timeout %q: %w", cfg.Server.GateTimeout, err)
 	}
 
 	// --- LIVE BACKENDS (network calls below) ---
@@ -111,12 +113,12 @@ func BuildWithBackends(ctx context.Context, cfg config.Config) (*http.Server, *h
 
 	// Track opened resources for cleanup on error
 	var closers []func()
-	fail := func(e error) (*http.Server, *http.Server, func(), error) {
+	fail := func(e error) (*http.Server, *http.Server, *http.Server, func(), error) {
 		cancel()
 		for i := len(closers) - 1; i >= 0; i-- {
 			closers[i]()
 		}
-		return nil, nil, nil, e
+		return nil, nil, nil, nil, e
 	}
 
 	// Auth: Entra ID JWKS keyfunc + JWT authenticator (uses bctx for background refresh)
@@ -211,6 +213,26 @@ func BuildWithBackends(ctx context.Context, cfg config.Config) (*http.Server, *h
 	mainSrv := &http.Server{Addr: cfg.Server.Addr, Handler: handler}
 	metricsSrv := &http.Server{Addr: cfg.Server.MetricsAddr, Handler: metrics.Handler()}
 
+	// Optional dashboard server (off unless dashboard_addr is set).
+	var dashSrv *http.Server
+	if cfg.Server.DashboardAddr != "" {
+		broadcaster := dashboard.NewBroadcaster(64)
+		// Tee gate decisions into the live feed without changing the audit path.
+		outcome.Recorder = dashboard.NewTeeRecorder(auditor, broadcaster)
+
+		rnd, derr := dashboard.NewRenderer()
+		if derr != nil {
+			// Log and continue: the dashboard must never fail the process.
+			log.Printf("dashboard disabled: renderer: %v", derr)
+		} else {
+			svc := dashboard.NewService(reportsReader, reg, nil)
+			dashSrv = &http.Server{
+				Addr:    cfg.Server.DashboardAddr,
+				Handler: dashboard.NewServer(svc, rnd, broadcaster, nil),
+			}
+		}
+	}
+
 	// Build cleanup function: cancel JWKS context + close all resources (reverse order)
 	cleanup := func() {
 		cancel() // Stop JWKS background refresh
@@ -219,7 +241,7 @@ func BuildWithBackends(ctx context.Context, cfg config.Config) (*http.Server, *h
 		}
 	}
 
-	return mainSrv, metricsSrv, cleanup, nil
+	return mainSrv, metricsSrv, dashSrv, cleanup, nil
 }
 
 // generatePushID creates a random 16-byte hex ID for tracking push sessions.
