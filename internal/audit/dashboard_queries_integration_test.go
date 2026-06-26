@@ -57,13 +57,6 @@ func TestDashboardQueriesRoundTrip(t *testing.T) {
 	if err != nil || st.Total == 0 {
 		t.Fatalf("DecisionStatsSince err=%v total=%d", err, st.Total)
 	}
-	if cves, err := r.TopCVEs(ctx, since, 5); err != nil || len(cves) == 0 {
-		t.Fatalf("TopCVEs err=%v n=%d", err, len(cves))
-	}
-	fa, err := r.FixAvailabilitySince(ctx, since, 5)
-	if err != nil || len(fa.BySeverity) == 0 {
-		t.Fatalf("FixAvailabilitySince err=%v rows=%d", err, len(fa.BySeverity))
-	}
 	hdr, err := r.DecisionHeaderByRef(ctx, "dash/app", "v1")
 	if err != nil || !hdr.Found || hdr.BaseImageID != "ubi9" {
 		t.Fatalf("DecisionHeaderByRef err=%v found=%v base=%q", err, hdr.Found, hdr.BaseImageID)

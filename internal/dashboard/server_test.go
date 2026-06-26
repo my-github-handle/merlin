@@ -38,7 +38,7 @@ func TestImagesJSON(t *testing.T) {
 	}
 }
 
-func TestRemovedRoutes404(t *testing.T) {
+func TestRemovedRoutesServeOverview(t *testing.T) {
 	srv := testServer()
 	for _, p := range []string{"/health", "/vulnerabilities", "/identities"} {
 		rec := httptest.NewRecorder()
