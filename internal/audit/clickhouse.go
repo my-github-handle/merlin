@@ -20,8 +20,8 @@ type clickhouseWriter struct {
 }
 
 // NewClickHouseWriter connects to ClickHouse via a DSN and self-bootstraps the schema.
-// The writer creates the target database and schema tables idempotently on first construction.
-func NewClickHouseWriter(dsn string) (Writer, error) {
+// retentionDays sets a TTL on the audit tables (rows expire retentionDays after ts).
+func NewClickHouseWriter(dsn string, retentionDays int) (Writer, error) {
 	opts, err := clickhouse.ParseDSN(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("parse clickhouse dsn: %w", err)
@@ -30,7 +30,7 @@ func NewClickHouseWriter(dsn string) (Writer, error) {
 	// database may not exist yet, so opening+pinging a connection scoped to it would
 	// fail with "Database <db> does not exist". bootstrapSchema creates the database
 	// and the idempotent schema tables before we open the target-scoped connection.
-	if err := bootstrapSchema(opts); err != nil {
+	if err := bootstrapSchema(opts, retentionDays); err != nil {
 		return nil, fmt.Errorf("bootstrap schema: %w", err)
 	}
 	conn, err := clickhouse.Open(opts)
@@ -48,7 +48,7 @@ func NewClickHouseWriter(dsn string) (Writer, error) {
 // bootstrapSchema creates the target database and schema tables idempotently.
 // Uses a separate connection to the "default" database to execute CREATE DATABASE,
 // then applies the embedded schema.sql statements. This is safe to call repeatedly.
-func bootstrapSchema(opts *clickhouse.Options) error {
+func bootstrapSchema(opts *clickhouse.Options, retentionDays int) error {
 	ctx := context.Background()
 	targetDB := opts.Auth.Database
 	if targetDB == "" {
@@ -83,6 +83,13 @@ func bootstrapSchema(opts *clickhouse.Options) error {
 	for _, stmt := range statements {
 		if err := conn.Exec(ctx, stmt); err != nil {
 			return fmt.Errorf("exec schema statement: %w", err)
+		}
+	}
+
+	// Apply retention TTL idempotently (after tables exist).
+	for _, stmt := range ttlStatements(retentionDays) {
+		if err := conn.Exec(ctx, stmt); err != nil {
+			return fmt.Errorf("exec ttl statement: %w", err)
 		}
 	}
 

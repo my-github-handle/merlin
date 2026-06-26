@@ -15,7 +15,7 @@ func TestClickHouseReverseLookups(t *testing.T) {
 	if dsn == "" {
 		t.Skip("set MERLIN_CLICKHOUSE_DSN to run")
 	}
-	w, err := NewClickHouseWriter(dsn)
+	w, err := NewClickHouseWriter(dsn, 30)
 	if err != nil {
 		t.Fatal(err)
 	}
