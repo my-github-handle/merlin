@@ -89,3 +89,38 @@ Each finding has `CVE`, `Severity` (`LOW`/`MEDIUM`/`HIGH`/`CRITICAL`), `Pkg`,
 
 > The gate only **blocks** on `CRITICAL`. LOW/MEDIUM/HIGH findings are reported
 > in the scan result but do not stop the push.
+
+## Observability Dashboard
+
+Merlin ships a built-in, read-only dashboard. It is **off by default** and turns on
+when you set `server.dashboard_addr` in config (e.g. `:8080`). It is served on its
+own port — keep that port network-restricted (it exposes who pushed what and your
+vulnerability posture; there is no application-level auth in this version).
+
+Tabs:
+- **Activity** — live feed of gate decisions (streams over SSE) plus headline KPIs.
+- **Health** — pass rate, scan latency percentiles, ACR push success, Trivy DB age,
+  reject-reason breakdown, and base-image posture.
+- **Vulnerabilities** — severity totals, top CVEs across all gated images, and the
+  remediation gap (how many findings have a fix available).
+- **Identities & Repos** — top pushers and busiest repos with pass rates.
+
+Time range: **1d / 7d / 30d** (header toggle). Data is retained for
+`audit.retention_days` days (default 30); wider ranges show only retained data.
+
+### Image scan reports
+
+Click any image in the feed/tables, or use the search box (type `repo:tag` or
+`repo@sha256:…`) to open its scan report: verdict, provenance, severity counts, and
+the full findings table (filter client-side by CVE / package / severity). "Export
+JSON" returns the same findings as `GET /reports/<ref>`, pretty-printed. Reports
+exist only for images Merlin has gated (pass or reject).
+
+### Config
+
+```yaml
+server:
+  dashboard_addr: ":8080"   # empty/unset = dashboard disabled
+audit:
+  retention_days: 30        # audit + findings TTL
+```
