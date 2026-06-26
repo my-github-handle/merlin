@@ -5,14 +5,8 @@
 <link rel="stylesheet" href="/static/app.css">
 </head><body>
 <header class="topbar">
-  <span class="logo">merlin<span class="dot">●</span> <span class="muted">gate dashboard</span></span>
-  <nav class="tabs">
-    <a href="/?range={{.Range}}" class="tab {{if eq .Page "activity"}}active{{end}}">Activity</a>
-    <a href="/health?range={{.Range}}" class="tab {{if eq .Page "health"}}active{{end}}">Health</a>
-    <a href="/vulnerabilities?range={{.Range}}" class="tab {{if eq .Page "vulnerabilities"}}active{{end}}">Vulnerabilities</a>
-    <a href="/identities?range={{.Range}}" class="tab {{if eq .Page "identities"}}active{{end}}">Identities &amp; Repos</a>
-  </nav>
-  <form class="rangebox" method="get" action="{{.Action}}">
+  <a class="logo" href="/?range={{.Range}}">merlin<span class="dot">●</span> <span class="muted">gate dashboard</span></a>
+  <form class="rangebox" method="get" action="/">
     {{range .Ranges}}<button name="range" value="{{.}}" class="range {{if eq . $.Range}}on{{end}}">{{.}}</button>{{end}}
   </form>
   <form class="search" method="get" action="/report"><input name="ref" placeholder="repo:tag or repo@sha256…"></form>

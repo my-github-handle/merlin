@@ -1,0 +1,59 @@
+{{define "content"}}
+<h3 style="margin:0 0 14px;color:#cbd5e1;font-size:14px">Overview</h3>
+<section class="hero">
+  <div class="card">
+    <div class="lbl">Gate pass rate · {{.Range}}</div>
+    <div class="gauge">
+      <div class="ring" style="--pct: {{printf "%.0f" .VM.Stats.PassRate}}">
+        <span class="p">{{printf "%.0f" .VM.Stats.PassRate}}%</span>
+      </div>
+      <div class="gtext"><div><b>{{.VM.Stats.Passed}}</b> passed</div><div><b>{{.VM.Stats.Rejected}}</b> rejected</div><div class="muted">{{.VM.Stats.Total}} pushes</div></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="lbl">Pushes &amp; scan latency · {{.Range}}</div>
+    <div class="twin">
+      <div class="cell"><div class="cl">Pushes</div><div class="cv">{{.VM.Stats.Total}}</div></div>
+      <div class="cell"><div class="cl">Scan p95</div><div class="cv">{{printf "%.0f" .VM.Stats.P95}}ms</div><div class="cs">p50 {{printf "%.0f" .VM.Stats.P50}} · p99 {{printf "%.0f" .VM.Stats.P99}}</div></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="lbl">Infra health</div>
+    <div class="kv"><span>ACR push success</span><b>{{printf "%.1f" .VM.ACRPushSuccess}}%</b></div>
+    <div class="kv"><span>Trivy DB age</span><b>{{printf "%.0f" .VM.TrivyDBAgeDays}}d</b></div>
+  </div>
+</section>
+{{if .VM.Errored}}<p class="degraded">Some data is currently unavailable.</p>{{end}}
+<section class="panel">
+  <h4>Images — vulnerabilities by image</h4>
+  <div class="filterbar">
+    <input id="imgfilter" class="filterbox" placeholder="filter by repo, tag, identity…">
+    <button class="chiptog" id="critOnly" type="button">has CRITICAL</button>
+    <button class="chiptog" id="rejOnly" type="button">rejected only</button>
+  </div>
+  <table class="t" id="images">
+    <thead><tr><th>Image</th><th>Verdict</th><th>Critical</th><th>High</th><th>Medium</th><th>Low</th><th>Pushed</th></tr></thead>
+    <tbody>
+    {{range .VM.Images}}
+      <tr data-ref="{{.Repo}}{{if .Tag}}:{{.Tag}}{{end}}" data-pushid="{{.PushID}}" onclick="openReport(this)">
+        <td class="img">{{.Repo}}{{if .Tag}}:{{.Tag}}{{end}}<div class="who">{{.Identity}}</div></td>
+        <td>{{if .Passed}}<span class="badge pass">PASS</span>{{else}}<span class="badge fail">REJECT</span>{{end}}</td>
+        <td>{{if .Crit}}<span class="sv c">{{.Crit}}</span>{{else}}<span class="sv z">0</span>{{end}}</td>
+        <td>{{if .High}}<span class="sv h">{{.High}}</span>{{else}}<span class="sv z">0</span>{{end}}</td>
+        <td>{{if .Med}}<span class="sv m">{{.Med}}</span>{{else}}<span class="sv z">0</span>{{end}}</td>
+        <td>{{if .Low}}<span class="sv l">{{.Low}}</span>{{else}}<span class="sv z">0</span>{{end}}</td>
+        <td class="muted">{{.Ts.Format "2006-01-02 15:04"}}</td>
+      </tr>
+    {{else}}
+      <tr><td class="empty" colspan="7">No images in this window.</td></tr>
+    {{end}}
+    </tbody>
+  </table>
+  <div class="pager">
+    <span>{{.VM.Total}} images</span>
+    {{if .VM.HasPrev}}<a class="pbtn" href="/?range={{.Range}}&page={{add .VM.Page -1}}">‹ Prev</a>{{else}}<span class="pbtn dim">‹ Prev</span>{{end}}
+    <span>page {{.VM.Page}}</span>
+    {{if .VM.HasNext}}<a class="pbtn" href="/?range={{.Range}}&page={{add .VM.Page 1}}">Next ›</a>{{else}}<span class="pbtn dim">Next ›</span>{{end}}
+  </div>
+</section>
+{{end}}

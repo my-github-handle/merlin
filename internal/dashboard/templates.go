@@ -36,15 +36,16 @@ type Renderer struct {
 }
 
 var pageActions = map[string]string{
-	"activity": "/", "health": "/health",
-	"vulnerabilities": "/vulnerabilities", "identities": "/identities", "report": "/report",
+	"overview": "/",
+	"report":   "/report",
 }
 
 // NewRenderer parses layout.html with each page template into a set keyed by page.
 func NewRenderer() (*Renderer, error) {
+	funcs := template.FuncMap{"add": func(a, b int) int { return a + b }}
 	pages := map[string]*template.Template{}
-	for _, page := range []string{"activity", "health", "vulnerabilities", "identities", "report"} {
-		t, err := template.New("layout").ParseFS(templateFS, "templates/layout.html", "templates/"+page+".html")
+	for _, page := range []string{"overview", "report"} {
+		t, err := template.New("layout").Funcs(funcs).ParseFS(templateFS, "templates/layout.html", "templates/"+page+".html")
 		if err != nil {
 			return nil, fmt.Errorf("parse %s: %w", page, err)
 		}
@@ -69,14 +70,10 @@ func (r *Renderer) Render(w io.Writer, page string, vm any) error {
 // rangeOf extracts the Range field from a view model (defaults to 1d).
 func rangeOf(vm any) Range {
 	switch v := vm.(type) {
-	case ActivityVM:
+	case OverviewVM:
 		return v.Range
-	case HealthVM:
-		return v.Range
-	case VulnVM:
-		return v.Range
-	case IdentitiesVM:
-		return v.Range
+	case ReportVM:
+		return Range1d
 	default:
 		return Range1d
 	}
