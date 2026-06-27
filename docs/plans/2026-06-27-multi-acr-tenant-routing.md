@@ -618,7 +618,6 @@ Create `internal/ingress/docker/tenant_routing_test.go`:
 package docker
 
 import (
-	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -684,8 +683,6 @@ func TestMatchingPrefixTokenAccepted(t *testing.T) {
 		t.Errorf("code = %d, want 200", rec.Code)
 	}
 }
-
-var _ = context.Background
 ```
 
 Update `handler_test.go`: every `NewHandler(fakeAuth{...}, nil, nil, nil, "myreg.azurecr.io", nil)` becomes `NewHandler(fakeResolver{t: &tenant.Tenant{Prefix: "c3dev", Registry: "myreg.azurecr.io", Authn: fakeAuth{...}}}, nil, nil, nil, nil)` and each request sets `req.Host = "c3dev.c3ci.cloud"`. (The `fakeResolver` lives in `tenant_routing_test.go`, same package.)
