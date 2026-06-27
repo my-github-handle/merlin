@@ -33,8 +33,8 @@ func buildIntegrationHandler(t *testing.T, trivyReport trivy.Report, poolSize in
 	rt := router.New(policy.NewEngine(tp, bp))
 	pool := router.NewPool(rt, poolSize)
 	fp := &acr.FakePusher{}
-	o := &Outcome{Pusher: fp, ReportBaseURL: "/reports"}
-	h := NewHandler(fakeAuth{ok: true}, st, rt, o, "myreg.azurecr.io", nil)
+	o := &Outcome{ReportBaseURL: "/reports"}
+	h := NewHandler(testResolver("myreg.azurecr.io", fp, fakeAuth{ok: true}), st, rt, o, nil)
 	h.SetPool(pool)
 	h.SetGateTimeout(5 * time.Second)
 	return h, fp
@@ -47,6 +47,7 @@ func uploadLayer(t *testing.T, h *Handler, repo string, layer []byte) string {
 
 	// POST to begin upload
 	req := httptest.NewRequest(http.MethodPost, "/v2/"+repo+"/blobs/uploads/", nil)
+	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -60,6 +61,7 @@ func uploadLayer(t *testing.T, h *Handler, repo string, layer []byte) string {
 
 	// PATCH the layer data
 	req = httptest.NewRequest(http.MethodPatch, "/v2/"+repo+"/blobs/uploads/"+uploadID, bytes.NewReader(layer))
+	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
 	req.Header.Set("Content-Range", "0-"+string(rune('0'+len(layer)-1)))
 	rec = httptest.NewRecorder()
@@ -70,6 +72,7 @@ func uploadLayer(t *testing.T, h *Handler, repo string, layer []byte) string {
 
 	// PUT to complete
 	req = httptest.NewRequest(http.MethodPut, "/v2/"+repo+"/blobs/uploads/"+uploadID+"?digest="+digest, nil)
+	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -102,6 +105,7 @@ func TestManifestPUTUBILayerAccepted(t *testing.T) {
 
 	// PUT the manifest
 	req := httptest.NewRequest(http.MethodPut, "/v2/testapp/manifests/v1", bytes.NewReader(manifestBytes))
+	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -144,6 +148,7 @@ func TestManifestPUTImageByDigestGated(t *testing.T) {
 
 	// Push the IMAGE manifest by digest (buildx behavior).
 	req := httptest.NewRequest(http.MethodPut, "/v2/app/manifests/"+imgDigest, bytes.NewReader(manifestBytes))
+	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -184,6 +189,7 @@ func TestManifestPUTAttestationForwarded(t *testing.T) {
 	// docker pushes the attestation by digest.
 	digest := dg(body)
 	req := httptest.NewRequest(http.MethodPut, "/v2/app/manifests/"+digest, bytes.NewReader(body))
+	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -225,6 +231,7 @@ func TestManifestPUTIndexForwarded(t *testing.T) {
 	body, _ := json.Marshal(index)
 	// docker pushes the index by tag.
 	req := httptest.NewRequest(http.MethodPut, "/v2/app/manifests/2.13.25", bytes.NewReader(body))
+	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -254,6 +261,7 @@ func TestManifestPUTIndexForwardFailureIs400(t *testing.T) {
 	}
 	body, _ := json.Marshal(index)
 	req := httptest.NewRequest(http.MethodPut, "/v2/app/manifests/v1", bytes.NewReader(body))
+	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -290,6 +298,7 @@ func TestManifestPUTSharedBlobConcurrent(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			req := httptest.NewRequest(http.MethodPut, fmt.Sprintf("/v2/shared%d/manifests/v1", i), bytes.NewReader(manifestBytes))
+			req.Host = testTenantHost
 			req.Header.Set("Authorization", "Bearer good")
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, req)
@@ -321,8 +330,8 @@ func TestManifestPUTPoolSaturated(t *testing.T) {
 	rt := router.New(policy.NewEngine(bp))
 	pool := router.NewPool(rt, 1)
 	fp := &acr.FakePusher{}
-	o := &Outcome{Pusher: fp, ReportBaseURL: "/reports"}
-	h := NewHandler(fakeAuth{ok: true}, st, rt, o, "myreg.azurecr.io", nil)
+	o := &Outcome{ReportBaseURL: "/reports"}
+	h := NewHandler(testResolver("myreg.azurecr.io", fp, fakeAuth{ok: true}), st, rt, o, nil)
 	h.SetPool(pool)
 	h.SetGateTimeout(5 * time.Second) // long enough for first request to stay alive while blocking
 
@@ -340,6 +349,7 @@ func TestManifestPUTPoolSaturated(t *testing.T) {
 	// Start a gate in the background that occupies the pool slot
 	go func() {
 		req := httptest.NewRequest(http.MethodPut, "/v2/app1/manifests/v1", bytes.NewReader(manifestBytes))
+		req.Host = testTenantHost
 		req.Header.Set("Authorization", "Bearer good")
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
@@ -362,6 +372,7 @@ func TestManifestPUTPoolSaturated(t *testing.T) {
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel2()
 	req := httptest.NewRequest(http.MethodPut, "/v2/app2/manifests/v2", bytes.NewReader(manifestBytes2))
+	req.Host = testTenantHost
 	req = req.WithContext(ctx2)
 	req.Header.Set("Authorization", "Bearer good")
 	rec := httptest.NewRecorder()
@@ -393,6 +404,7 @@ func TestManifestPUTIncompletePush(t *testing.T) {
 	manifestBytes, _ := json.Marshal(manifest)
 
 	req := httptest.NewRequest(http.MethodPut, "/v2/app/manifests/v1", bytes.NewReader(manifestBytes))
+	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)

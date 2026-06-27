@@ -57,8 +57,23 @@ merlin:
   # rendered into /etc/merlin/config.yaml
   trivy: { severityThreshold: CRITICAL }
   baseImage: { allowedIDs: [rhel, wolfi, chainguard] }
-  acr: { registry: "" }                 # required: <acr>.azurecr.io
-  auth: { issuer: "", audience: "", jwksURL: "", tenantID: "", service: merlin, registryTokenTTL: "5m" }   # required (Entra)
+  # ACR host template + base DNS domain. Each push is routed to a per-tenant ACR
+  # by substituting the tenant prefix into registryTemplate (must contain {prefix}).
+  acr:
+    registryTemplate: "{prefix}acr.azurecr.io"   # required: must contain {prefix}
+    baseDomain: ""                                # required: e.g. c3ci.cloud
+  # Per-tenant ACR + Entra auth. One entry per DNS subdomain prefix; the ingress
+  # exposes <prefix>.<acr.baseDomain> for each. At least one tenant is required.
+  tenants: []
+    # - prefix: c3dev
+    #   acrClientId: ""        # required: AKS workload-identity client ID for this ACR
+    #   auth:
+    #     issuer: ""           # required: https://sts.windows.net/<tenant-id>/
+    #     audience: ""         # required: token audience (ACR client ID or custom)
+    #     jwksUrl: ""          # required: https://login.microsoftonline.com/<tenant-id>/discovery/v2.0/keys
+    #     tenantId: ""         # required: Entra tenant ID
+  # Shared auth: signing secret + token TTL + registry service name (not per-tenant).
+  auth: { service: merlin, registryTokenTTL: "5m" }   # registry_token_secret injected via env
   staging:
     blobAccountURL: ""                  # required: https://<acct>.blob.core.windows.net
     blobContainer: merlin-staging
@@ -72,7 +87,15 @@ merlin:
     dashboardAddr: ":8080"   # dashboard on by default; set "off" to disable
     maxUploadBytes: 2147483648
     gateTimeout: 5m
+    # Drain window for in-flight pushes on SIGTERM/rolling restart. Keep it above
+    # gateTimeout (so a push in the gate can finish) and at or below
+    # terminationGracePeriodSeconds below (so the kubelet does not SIGKILL mid-drain).
+    shutdownTimeout: 6m
     externalURL: ""
+# Pod shutdown grace: must be >= server.shutdownTimeout (6m = 360s) so the kubelet
+# waits for Merlin to drain in-flight pushes before SIGKILL. The default 30s would
+# kill the pod mid-push on every rolling restart.
+terminationGracePeriodSeconds: 375
 # Valkey via Hyperspike valkey-operator (hyperspike.io/v1 Valkey CR).
 valkey:
   enabled: true

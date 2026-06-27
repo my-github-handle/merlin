@@ -10,28 +10,47 @@ Merlin has been installed successfully!
 
    $ az login
    $ az acr login --name <your-acr-name>
-   $ docker login {{ .Values.ingress.host }}
+{{- if .Values.merlin.tenants }}
+{{- range .Values.merlin.tenants }}
+   $ docker login {{ .prefix }}.{{ $.Values.merlin.acr.baseDomain }}
+{{- end }}
+{{- else }}
+   $ docker login <tenant-prefix>.{{ .Values.merlin.acr.baseDomain }}
+{{- end }}
 
    The docker login will use your Entra token to authenticate with Merlin.
 
 2. DOCKER PUSH (gated by Merlin):
 
    Tag and push your image through Merlin:
+{{- if .Values.merlin.tenants }}
+{{- $firstTenant := first .Values.merlin.tenants }}
 
-   $ docker tag myimage:latest {{ .Values.ingress.host }}/<repository>:<tag>
-   $ docker push {{ .Values.ingress.host }}/<repository>:<tag>
+   $ docker tag myimage:latest {{ $firstTenant.prefix }}.{{ $.Values.merlin.acr.baseDomain }}/<repository>:<tag>
+   $ docker push {{ $firstTenant.prefix }}.{{ $.Values.merlin.acr.baseDomain }}/<repository>:<tag>
+{{- else }}
+
+   $ docker tag myimage:latest <tenant-prefix>.{{ .Values.merlin.acr.baseDomain }}/<repository>:<tag>
+   $ docker push <tenant-prefix>.{{ .Values.merlin.acr.baseDomain }}/<repository>:<tag>
+{{- end }}
 
    Merlin will:
    - Verify your image is based on UBI, Wolfi, or Chainguard
    - Scan for CRITICAL vulnerabilities using Trivy
    - Reject images that fail the gate
-   - Forward approved images to {{ .Values.merlin.acr.registry }}
+   - Forward approved images to the per-tenant ACR derived from {{ .Values.merlin.acr.registryTemplate }}
 
 3. DOCKER PULL:
 
    Pull approved images from Merlin:
+{{- if .Values.merlin.tenants }}
+{{- $firstTenant := first .Values.merlin.tenants }}
 
-   $ docker pull {{ .Values.ingress.host }}/<repository>:<tag>
+   $ docker pull {{ $firstTenant.prefix }}.{{ $.Values.merlin.acr.baseDomain }}/<repository>:<tag>
+{{- else }}
+
+   $ docker pull <tenant-prefix>.{{ .Values.merlin.acr.baseDomain }}/<repository>:<tag>
+{{- end }}
 
 4. QUERY SCAN REPORTS:
 
@@ -63,7 +82,8 @@ Merlin will REJECT images that:
 - Are NOT based on Red Hat UBI, Wolfi, or Chainguard base images
 - Contain CRITICAL severity vulnerabilities (Trivy scan)
 
-Approved images are forwarded to the upstream ACR: {{ .Values.merlin.acr.registry }}
+Approved images are forwarded to the per-tenant ACR derived from {{ .Values.merlin.acr.registryTemplate }}
+(the {prefix} is the tenant subdomain you pushed to)
 
 ===================================
 📊 Monitoring & Troubleshooting

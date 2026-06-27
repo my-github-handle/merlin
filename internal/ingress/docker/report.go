@@ -19,7 +19,14 @@ type ReportSource interface {
 }
 
 func (h *Handler) handleReport(w http.ResponseWriter, r *http.Request) {
-	if !h.authenticate(w, r) {
+	// Reports authenticate against the tenant that owns the request host; an
+	// unknown host is a 404, mirroring the /v2/ surface.
+	t, err := h.resolver.ForHost(r.Host)
+	if err != nil {
+		http.Error(w, "unknown registry", http.StatusNotFound)
+		return
+	}
+	if !h.authenticate(w, r, t) {
 		return
 	}
 	id := strings.TrimPrefix(r.URL.Path, "/reports/")
@@ -32,10 +39,7 @@ func (h *Handler) handleReport(w http.ResponseWriter, r *http.Request) {
 	// caller pushed) or an opaque push_id. Detect a reference by the "@" digest
 	// separator or a ":" tag separator AFTER the last "/" (so a digest's own
 	// "sha256:" prefix in repo@sha256:... isn't mistaken for a tag).
-	var (
-		findings []policy.Finding
-		err      error
-	)
+	var findings []policy.Finding
 	if repo, ref, ok := splitImageRef(id); ok {
 		findings, err = h.reports.FindingsByImageRef(r.Context(), repo, ref)
 	} else {

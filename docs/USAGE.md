@@ -9,19 +9,40 @@ publishes it to the backend registry (ACR) if it passes the gate:
 You push with the normal `docker` CLI; the gate runs in-band. A passing push
 returns `201` and the image lands in ACR; a failing push fails with the reason.
 
-> Replace `merlin.example.com` with your Merlin host and `app:v1` with your
-> image. The token/audience below come from your deployment's Entra config.
+## Host-prefix routing (which ACR your push lands in)
+
+Merlin serves multiple ACRs from a single deployment, routed by the **DNS
+subdomain prefix** of the host you push to. A push to `<prefix>.<baseDomain>`
+is forwarded to the per-tenant ACR derived from the deployment's
+`acr.registry_template` with `{prefix}` substituted in. For example, with
+`registry_template: "{prefix}acr.azurecr.io"` and `base_domain: c3ci.cloud`:
+
+| You push to            | Merlin forwards to       |
+|------------------------|--------------------------|
+| `c3dev.c3ci.cloud`     | `c3devacr.azurecr.io`    |
+| `c3prod.c3ci.cloud`    | `c3prodacr.azurecr.io`   |
+
+Each prefix is a configured **tenant** with its own inbound Entra auth and its
+own outbound workload-identity. Two rules follow from this:
+
+- Pushing to an **unknown prefix** (no matching tenant) returns `404`.
+- A registry token is **prefix-bound**: a token obtained from one tenant host is
+  rejected with `401` if used against another tenant host.
+
+> In the examples below, replace `c3dev.c3ci.cloud` with your tenant host
+> (`<prefix>.<baseDomain>`) and `app:v1` with your image. The token/audience come
+> from that tenant's Entra config.
 
 ## 1. Publish a Docker image
 
 ```bash
-# 1. Authenticate (Entra ID). The username is ignored; the password is your token.
+# 1. Authenticate (Entra ID) against your tenant host. Username is ignored; password is your token.
 TOKEN=$(az account get-access-token --resource api://<merlin-audience> --query accessToken -o tsv)
-echo "$TOKEN" | docker login merlin.example.com -u 00000000-0000-0000-0000-000000000000 --password-stdin
+echo "$TOKEN" | docker login c3dev.c3ci.cloud -u 00000000-0000-0000-0000-000000000000 --password-stdin
 
-# 2. Tag your image for Merlin and push.
-docker tag myimage:latest merlin.example.com/app:v1
-docker push merlin.example.com/app:v1
+# 2. Tag your image for the tenant host and push (routed to c3devacr.azurecr.io).
+docker tag myimage:latest c3dev.c3ci.cloud/app:v1
+docker push c3dev.c3ci.cloud/app:v1
 ```
 
 **Pass** (exit 0):
@@ -55,14 +76,15 @@ report endpoint, addressed by **the image reference you pushed** — no push ID 
 
 ```bash
 # Get a registry token scoped to your repo (pull scope is enough for reports).
+# Use the same tenant host you pushed to — the token is prefix-bound to it.
 TOKEN=$(az account get-access-token --resource api://<merlin-audience> --query accessToken -o tsv)
 REG=$(curl -s -u "00000000-0000-0000-0000-000000000000:$TOKEN" \
-  "https://merlin.example.com/token?service=merlin&scope=repository:app:pull" \
+  "https://c3dev.c3ci.cloud/token?service=merlin&scope=repository:app:pull" \
   | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
 
 # Fetch the scan report by the tag you pushed (JSON array of findings).
 curl -s -H "Authorization: Bearer $REG" \
-  "https://merlin.example.com/reports/app:v1"
+  "https://c3dev.c3ci.cloud/reports/app:v1"
 ```
 
 The report path accepts any of:

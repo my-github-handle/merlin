@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/merlin-gate/merlin/internal/auth"
+	"github.com/merlin-gate/merlin/internal/tenant"
 )
 
 type fakeAuth struct{ ok bool }
@@ -21,8 +22,9 @@ func (f fakeAuth) Validate(_ context.Context, bearer string) (auth.Identity, err
 }
 
 func TestV2BaseReturns401WhenUnauthenticated(t *testing.T) {
-	h := NewHandler(fakeAuth{ok: false}, nil, nil, nil, "myreg.azurecr.io", nil)
+	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: false}), nil, nil, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/v2/", nil)
+	req.Host = testTenantHost
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
@@ -34,8 +36,9 @@ func TestV2BaseReturns401WhenUnauthenticated(t *testing.T) {
 }
 
 func TestV2BaseReturns200WhenAuthenticated(t *testing.T) {
-	h := NewHandler(fakeAuth{ok: true}, nil, nil, nil, "myreg.azurecr.io", nil)
+	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), nil, nil, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/v2/", nil)
+	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -48,8 +51,9 @@ func TestManifestPathRejectsUnsupportedMethod(t *testing.T) {
 	// GET/HEAD on a manifest is a docker existence check → 404 (see
 	// TestManifestGetHeadReturns404NotMethodNotAllowed). A truly unsupported method
 	// (e.g. DELETE) on the manifest path → 405.
-	h := NewHandler(fakeAuth{ok: true}, nil, nil, nil, "myreg.azurecr.io", nil)
+	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), nil, nil, nil, nil)
 	req := httptest.NewRequest(http.MethodDelete, "/v2/repo/manifests/sha256:abc", nil)
+	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -59,8 +63,9 @@ func TestManifestPathRejectsUnsupportedMethod(t *testing.T) {
 }
 
 func TestUploadPathRejectsGET(t *testing.T) {
-	h := NewHandler(fakeAuth{ok: true}, nil, nil, nil, "myreg.azurecr.io", nil)
+	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), nil, nil, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/v2/repo/blobs/uploads/session-id", nil)
+	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -71,11 +76,12 @@ func TestUploadPathRejectsGET(t *testing.T) {
 
 func TestV2VerifiesRegistryToken(t *testing.T) {
 	iss := auth.NewRegistryTokenIssuer([]byte("s"), "merlin", time.Minute)
-	h := NewHandler(fakeAuth{ok: true}, nil, nil, nil, "myreg.azurecr.io", nil)
+	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), nil, nil, nil, nil)
 	h.SetRegistryAuth(iss, "https://merlin.example/token", "merlin")
 
 	// no token -> 401 + realm points at /token
 	req := httptest.NewRequest(http.MethodGet, "/v2/", nil)
+	req.Host = testTenantHost
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
@@ -86,8 +92,9 @@ func TestV2VerifiesRegistryToken(t *testing.T) {
 	}
 
 	// valid registry token -> 200
-	tok, _, _ := iss.Mint("user@x", "repository:app:push,pull")
+	tok, _, _ := iss.Mint("user@x", "repository:app:push,pull", "c3dev")
 	req2 := httptest.NewRequest(http.MethodGet, "/v2/", nil)
+	req2.Host = testTenantHost
 	req2.Header.Set("Authorization", "Bearer "+tok)
 	rec2 := httptest.NewRecorder()
 	h.ServeHTTP(rec2, req2)
@@ -97,6 +104,7 @@ func TestV2VerifiesRegistryToken(t *testing.T) {
 
 	// a raw (non-registry) token -> 401 (entra tokens no longer accepted on /v2/)
 	req3 := httptest.NewRequest(http.MethodGet, "/v2/", nil)
+	req3.Host = testTenantHost
 	req3.Header.Set("Authorization", "Bearer some-entra-token")
 	rec3 := httptest.NewRecorder()
 	h.ServeHTTP(rec3, req3)
@@ -107,21 +115,24 @@ func TestV2VerifiesRegistryToken(t *testing.T) {
 
 func TestValidatedIdentityRegistryMode(t *testing.T) {
 	iss := auth.NewRegistryTokenIssuer([]byte("s"), "merlin", time.Minute)
-	h := NewHandler(fakeAuth{ok: true}, nil, nil, nil, "myreg.azurecr.io", nil)
+	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), nil, nil, nil, nil)
 	h.SetRegistryAuth(iss, "https://merlin.example/token", "merlin")
 
-	tok, _, _ := iss.Mint("alice@x", "repository:app:push,pull")
+	ten := &tenant.Tenant{Prefix: "c3dev", Registry: "myreg.azurecr.io", Authn: fakeAuth{ok: true}}
+	tok, _, _ := iss.Mint("alice@x", "repository:app:push,pull", "c3dev")
 	r := httptest.NewRequest(http.MethodGet, "/v2/", nil)
+	r.Host = testTenantHost
 	r.Header.Set("Authorization", "Bearer "+tok)
-	id, ok := h.validatedIdentity(r)
+	id, ok := h.validatedIdentity(r, ten)
 	if !ok || id.Subject != "alice@x" {
 		t.Errorf("registry-mode identity: ok=%v subject=%q, want true/alice@x", ok, id.Subject)
 	}
 
 	// a raw (non-registry) token must NOT yield an identity under registry auth
 	r2 := httptest.NewRequest(http.MethodGet, "/v2/", nil)
+	r2.Host = testTenantHost
 	r2.Header.Set("Authorization", "Bearer not-a-registry-token")
-	if _, ok := h.validatedIdentity(r2); ok {
+	if _, ok := h.validatedIdentity(r2, ten); ok {
 		t.Error("raw token must not yield identity under registry auth")
 	}
 }
@@ -150,11 +161,12 @@ func TestRepoFromV2Path(t *testing.T) {
 
 func TestManifestGetHeadReturns404NotMethodNotAllowed(t *testing.T) {
 	iss := auth.NewRegistryTokenIssuer([]byte("s"), "merlin", time.Minute)
-	h := NewHandler(fakeAuth{ok: true}, nil, nil, nil, "myreg.azurecr.io", nil)
+	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), nil, nil, nil, nil)
 	h.SetRegistryAuth(iss, "https://merlin.example/token", "merlin")
-	tok, _, _ := iss.Mint("u@x", "")
+	tok, _, _ := iss.Mint("u@x", "", "c3dev")
 	for _, m := range []string{http.MethodGet, http.MethodHead} {
 		req := httptest.NewRequest(m, "/v2/app/manifests/v1", nil)
+		req.Host = testTenantHost
 		req.Header.Set("Authorization", "Bearer "+tok)
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)

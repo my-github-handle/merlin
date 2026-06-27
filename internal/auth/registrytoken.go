@@ -22,15 +22,17 @@ func NewRegistryTokenIssuer(secret []byte, service string, ttl time.Duration) *R
 }
 
 type registryClaims struct {
-	Scope string `json:"scope,omitempty"`
+	Scope  string `json:"scope,omitempty"`
+	Prefix string `json:"prefix,omitempty"`
 	jwt.RegisteredClaims
 }
 
 // Mint returns a signed registry token for subject with the granted scope.
-func (i *RegistryTokenIssuer) Mint(subject, scope string) (string, int, error) {
+func (i *RegistryTokenIssuer) Mint(subject, scope, prefix string) (string, int, error) {
 	now := time.Now()
 	claims := registryClaims{
-		Scope: scope,
+		Scope:  scope,
+		Prefix: prefix,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    "merlin",
 			Subject:   subject,
@@ -48,7 +50,7 @@ func (i *RegistryTokenIssuer) Mint(subject, scope string) (string, int, error) {
 }
 
 // Verify checks the registry token's signature, issuer, audience, and expiry.
-func (i *RegistryTokenIssuer) Verify(token string) (string, string, error) {
+func (i *RegistryTokenIssuer) Verify(token string) (string, string, string, error) {
 	var claims registryClaims
 	_, err := jwt.ParseWithClaims(token, &claims, func(t *jwt.Token) (interface{}, error) {
 		return i.secret, nil
@@ -59,7 +61,7 @@ func (i *RegistryTokenIssuer) Verify(token string) (string, string, error) {
 		jwt.WithExpirationRequired(),
 	)
 	if err != nil {
-		return "", "", fmt.Errorf("verify registry token: %w", err)
+		return "", "", "", fmt.Errorf("verify registry token: %w", err)
 	}
-	return claims.Subject, claims.Scope, nil
+	return claims.Subject, claims.Scope, claims.Prefix, nil
 }

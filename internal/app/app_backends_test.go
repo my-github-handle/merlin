@@ -13,12 +13,20 @@ func prodConfig() config.Config {
 	return config.Config{
 		Trivy:     config.TrivyConfig{SeverityThreshold: "CRITICAL"},
 		BaseImage: config.BaseImageConfig{AllowedIDs: []string{"rhel", "wolfi", "chainguard"}},
-		ACR:       config.ACRConfig{Registry: "myreg.azurecr.io"},
+		ACR:       config.ACRConfig{RegistryTemplate: "{prefix}acr.azurecr.io", BaseDomain: "c3ci.cloud"},
+		Tenants: []config.TenantConfig{
+			{
+				Prefix:      "c3dev",
+				ACRClientID: "dev-client-id",
+				Auth: config.TenantAuthConfig{
+					Issuer:   "https://issuer",
+					Audience: "api://merlin",
+					JWKSURL:  "https://login.microsoftonline.com/common/discovery/keys",
+					TenantID: "tenant-id",
+				},
+			},
+		},
 		Auth: config.AuthConfig{
-			Issuer:              "https://issuer",
-			Audience:            "api://merlin",
-			JWKSURL:             "https://login.microsoftonline.com/common/discovery/keys",
-			TenantID:            "tenant-id",
 			Service:             "merlin",
 			RegistryTokenSecret: "test-secret-32-bytes-minimum!!",
 			RegistryTokenTTL:    "5m",
@@ -54,9 +62,19 @@ func TestBuildWithBackends_ValidatesRequiredFields(t *testing.T) {
 		wantField string
 	}{
 		{
-			name:      "missing JWKSURL",
-			mutate:    func(c *config.Config) { c.Auth.JWKSURL = "" },
-			wantField: "JWKSURL",
+			name:      "missing RegistryTemplate",
+			mutate:    func(c *config.Config) { c.ACR.RegistryTemplate = "" },
+			wantField: "RegistryTemplate",
+		},
+		{
+			name:      "missing BaseDomain",
+			mutate:    func(c *config.Config) { c.ACR.BaseDomain = "" },
+			wantField: "BaseDomain",
+		},
+		{
+			name:      "no tenants",
+			mutate:    func(c *config.Config) { c.Tenants = nil },
+			wantField: "tenant",
 		},
 		{
 			name:      "missing BlobAccountURL",
@@ -72,11 +90,6 @@ func TestBuildWithBackends_ValidatesRequiredFields(t *testing.T) {
 			name:      "missing ClickHouseDSN",
 			mutate:    func(c *config.Config) { c.Audit.ClickHouseDSN = "" },
 			wantField: "ClickHouseDSN",
-		},
-		{
-			name:      "missing ACR.Registry",
-			mutate:    func(c *config.Config) { c.ACR.Registry = "" },
-			wantField: "Registry",
 		},
 		{
 			name:      "missing RegistryTokenSecret",

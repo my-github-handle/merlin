@@ -13,6 +13,7 @@ type Config struct {
 	Trivy     TrivyConfig     `yaml:"trivy"`
 	BaseImage BaseImageConfig `yaml:"base_image"`
 	ACR       ACRConfig       `yaml:"acr"`
+	Tenants   []TenantConfig  `yaml:"tenants"`
 	Auth      AuthConfig      `yaml:"auth"`
 	Staging   StagingConfig   `yaml:"staging"`
 	Audit     AuditConfig     `yaml:"audit"`
@@ -28,14 +29,29 @@ type BaseImageConfig struct {
 }
 
 type ACRConfig struct {
-	Registry string `yaml:"registry"`
+	RegistryTemplate string `yaml:"registry_template"`
+	BaseDomain       string `yaml:"base_domain"`
+}
+
+type TenantAuthConfig struct {
+	Issuer   string `yaml:"issuer"`
+	Audience string `yaml:"audience"`
+	JWKSURL  string `yaml:"jwks_url"`
+	TenantID string `yaml:"tenant_id"`
+}
+
+type TenantConfig struct {
+	Prefix      string           `yaml:"prefix"`
+	ACRClientID string           `yaml:"acr_client_id"`
+	Auth        TenantAuthConfig `yaml:"auth"`
+}
+
+// Registry substitutes this tenant's prefix into the ACR host template.
+func (t TenantConfig) Registry(template string) string {
+	return strings.ReplaceAll(template, "{prefix}", t.Prefix)
 }
 
 type AuthConfig struct {
-	Issuer              string `yaml:"issuer"`
-	Audience            string `yaml:"audience"`
-	JWKSURL             string `yaml:"jwks_url"`
-	TenantID            string `yaml:"tenant_id"`
 	Service             string `yaml:"service"`
 	RegistryTokenSecret string `yaml:"registry_token_secret"`
 	RegistryTokenTTL    string `yaml:"registry_token_ttl"`
@@ -63,6 +79,11 @@ type ServerConfig struct {
 	ExternalURL    string `yaml:"external_url"`
 	MaxUploadBytes int64  `yaml:"max_upload_bytes"`
 	GateTimeout    string `yaml:"gate_timeout"`
+	// ShutdownTimeout bounds how long the servers drain in-flight requests on
+	// SIGTERM before backends are closed. It should exceed gate_timeout so a push
+	// already in the gate can finish, and stay under the pod terminationGracePeriod
+	// so Kubernetes does not SIGKILL mid-drain.
+	ShutdownTimeout string `yaml:"shutdown_timeout"`
 }
 
 // Load reads a YAML config file, applies defaults, and validates required fields.
@@ -115,6 +136,11 @@ func (c *Config) applyDefaults() {
 	if c.Server.GateTimeout == "" {
 		c.Server.GateTimeout = "5m"
 	}
+	if c.Server.ShutdownTimeout == "" {
+		// Slightly above gate_timeout so a push already in the gate can complete its
+		// drain. Pair with a pod terminationGracePeriodSeconds >= this value.
+		c.Server.ShutdownTimeout = "6m"
+	}
 	if c.Auth.Service == "" {
 		c.Auth.Service = "merlin"
 	}
@@ -128,14 +154,33 @@ var validSeverities = map[string]bool{
 }
 
 func (c *Config) validate() error {
-	if c.ACR.Registry == "" {
-		return fmt.Errorf("config: acr.registry is required")
+	if c.ACR.RegistryTemplate == "" {
+		return fmt.Errorf("config: acr.registry_template is required")
 	}
-	if c.Auth.Issuer == "" {
-		return fmt.Errorf("config: auth.issuer is required")
+	if !strings.Contains(c.ACR.RegistryTemplate, "{prefix}") {
+		return fmt.Errorf("config: acr.registry_template must contain {prefix}")
 	}
-	if c.Auth.Audience == "" {
-		return fmt.Errorf("config: auth.audience is required")
+	if c.ACR.BaseDomain == "" {
+		return fmt.Errorf("config: acr.base_domain is required")
+	}
+	if len(c.Tenants) == 0 {
+		return fmt.Errorf("config: at least one tenant is required")
+	}
+	seen := make(map[string]bool, len(c.Tenants))
+	for i, t := range c.Tenants {
+		if t.Prefix == "" {
+			return fmt.Errorf("config: tenants[%d].prefix is required", i)
+		}
+		if seen[t.Prefix] {
+			return fmt.Errorf("config: duplicate tenant prefix %q", t.Prefix)
+		}
+		seen[t.Prefix] = true
+		if t.ACRClientID == "" {
+			return fmt.Errorf("config: tenants[%d] (%s) acr_client_id is required", i, t.Prefix)
+		}
+		if t.Auth.Issuer == "" || t.Auth.Audience == "" || t.Auth.JWKSURL == "" || t.Auth.TenantID == "" {
+			return fmt.Errorf("config: tenants[%d] (%s) auth block requires issuer, audience, jwks_url, tenant_id", i, t.Prefix)
+		}
 	}
 	if len(c.BaseImage.AllowedIDs) == 0 {
 		return fmt.Errorf("config: base_image.allowed_ids must not be empty")

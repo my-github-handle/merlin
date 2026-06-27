@@ -3,6 +3,19 @@
 **Date:** 2026-06-23
 **Status:** Approved (design)
 
+> **Update (multi-ACR tenant routing):** Merlin now fronts **multiple** ACRs from one
+> deployment, routed by DNS subdomain prefix. A push to `<prefix>.<baseDomain>` (e.g.
+> `c3dev.c3ci.cloud`) is forwarded to the per-tenant ACR derived from
+> `acr.registry_template` with `{prefix}` substituted (e.g. `c3devacr.azurecr.io`).
+> Each prefix is a configured tenant with its own inbound Entra auth and outbound
+> workload-identity; unknown prefixes return `404`, and registry tokens are
+> prefix-bound (a token minted on one tenant host is rejected `401` on another). The
+> single-registry `acr.registry` / flat `auth.issuer|audience|jwks_url|tenant_id`
+> fields are removed. The interaction and configuration sections below are updated
+> accordingly; see
+> [specs/2026-06-26-multi-acr-tenant-routing-design.md](specs/2026-06-26-multi-acr-tenant-routing-design.md)
+> for the full routing design.
+
 ## 1. Purpose
 
 Merlin is a transparent Docker Registry V2 proxy that gates every image push to a
@@ -20,11 +33,12 @@ added as new policies without changing the gate.
 
 ## 2. Interaction Model
 
-Developers use standard Docker tooling — no workflow change:
+Developers use standard Docker tooling — no workflow change. They push to their
+**tenant host** (`<prefix>.<baseDomain>`); Merlin routes to that tenant's ACR:
 
 ```
-docker login merlin.internal           # Entra ID identity
-docker push merlin.internal/<repo>:<tag>
+docker login c3dev.c3ci.cloud            # Entra ID identity, per-tenant
+docker push c3dev.c3ci.cloud/<repo>:<tag>  # → c3devacr.azurecr.io
 ```
 
 The push blocks until the gate completes. On pass, `docker push` succeeds and the
@@ -189,8 +203,10 @@ bodies are ignored by the client). Delivery (Approach A):
 
 - Trivy severity threshold (default `CRITICAL`)
 - Allowed base-image matchers
-- ACR target (registry, repo mapping)
-- Entra issuer / audience / JWKS endpoint
+- ACR routing: `acr.registry_template` (must contain `{prefix}`) + `acr.base_domain`
+- `tenants[]` — one entry per DNS prefix: `prefix`, `acr_client_id` (outbound
+  workload-identity), and a per-tenant `auth{issuer, audience, jwks_url, tenant_id}`
+- Shared `auth` — registry token `service`, `registry_token_secret`, `registry_token_ttl`
 
 Keeping these in config means policy tuning does not require a rebuild.
 

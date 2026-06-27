@@ -47,8 +47,8 @@ func buildGate(t *testing.T, trivyReport trivy.Report) (*Handler, *acr.FakePushe
 	bp := baseimage.New([]string{"rhel", "wolfi", "chainguard"})
 	rt := router.New(policy.NewEngine(tp, bp))
 	fp := &acr.FakePusher{}
-	o := &Outcome{Pusher: fp, ReportBaseURL: "/reports"}
-	h := NewHandler(fakeAuth{ok: true}, st, rt, o, "myreg.azurecr.io", nil)
+	o := &Outcome{ReportBaseURL: "/reports"}
+	h := NewHandler(testResolver("myreg.azurecr.io", fp, fakeAuth{ok: true}), st, rt, o, nil)
 	return h, fp, st
 }
 
@@ -85,7 +85,7 @@ func TestPushGoodUBIForwarded(t *testing.T) {
 	}
 	req := router.GateRequest{Source: "docker", Image: img, Target: "myreg.azurecr.io/app:v1"}
 	res, gateErr := h.router.Gate(ctx, req)
-	d, _ := h.outcome.Apply(ctx, req, res, gateErr)
+	d, _ := h.outcome.Apply(ctx, fp, req, res, gateErr)
 	if d.StatusCode != 201 {
 		t.Errorf("status = %d, want 201 (summary=%q)", d.StatusCode, d.Summary)
 	}
@@ -116,7 +116,7 @@ func TestPushCriticalCVERejected(t *testing.T) {
 	}
 	req := router.GateRequest{Image: img, Target: "myreg.azurecr.io/app:v1"}
 	res, gateErr := h.router.Gate(ctx, req)
-	d, _ := h.outcome.Apply(ctx, req, res, gateErr)
+	d, _ := h.outcome.Apply(ctx, fp, req, res, gateErr)
 	if d.StatusCode != 400 {
 		t.Errorf("status = %d, want 400", d.StatusCode)
 	}
@@ -146,7 +146,7 @@ func TestPushAlpineRejectedByBasePolicy(t *testing.T) {
 	}
 	req := router.GateRequest{Image: img, Target: "myreg.azurecr.io/app:v1"}
 	res, gateErr := h.router.Gate(ctx, req)
-	d, _ := h.outcome.Apply(ctx, req, res, gateErr)
+	d, _ := h.outcome.Apply(ctx, fp, req, res, gateErr)
 	if d.StatusCode != 400 {
 		t.Errorf("status = %d, want 400 (alpine base)", d.StatusCode)
 	}

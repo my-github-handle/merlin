@@ -11,15 +11,22 @@ data:
     base_image:
       allowed_ids: {{ toJson .Values.merlin.baseImage.allowedIDs }}
     acr:
-      registry: {{ .Values.merlin.acr.registry | quote }}
+      registry_template: {{ .Values.merlin.acr.registryTemplate | quote }}
+      base_domain: {{ .Values.merlin.acr.baseDomain | quote }}
+    tenants:
+    {{- range .Values.merlin.tenants }}
+      - prefix: {{ .prefix | quote }}
+        acr_client_id: {{ .acrClientId | quote }}
+        auth:
+          issuer: {{ .auth.issuer | quote }}
+          audience: {{ .auth.audience | quote }}
+          jwks_url: {{ .auth.jwksUrl | quote }}
+          tenant_id: {{ .auth.tenantId | quote }}
+    {{- end }}
     auth:
-      issuer: {{ .Values.merlin.auth.issuer | quote }}
-      audience: {{ .Values.merlin.auth.audience | quote }}
-      jwks_url: {{ .Values.merlin.auth.jwksURL | quote }}
-      tenant_id: {{ .Values.merlin.auth.tenantID | quote }}
-      service: {{ .Values.merlin.auth.service | quote }}
+      service: {{ .Values.merlin.auth.service | default "merlin" | quote }}
       registry_token_secret: "${REGISTRY_TOKEN_SECRET}"
-      registry_token_ttl: {{ .Values.merlin.auth.registryTokenTTL | quote }}
+      registry_token_ttl: {{ .Values.merlin.auth.registryTokenTTL | default "5m" | quote }}
     staging:
       blob_account_url: {{ .Values.merlin.staging.blobAccountURL | quote }}
       blob_container: {{ .Values.merlin.staging.blobContainer | quote }}
@@ -40,4 +47,5 @@ data:
       dashboard_addr: {{ .Values.merlin.server.dashboardAddr | quote }}
       max_upload_bytes: {{ .Values.merlin.server.maxUploadBytes }}
       gate_timeout: {{ .Values.merlin.server.gateTimeout | quote }}
+      shutdown_timeout: {{ .Values.merlin.server.shutdownTimeout | quote }}
       external_url: {{ .Values.merlin.server.externalURL | quote }}

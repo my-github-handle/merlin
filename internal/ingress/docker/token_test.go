@@ -37,7 +37,7 @@ func basic(u, p string) string {
 
 func newTokenHandler(authnOK, ccOK bool) *TokenHandler {
 	return &TokenHandler{
-		Authn:       stubAuthn{ok: authnOK},
+		Resolver:    testResolver("c3devacr.azurecr.io", nil, stubAuthn{ok: authnOK}),
 		ClientCreds: stubClientCreds{ok: ccOK},
 		Issuer:      auth.NewRegistryTokenIssuer([]byte("s"), "merlin", time.Minute),
 	}
@@ -46,6 +46,7 @@ func newTokenHandler(authnOK, ccOK bool) *TokenHandler {
 func TestTokenEntraUserTokenSucceeds(t *testing.T) {
 	h := newTokenHandler(true, false)
 	req := httptest.NewRequest(http.MethodGet, "/token?service=merlin&scope=repository:app:push,pull", nil)
+	req.Host = testTenantHost
 	req.Header.Set("Authorization", basic("ignored", "good-entra-token"))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -63,7 +64,7 @@ func TestTokenEntraUserTokenSucceeds(t *testing.T) {
 		t.Errorf("bad token body: %+v", body)
 	}
 	// the minted token must verify
-	if _, _, err := h.Issuer.Verify(body.Token); err != nil {
+	if _, _, _, err := h.Issuer.Verify(body.Token); err != nil {
 		t.Errorf("minted token does not verify: %v", err)
 	}
 }
@@ -71,6 +72,7 @@ func TestTokenEntraUserTokenSucceeds(t *testing.T) {
 func TestTokenFallsBackToClientCreds(t *testing.T) {
 	h := newTokenHandler(false, true) // entra fails, client-creds ok
 	req := httptest.NewRequest(http.MethodGet, "/token?service=merlin", nil)
+	req.Host = testTenantHost
 	req.Header.Set("Authorization", basic("cid", "csecret"))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -82,6 +84,7 @@ func TestTokenFallsBackToClientCreds(t *testing.T) {
 func TestTokenBothFailReturns401(t *testing.T) {
 	h := newTokenHandler(false, false)
 	req := httptest.NewRequest(http.MethodGet, "/token?service=merlin", nil)
+	req.Host = testTenantHost
 	req.Header.Set("Authorization", basic("cid", "wrong"))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -93,6 +96,7 @@ func TestTokenBothFailReturns401(t *testing.T) {
 func TestTokenMissingBasicReturns401(t *testing.T) {
 	h := newTokenHandler(true, true)
 	req := httptest.NewRequest(http.MethodGet, "/token", nil)
+	req.Host = testTenantHost
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
@@ -106,6 +110,7 @@ func TestTokenEmptyPasswordReturns401(t *testing.T) {
 	// the empty credential must be rejected.
 	h := newTokenHandler(true, true)
 	req := httptest.NewRequest(http.MethodGet, "/token?service=merlin", nil)
+	req.Host = testTenantHost
 	req.Header.Set("Authorization", basic("cid", ""))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)

@@ -28,11 +28,12 @@ type DecisionRecorder interface {
 }
 
 // Outcome is the Docker outcome adapter: push-or-reject the synchronous push.
-// It holds only read-only configuration (Pusher + ReportBaseURL + Recorder + IDGen),
-// so a single Outcome is safe to share across concurrent requests: Apply builds and
-// returns the Decision request-locally and stashes no per-request state.
+// It holds only read-only configuration (ReportBaseURL + Recorder + IDGen), so a
+// single Outcome is safe to share across concurrent requests: Apply builds and
+// returns the Decision request-locally and stashes no per-request state. The ACR
+// Pusher is supplied per request (it is the resolved tenant's pusher), so a shared
+// Outcome can fan pushes out to different tenant registries.
 type Outcome struct {
-	Pusher        acr.Pusher
 	ReportBaseURL string
 	Recorder      DecisionRecorder // optional: nil skips audit recording (for hermetic tests)
 	IDGen         func() string    // optional: generates unique PushID; defaults to generatePushID if nil
@@ -42,7 +43,7 @@ type Outcome struct {
 // handler renders, performing the ACR push as a side effect on pass and recording
 // the decision (and findings) to the audit store if a Recorder is configured. The
 // Decision is returned to the caller, not stored on the Outcome.
-func (o *Outcome) Apply(ctx context.Context, req router.GateRequest, res policy.Result, gateErr error) (Decision, error) {
+func (o *Outcome) Apply(ctx context.Context, pusher acr.Pusher, req router.GateRequest, res policy.Result, gateErr error) (Decision, error) {
 	// The report is served by GET /reports/<push_id> from the audit store (findings
 	// are keyed by push_id), so the report URL MUST use the same push_id that the
 	// decision is recorded under — not the image digest. Generate it once here and
@@ -63,7 +64,7 @@ func (o *Outcome) Apply(ctx context.Context, req router.GateRequest, res policy.
 		o.recordDecision(ctx, pushID, req, res, false)
 		return Decision{StatusCode: 400, Summary: summary, ReportURL: reportURL}, nil
 	}
-	if err := o.Pusher.Push(ctx, req.Image.OCIPath, req.Target); err != nil {
+	if err := pusher.Push(ctx, req.Image.OCIPath, req.Target); err != nil {
 		o.recordDecision(ctx, pushID, req, res, false)
 		return Decision{StatusCode: 502, Summary: "passed but ACR push failed", ReportURL: reportURL, InfraError: true}, fmt.Errorf("acr push: %w", err)
 	}

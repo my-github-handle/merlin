@@ -20,9 +20,10 @@ func TestBlobUploadPOSTCreatesSession(t *testing.T) {
 		staging.NewMemorySessionStore(),
 		func() string { return "test-upload-uuid" },
 	)
-	h := NewHandler(fakeAuth{ok: true}, store, nil, nil, "reg.example.com", nil)
+	h := NewHandler(testResolver("reg.example.com", nil, fakeAuth{ok: true}), store, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/v2/myrepo/blobs/uploads/", nil)
+	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -50,7 +51,7 @@ func TestBlobUploadPATCHAppendsChunk(t *testing.T) {
 		staging.NewMemorySessionStore(),
 		func() string { return "upload-1" },
 	)
-	h := NewHandler(fakeAuth{ok: true}, store, nil, nil, "reg.example.com", nil)
+	h := NewHandler(testResolver("reg.example.com", nil, fakeAuth{ok: true}), store, nil, nil, nil)
 
 	// Begin upload
 	uploadID, err := store.BeginUpload(nil, "myrepo")
@@ -60,6 +61,7 @@ func TestBlobUploadPATCHAppendsChunk(t *testing.T) {
 
 	chunk := []byte("hello world")
 	req := httptest.NewRequest(http.MethodPatch, "/v2/myrepo/blobs/uploads/"+uploadID, bytes.NewReader(chunk))
+	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
 	req.Header.Set("Content-Range", "0-10")
 	rec := httptest.NewRecorder()
@@ -84,7 +86,7 @@ func TestBlobUploadPUTCompletesWithCorrectDigest(t *testing.T) {
 		staging.NewMemorySessionStore(),
 		func() string { return "upload-2" },
 	)
-	h := NewHandler(fakeAuth{ok: true}, store, nil, nil, "reg.example.com", nil)
+	h := NewHandler(testResolver("reg.example.com", nil, fakeAuth{ok: true}), store, nil, nil, nil)
 
 	// Begin upload
 	uploadID, err := store.BeginUpload(nil, "myrepo")
@@ -105,6 +107,7 @@ func TestBlobUploadPUTCompletesWithCorrectDigest(t *testing.T) {
 
 	// Complete with PUT
 	req := httptest.NewRequest(http.MethodPut, "/v2/myrepo/blobs/uploads/"+uploadID+"?digest="+digest, nil)
+	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -127,7 +130,7 @@ func TestBlobUploadPUTRejectsWrongDigest(t *testing.T) {
 		staging.NewMemorySessionStore(),
 		func() string { return "upload-3" },
 	)
-	h := NewHandler(fakeAuth{ok: true}, store, nil, nil, "reg.example.com", nil)
+	h := NewHandler(testResolver("reg.example.com", nil, fakeAuth{ok: true}), store, nil, nil, nil)
 
 	// Begin upload
 	uploadID, err := store.BeginUpload(nil, "myrepo")
@@ -146,6 +149,7 @@ func TestBlobUploadPUTRejectsWrongDigest(t *testing.T) {
 
 	// Complete with PUT
 	req := httptest.NewRequest(http.MethodPut, "/v2/myrepo/blobs/uploads/"+uploadID+"?digest="+wrongDigest, nil)
+	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -161,7 +165,7 @@ func TestBlobUploadPATCHRejectsOutOfOrderChunk(t *testing.T) {
 		staging.NewMemorySessionStore(),
 		func() string { return "upload-4" },
 	)
-	h := NewHandler(fakeAuth{ok: true}, store, nil, nil, "reg.example.com", nil)
+	h := NewHandler(testResolver("reg.example.com", nil, fakeAuth{ok: true}), store, nil, nil, nil)
 
 	// Begin upload
 	uploadID, err := store.BeginUpload(nil, "myrepo")
@@ -172,6 +176,7 @@ func TestBlobUploadPATCHRejectsOutOfOrderChunk(t *testing.T) {
 	// Try to PATCH at offset 10 without writing 0-9 first
 	chunk := []byte("data")
 	req := httptest.NewRequest(http.MethodPatch, "/v2/myrepo/blobs/uploads/"+uploadID, bytes.NewReader(chunk))
+	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
 	req.Header.Set("Content-Range", "10-13")
 	rec := httptest.NewRecorder()
@@ -188,10 +193,11 @@ func TestBlobUploadFullSequence(t *testing.T) {
 		staging.NewMemorySessionStore(),
 		func() string { return "upload-full" },
 	)
-	h := NewHandler(fakeAuth{ok: true}, store, nil, nil, "reg.example.com", nil)
+	h := NewHandler(testResolver("reg.example.com", nil, fakeAuth{ok: true}), store, nil, nil, nil)
 
 	// POST to begin
 	req := httptest.NewRequest(http.MethodPost, "/v2/testapp/blobs/uploads/", nil)
+	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -206,6 +212,7 @@ func TestBlobUploadFullSequence(t *testing.T) {
 	// PATCH a chunk
 	chunk1 := []byte("first part")
 	req = httptest.NewRequest(http.MethodPatch, "/v2/testapp/blobs/uploads/"+uploadID, bytes.NewReader(chunk1))
+	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
 	req.Header.Set("Content-Range", fmt.Sprintf("0-%d", len(chunk1)-1))
 	rec = httptest.NewRecorder()
@@ -217,6 +224,7 @@ func TestBlobUploadFullSequence(t *testing.T) {
 	// PATCH another chunk
 	chunk2 := []byte(" second part")
 	req = httptest.NewRequest(http.MethodPatch, "/v2/testapp/blobs/uploads/"+uploadID, bytes.NewReader(chunk2))
+	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
 	offset := len(chunk1)
 	req.Header.Set("Content-Range", fmt.Sprintf("%d-%d", offset, offset+len(chunk2)-1))
@@ -234,6 +242,7 @@ func TestBlobUploadFullSequence(t *testing.T) {
 
 	// PUT to complete
 	req = httptest.NewRequest(http.MethodPut, "/v2/testapp/blobs/uploads/"+uploadID+"?digest="+digest, nil)
+	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -250,13 +259,14 @@ func TestBlobUploadFullSequence(t *testing.T) {
 
 func TestMonolithicPostUploadPersistsBlob(t *testing.T) {
 	st := staging.New(staging.NewMemoryBlobStore(), staging.NewMemorySessionStore(), func() string { return "u-mono" })
-	h := NewHandler(fakeAuth{ok: true}, st, nil, nil, "myreg.azurecr.io", nil)
+	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), st, nil, nil, nil)
 	body := []byte("monolithic-blob-bytes")
 	sum := sha256.Sum256(body)
 	dg := "sha256:" + hex.EncodeToString(sum[:])
 
 	// monolithic upload: POST .../uploads/?digest=<dg> with the full body
 	req := httptest.NewRequest(http.MethodPost, "/v2/app/blobs/uploads/?digest="+dg, bytes.NewReader(body))
+	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)

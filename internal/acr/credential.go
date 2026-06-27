@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
-	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/google/go-containerregistry/pkg/authn"
 )
 
@@ -20,7 +20,7 @@ import (
 // by exchanging an AAD token (from DefaultAzureCredential) for an ACR refresh token.
 type acrCredAuthenticator struct {
 	registry string
-	cred     *azidentity.DefaultAzureCredential
+	cred     azcore.TokenCredential
 
 	// Overridable for testing
 	exchangeURL string

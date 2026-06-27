@@ -13,6 +13,10 @@ spec:
         {{- include "merlin.gateSelectorLabels" . | nindent 8 }}
         azure.workload.identity/use: "true"
     spec:
+      # Give Merlin time to drain in-flight pushes on SIGTERM before SIGKILL.
+      # Must be >= merlin.server.shutdownTimeout; the default 30s would sever
+      # active pushes on every rolling restart.
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
       serviceAccountName: {{ .Values.serviceAccount.name }}
       {{- with .Values.image.pullSecrets }}
       imagePullSecrets:

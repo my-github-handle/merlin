@@ -33,8 +33,8 @@ func TestScratchBaseDirRespected(t *testing.T) {
 	rt := router.New(policy.NewEngine(tp, bp))
 	pool := router.NewPool(rt, 2)
 	fp := &acr.FakePusher{}
-	o := &Outcome{Pusher: fp, ReportBaseURL: "/reports"}
-	h := NewHandler(fakeAuth{ok: true}, st, rt, o, "myreg.azurecr.io", nil)
+	o := &Outcome{ReportBaseURL: "/reports"}
+	h := NewHandler(testResolver("myreg.azurecr.io", fp, fakeAuth{ok: true}), st, rt, o, nil)
 	h.SetPool(pool)
 	h.SetGateTimeout(5 * time.Second)
 
@@ -60,6 +60,7 @@ func TestScratchBaseDirRespected(t *testing.T) {
 
 	// PUT manifest — this triggers image assembly which should create scratch dir under scratchBase
 	req := httptest.NewRequest(http.MethodPut, "/v2/testapp/manifests/v1", bytes.NewReader(manifestBytes))
+	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -98,8 +99,8 @@ func TestScratchBaseDirDefaultBehavior(t *testing.T) {
 	bp := baseimage.New([]string{"rhel", "wolfi", "chainguard"})
 	rt := router.New(policy.NewEngine(tp, bp))
 	fp := &acr.FakePusher{}
-	o := &Outcome{Pusher: fp, ReportBaseURL: "/reports"}
-	h := NewHandler(fakeAuth{ok: true}, st, rt, o, "myreg.azurecr.io", nil)
+	o := &Outcome{ReportBaseURL: "/reports"}
+	h := NewHandler(testResolver("myreg.azurecr.io", fp, fakeAuth{ok: true}), st, rt, o, nil)
 
 	// DO NOT call SetScratchBaseDir — scratchBaseDir should be "" (default)
 
@@ -121,6 +122,7 @@ func TestScratchBaseDirDefaultBehavior(t *testing.T) {
 
 	// PUT manifest
 	req := httptest.NewRequest(http.MethodPut, "/v2/testapp/manifests/v1", bytes.NewReader(manifestBytes))
+	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -162,8 +164,8 @@ func TestScratchBaseDirPathValidation(t *testing.T) {
 	bp := baseimage.New([]string{"rhel"})
 	rt := router.New(policy.NewEngine(tp, bp))
 	fp := &acr.FakePusher{}
-	o := &Outcome{Pusher: fp, ReportBaseURL: "/reports"}
-	h := NewHandler(fakeAuth{ok: true}, originalStore, rt, o, "myreg.azurecr.io", nil)
+	o := &Outcome{ReportBaseURL: "/reports"}
+	h := NewHandler(testResolver("myreg.azurecr.io", fp, fakeAuth{ok: true}), originalStore, rt, o, nil)
 	h.SetScratchBaseDir(scratchBase)
 
 	// Upload a layer
@@ -180,6 +182,7 @@ func TestScratchBaseDirPathValidation(t *testing.T) {
 
 	// PUT manifest
 	req := httptest.NewRequest(http.MethodPut, "/v2/testapp/manifests/v1", bytes.NewReader(manifestBytes))
+	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -212,8 +215,8 @@ func TestScratchBaseDirInvalidPath(t *testing.T) {
 	bp := baseimage.New([]string{"rhel"})
 	rt := router.New(policy.NewEngine(tp, bp))
 	fp := &acr.FakePusher{}
-	o := &Outcome{Pusher: fp, ReportBaseURL: "/reports"}
-	h := NewHandler(fakeAuth{ok: true}, st, rt, o, "myreg.azurecr.io", nil)
+	o := &Outcome{ReportBaseURL: "/reports"}
+	h := NewHandler(testResolver("myreg.azurecr.io", fp, fakeAuth{ok: true}), st, rt, o, nil)
 	h.SetScratchBaseDir(invalidBase)
 
 	// Upload a layer
@@ -230,6 +233,7 @@ func TestScratchBaseDirInvalidPath(t *testing.T) {
 
 	// PUT manifest — should fail with 500 because MkdirTemp(invalidBase, ...) fails
 	req := httptest.NewRequest(http.MethodPut, "/v2/testapp/manifests/v1", bytes.NewReader(manifestBytes))
+	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -259,8 +263,8 @@ func TestScratchBaseDirActualPathLocation(t *testing.T) {
 	capturingPolicy := &pathCapturingPolicy{captured: &capturedImagePath}
 	rt := router.New(policy.NewEngine(capturingPolicy))
 	fp := &acr.FakePusher{}
-	o := &Outcome{Pusher: fp, ReportBaseURL: "/reports"}
-	h := NewHandler(fakeAuth{ok: true}, st, rt, o, "myreg.azurecr.io", nil)
+	o := &Outcome{ReportBaseURL: "/reports"}
+	h := NewHandler(testResolver("myreg.azurecr.io", fp, fakeAuth{ok: true}), st, rt, o, nil)
 	h.SetScratchBaseDir(scratchBase)
 
 	// Upload a layer
@@ -277,6 +281,7 @@ func TestScratchBaseDirActualPathLocation(t *testing.T) {
 
 	// PUT manifest
 	req := httptest.NewRequest(http.MethodPut, "/v2/testapp/manifests/v1", bytes.NewReader(manifestBytes))
+	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)

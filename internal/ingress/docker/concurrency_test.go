@@ -62,8 +62,8 @@ func TestConcurrentManifestPushesNoRace(t *testing.T) {
 	rt := router.New(policy.NewEngine(tp, bp))
 	pool := router.NewPool(rt, 4)
 	fp := &acr.FakePusher{}
-	o := &Outcome{Pusher: fp, ReportBaseURL: "/reports"}
-	h := NewHandler(fakeAuth{ok: true}, st, rt, o, "myreg.azurecr.io", nil)
+	o := &Outcome{ReportBaseURL: "/reports"}
+	h := NewHandler(testResolver("myreg.azurecr.io", fp, fakeAuth{ok: true}), st, rt, o, nil)
 	h.SetPool(pool)
 	h.SetGateTimeout(10 * time.Second)
 
@@ -113,6 +113,7 @@ func TestConcurrentManifestPushesNoRace(t *testing.T) {
 			}
 			manifestBytes, _ := json.Marshal(manifest)
 			req := httptest.NewRequest(http.MethodPut, "/v2/"+c.repo+"/manifests/v1", bytes.NewReader(manifestBytes))
+			req.Host = testTenantHost
 			req.Header.Set("Authorization", "Bearer good")
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, req)

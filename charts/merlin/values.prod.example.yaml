@@ -40,9 +40,10 @@ ingress:
   enabled: true
   # REQUIRED: Ingress class (nginx, azure-application-gateway, etc.)
   className: "nginx"  # REQUIRED: Replace with your ingress controller class
-  # REQUIRED: Hostname for Merlin registry
-  # Example: merlin.example.com
-  host: "merlin.example.com"  # REQUIRED: Replace with your domain
+  # The gate ingress now derives one host per tenant as <prefix>.<merlin.acr.baseDomain>
+  # (see merlin.tenants below); this `host` only feeds the SEPARATE dashboard ingress
+  # when dashboardHost is unset.
+  host: "merlin.example.com"  # used only by the dashboard ingress fallback
   # REQUIRED: Name of the TLS secret containing the certificate for the host
   # Either pre-created or provisioned via cert-manager
   tlsSecretName: "merlin-tls"  # REQUIRED: Replace with your TLS secret name
@@ -92,24 +93,41 @@ merlin:
     allowedIDs: [rhel, wolfi, chainguard]
 
   # Azure Container Registry configuration
+  # Azure Container Registry routing: each push is routed to a per-tenant ACR by
+  # substituting the tenant prefix into registryTemplate.
   acr:
-    # REQUIRED: ACR registry URL (without https://)
-    # Example: myacr.azurecr.io
-    registry: "<acr-name>.azurecr.io"  # REQUIRED: Replace with your ACR name
+    # REQUIRED: ACR host template; must contain the literal {prefix} placeholder.
+    # Example: {prefix}acr.azurecr.io -> c3devacr.azurecr.io for prefix c3dev
+    registryTemplate: "{prefix}acr.azurecr.io"  # REQUIRED: Adjust to your ACR naming
+    # REQUIRED: Base DNS domain; the ingress exposes <prefix>.<baseDomain> per tenant.
+    baseDomain: "c3ci.cloud"  # REQUIRED: Replace with your base domain
 
-  # Entra (Azure AD) authentication configuration
+  # Per-tenant ACR + Entra (Azure AD) auth. One entry per DNS subdomain prefix.
+  # At least one tenant is required.
+  tenants:
+    - prefix: c3dev
+      # REQUIRED: AKS workload-identity client ID with AcrPush on this tenant's ACR
+      acrClientId: "<c3dev-workload-identity-client-id>"
+      auth:
+        # REQUIRED: Entra tenant issuer URL. Format: https://sts.windows.net/<tenant-id>/
+        issuer: "https://sts.windows.net/<tenant-id>/"
+        # REQUIRED: Audience claim expected in tokens (ACR client ID or custom audience)
+        audience: "<acr-client-id-or-audience>"
+        # REQUIRED: JWKS URL. Format: https://login.microsoftonline.com/<tenant-id>/discovery/v2.0/keys
+        jwksUrl: "https://login.microsoftonline.com/<tenant-id>/discovery/v2.0/keys"
+        # REQUIRED: Entra tenant ID (same <tenant-id> as issuer/jwksUrl)
+        tenantId: "<tenant-id>"
+    - prefix: c3prod
+      acrClientId: "<c3prod-workload-identity-client-id>"
+      auth:
+        issuer: "https://sts.windows.net/<tenant-id>/"
+        audience: "<acr-client-id-or-audience>"
+        jwksUrl: "https://login.microsoftonline.com/<tenant-id>/discovery/v2.0/keys"
+        tenantId: "<tenant-id>"
+
+  # Shared auth (not per-tenant): registry token service name + TTL. The signing
+  # secret (registry_token_secret) is injected via env from the ESO-synced secret.
   auth:
-    # REQUIRED: Entra tenant issuer URL
-    # Format: https://sts.windows.net/<tenant-id>/
-    issuer: "https://sts.windows.net/<tenant-id>/"  # REQUIRED: Replace <tenant-id>
-    # REQUIRED: Audience claim expected in tokens (typically the ACR client ID or custom audience)
-    audience: "<acr-client-id-or-audience>"  # REQUIRED: Replace with audience value
-    # REQUIRED: JWKS URL for Entra token validation
-    # Format: https://login.microsoftonline.com/<tenant-id>/discovery/v2.0/keys
-    jwksURL: "https://login.microsoftonline.com/<tenant-id>/discovery/v2.0/keys"  # REQUIRED: Replace <tenant-id>
-    # REQUIRED: Entra tenant ID for Docker registry token endpoint
-    # Format: <tenant-id> (same as issuer/jwksURL)
-    tenantID: "<tenant-id>"  # REQUIRED: Replace <tenant-id>
     # Service name for Docker registry tokens (default: merlin)
     service: merlin
     # Registry token TTL (default: 5m)
