@@ -26,6 +26,7 @@ import (
 	"github.com/merlin-gate/merlin/internal/policy"
 	"github.com/merlin-gate/merlin/internal/router"
 	"github.com/merlin-gate/merlin/internal/staging"
+	"github.com/merlin-gate/merlin/internal/tenant"
 )
 
 // Build wires config into the V2 server and the metrics server.
@@ -52,15 +53,36 @@ func Build(cfg config.Config) (*http.Server, *http.Server, error) {
 	// Auth — stub keyfunc for hermetic unit testing. See TODO(production / BuildWithBackends)
 	// for production wiring requirements.
 	keyfunc := func(*jwt.Token) (interface{}, error) { return nil, http.ErrAbortHandler }
-	authn := auth.NewJWTAuthenticator(cfg.Auth.Issuer, cfg.Auth.Audience, keyfunc)
+	authn := auth.NewJWTAuthenticator("https://issuer", "api://merlin", keyfunc)
+
+	// Single fake tenant so the request path is fully wired for unit tests. The
+	// resolver is a real static resolver (one entry) so host->tenant binding is
+	// exercised, but the pusher uses the anonymous keychain and never reaches ACR.
+	const stubPrefix = "test"
+	registry := "testacr.azurecr.io"
+	if cfg.ACR.RegistryTemplate != "" {
+		registry = strings.ReplaceAll(cfg.ACR.RegistryTemplate, "{prefix}", stubPrefix)
+	}
+	baseDomain := cfg.ACR.BaseDomain
+	if baseDomain == "" {
+		baseDomain = "test.local"
+	}
+	tenants := map[string]*tenant.Tenant{
+		stubPrefix: {
+			Prefix:   stubPrefix,
+			Registry: registry,
+			Pusher:   acr.NewACRPusher(registry),
+			Authn:    authn,
+		},
+	}
+	resolver := tenant.NewStaticResolver(baseDomain, tenants)
 
 	// Router + Docker outcome/ingress.
 	rt := router.New(engine)
 	outcome := &dockeringress.Outcome{
-		Pusher:        acr.NewACRPusher(cfg.ACR.Registry),
 		ReportBaseURL: "/reports",
 	}
-	handler := dockeringress.NewHandler(authn, nil, rt, outcome, cfg.ACR.Registry, nil)
+	handler := dockeringress.NewHandler(resolver, nil, rt, outcome, nil)
 
 	// Metrics.
 	reg := prometheus.NewRegistry()
@@ -79,8 +101,14 @@ func Build(cfg config.Config) (*http.Server, *http.Server, error) {
 func BuildWithBackends(ctx context.Context, cfg config.Config) (*http.Server, *http.Server, *http.Server, func(), error) {
 	// VALIDATE-FIRST: Check required production fields before constructing live clients.
 	// This allows unit tests to exercise validation logic without network calls.
-	if cfg.Auth.JWKSURL == "" {
-		return nil, nil, nil, nil, fmt.Errorf("production config: Auth.JWKSURL is required")
+	if cfg.ACR.RegistryTemplate == "" {
+		return nil, nil, nil, nil, fmt.Errorf("production config: ACR.RegistryTemplate is required")
+	}
+	if cfg.ACR.BaseDomain == "" {
+		return nil, nil, nil, nil, fmt.Errorf("production config: ACR.BaseDomain is required")
+	}
+	if len(cfg.Tenants) == 0 {
+		return nil, nil, nil, nil, fmt.Errorf("production config: at least one tenant is required")
 	}
 	if cfg.Auth.RegistryTokenSecret == "" {
 		return nil, nil, nil, nil, fmt.Errorf("production config: Auth.RegistryTokenSecret is required")
@@ -96,9 +124,6 @@ func BuildWithBackends(ctx context.Context, cfg config.Config) (*http.Server, *h
 	}
 	if cfg.Audit.ClickHouseDSN == "" {
 		return nil, nil, nil, nil, fmt.Errorf("production config: Audit.ClickHouseDSN is required")
-	}
-	if cfg.ACR.Registry == "" {
-		return nil, nil, nil, nil, fmt.Errorf("production config: ACR.Registry is required")
 	}
 
 	// Parse gate timeout
@@ -122,12 +147,31 @@ func BuildWithBackends(ctx context.Context, cfg config.Config) (*http.Server, *h
 		return nil, nil, nil, nil, e
 	}
 
-	// Auth: Entra ID JWKS keyfunc + JWT authenticator (uses bctx for background refresh)
-	keyfunc, err := auth.NewEntraKeyfunc(bctx, cfg.Auth.JWKSURL)
-	if err != nil {
-		return fail(fmt.Errorf("create JWKS keyfunc: %w", err))
+	// Per-tenant resolver: each tenant gets its own ACR host, outbound push
+	// identity (workload-identity client ID), and inbound Entra auth surface
+	// (JWKS keyfunc + JWT authenticator). The resolver binds a request host to
+	// its tenant by DNS prefix; this host->tenant mapping is the security
+	// boundary, so it MUST be a real static resolver built from config.
+	tenants := make(map[string]*tenant.Tenant, len(cfg.Tenants))
+	for _, tc := range cfg.Tenants {
+		registry := tc.Registry(cfg.ACR.RegistryTemplate)
+		kf, err := auth.NewEntraKeyfunc(bctx, tc.Auth.JWKSURL)
+		if err != nil {
+			return fail(fmt.Errorf("tenant %s: JWKS keyfunc: %w", tc.Prefix, err))
+		}
+		tAuthn := auth.NewJWTAuthenticator(tc.Auth.Issuer, tc.Auth.Audience, kf)
+		tPusher, err := acr.NewACRPusherWithClientID(registry, tc.ACRClientID)
+		if err != nil {
+			return fail(fmt.Errorf("tenant %s: ACR pusher: %w", tc.Prefix, err))
+		}
+		tenants[tc.Prefix] = &tenant.Tenant{
+			Prefix:   tc.Prefix,
+			Registry: registry,
+			Pusher:   tPusher,
+			Authn:    tAuthn,
+		}
 	}
-	authn := auth.NewJWTAuthenticator(cfg.Auth.Issuer, cfg.Auth.Audience, keyfunc)
+	resolver := tenant.NewStaticResolver(cfg.ACR.BaseDomain, tenants)
 
 	// Registry token issuer + client credentials validator
 	ttl, err := time.ParseDuration(cfg.Auth.RegistryTokenTTL)
@@ -135,7 +179,9 @@ func BuildWithBackends(ctx context.Context, cfg config.Config) (*http.Server, *h
 		return fail(fmt.Errorf("parse registry_token_ttl: %w", err))
 	}
 	issuer := auth.NewRegistryTokenIssuer([]byte(cfg.Auth.RegistryTokenSecret), cfg.Auth.Service, ttl)
-	cc := auth.NewEntraClientCredentials(cfg.Auth.TenantID, cfg.Auth.Audience+"/.default")
+	// Client-credentials validator is shared across tenants; uses the first tenant's
+	// Entra tenant/audience. Per-tenant client-creds is out of scope (see plan).
+	cc := auth.NewEntraClientCredentials(cfg.Tenants[0].Auth.TenantID, cfg.Tenants[0].Auth.Audience+"/.default")
 
 	// Staging: Azure Blob + Valkey session store
 	blobStore, err := staging.NewAzureBlobStoreWithCredential(cfg.Staging.BlobAccountURL, cfg.Staging.BlobContainer)
@@ -172,12 +218,6 @@ func BuildWithBackends(ctx context.Context, cfg config.Config) (*http.Server, *h
 	}
 	closers = append(closers, func() { reportsReader.Close() })
 
-	// ACR pusher with managed identity credentials
-	pusher, err := acr.NewACRPusherWithCredential(cfg.ACR.Registry)
-	if err != nil {
-		return fail(fmt.Errorf("create ACR pusher: %w", err))
-	}
-
 	// Policies + engine
 	trivyPolicy := trivy.New(trivy.NewExecRunner("trivy"), cfg.Trivy.SeverityThreshold)
 	basePolicy := baseimage.New(cfg.BaseImage.AllowedIDs)
@@ -187,14 +227,14 @@ func BuildWithBackends(ctx context.Context, cfg config.Config) (*http.Server, *h
 	rt := router.New(engine)
 	pool := router.NewPool(rt, cfg.Staging.ScanPoolSize)
 
-	// Docker ingress handler with real backends
+	// Docker ingress handler with real backends. The per-request tenant pusher is
+	// supplied to Outcome.Apply by the handler, so Outcome holds no Pusher.
 	outcome := &dockeringress.Outcome{
-		Pusher:        pusher,
 		ReportBaseURL: "/reports",
 		Recorder:      auditor,
 		IDGen:         generatePushID,
 	}
-	handler := dockeringress.NewHandler(authn, store, rt, outcome, cfg.ACR.Registry, reportsReader)
+	handler := dockeringress.NewHandler(resolver, store, rt, outcome, reportsReader)
 	handler.SetPool(pool)
 	handler.SetGateTimeout(gateTimeout)
 	handler.SetMaxUploadBytes(cfg.Server.MaxUploadBytes)
@@ -203,7 +243,7 @@ func BuildWithBackends(ctx context.Context, cfg config.Config) (*http.Server, *h
 	}
 
 	// Wire Docker registry auth: token endpoint + challenge
-	th := &dockeringress.TokenHandler{Authn: authn, ClientCreds: cc, Issuer: issuer}
+	th := &dockeringress.TokenHandler{Resolver: resolver, ClientCreds: cc, Issuer: issuer}
 	handler.SetRegistryAuth(issuer, cfg.Server.ExternalURL+"/token", cfg.Auth.Service)
 	handler.SetTokenHandler(th)
 
