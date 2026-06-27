@@ -17,37 +17,109 @@ func writeTemp(t *testing.T, contents string) string {
 	return p
 }
 
-func TestLoadValidConfig(t *testing.T) {
+func TestLoadMultiTenantConfig(t *testing.T) {
+	t.Setenv("DEV_CID", "dev-client-id")
+	t.Setenv("PROD_CID", "prod-client-id")
 	p := writeTemp(t, `
 trivy:
   severity_threshold: CRITICAL
 base_image:
-  allowed_ids: [rhel, wolfi, chainguard]
+  allowed_ids: [rhel]
 acr:
-  registry: myreg.azurecr.io
+  registry_template: "{prefix}acr.azurecr.io"
+  base_domain: c3ci.cloud
+tenants:
+  - prefix: c3dev
+    acr_client_id: ${DEV_CID}
+    auth:
+      issuer: https://login/dev/v2.0
+      audience: api://merlin-dev
+      jwks_url: https://login/dev/keys
+      tenant_id: dev-tenant
+  - prefix: c3prod
+    acr_client_id: ${PROD_CID}
+    auth:
+      issuer: https://login/prod/v2.0
+      audience: api://merlin-prod
+      jwks_url: https://login/prod/keys
+      tenant_id: prod-tenant
 auth:
-  issuer: https://login.microsoftonline.com/tenant/v2.0
-  audience: api://merlin
+  registry_token_secret: shh
 `)
 	cfg, err := Load(p)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.Trivy.SeverityThreshold != "CRITICAL" {
-		t.Errorf("threshold = %q, want CRITICAL", cfg.Trivy.SeverityThreshold)
+	if len(cfg.Tenants) != 2 {
+		t.Fatalf("tenants = %d, want 2", len(cfg.Tenants))
 	}
-	if len(cfg.BaseImage.AllowedIDs) != 3 {
-		t.Errorf("allowed_ids = %v, want 3 entries", cfg.BaseImage.AllowedIDs)
+	if got := cfg.Tenants[0].Registry(cfg.ACR.RegistryTemplate); got != "c3devacr.azurecr.io" {
+		t.Errorf("registry = %q, want c3devacr.azurecr.io", got)
+	}
+	if cfg.Tenants[0].ACRClientID != "dev-client-id" {
+		t.Errorf("client id not expanded: %q", cfg.Tenants[0].ACRClientID)
+	}
+}
+
+func TestLoadRejectsDuplicatePrefix(t *testing.T) {
+	p := writeTemp(t, `
+base_image: { allowed_ids: [rhel] }
+acr: { registry_template: "{prefix}acr.azurecr.io", base_domain: c3ci.cloud }
+tenants:
+  - { prefix: c3dev, acr_client_id: a, auth: { issuer: i, audience: a, jwks_url: j, tenant_id: t } }
+  - { prefix: c3dev, acr_client_id: b, auth: { issuer: i, audience: a, jwks_url: j, tenant_id: t } }
+auth: { registry_token_secret: shh }
+`)
+	if _, err := Load(p); err == nil || !strings.Contains(err.Error(), "duplicate") {
+		t.Fatalf("expected duplicate prefix error, got %v", err)
+	}
+}
+
+func TestLoadRejectsTemplateWithoutPlaceholder(t *testing.T) {
+	p := writeTemp(t, `
+base_image: { allowed_ids: [rhel] }
+acr: { registry_template: "static.azurecr.io", base_domain: c3ci.cloud }
+tenants:
+  - { prefix: c3dev, acr_client_id: a, auth: { issuer: i, audience: a, jwks_url: j, tenant_id: t } }
+auth: { registry_token_secret: shh }
+`)
+	if _, err := Load(p); err == nil || !strings.Contains(err.Error(), "{prefix}") {
+		t.Fatalf("expected template placeholder error, got %v", err)
+	}
+}
+
+func TestLoadRejectsTenantMissingClientID(t *testing.T) {
+	p := writeTemp(t, `
+base_image: { allowed_ids: [rhel] }
+acr: { registry_template: "{prefix}acr.azurecr.io", base_domain: c3ci.cloud }
+tenants:
+  - { prefix: c3dev, auth: { issuer: i, audience: a, jwks_url: j, tenant_id: t } }
+auth: { registry_token_secret: shh }
+`)
+	if _, err := Load(p); err == nil || !strings.Contains(err.Error(), "acr_client_id") {
+		t.Fatalf("expected acr_client_id error, got %v", err)
+	}
+}
+
+func TestLoadRejectsEmptyTenants(t *testing.T) {
+	p := writeTemp(t, `
+base_image: { allowed_ids: [rhel] }
+acr: { registry_template: "{prefix}acr.azurecr.io", base_domain: c3ci.cloud }
+auth: { registry_token_secret: shh }
+`)
+	if _, err := Load(p); err == nil || !strings.Contains(err.Error(), "at least one tenant") {
+		t.Fatalf("expected empty tenants error, got %v", err)
 	}
 }
 
 func TestLoadAppliesThresholdDefault(t *testing.T) {
 	p := writeTemp(t, `
 acr:
-  registry: myreg.azurecr.io
-auth:
-  issuer: https://issuer
-  audience: api://merlin
+  registry_template: "{prefix}acr.azurecr.io"
+  base_domain: c3ci.cloud
+tenants:
+  - { prefix: c3dev, acr_client_id: cid, auth: { issuer: i, audience: a, jwks_url: j, tenant_id: t } }
+auth: { registry_token_secret: shh }
 base_image:
   allowed_ids: [rhel]
 `)
@@ -63,10 +135,11 @@ base_image:
 func TestLoadAppliesShutdownTimeoutDefault(t *testing.T) {
 	p := writeTemp(t, `
 acr:
-  registry: myreg.azurecr.io
-auth:
-  issuer: https://issuer
-  audience: api://merlin
+  registry_template: "{prefix}acr.azurecr.io"
+  base_domain: c3ci.cloud
+tenants:
+  - { prefix: c3dev, acr_client_id: cid, auth: { issuer: i, audience: a, jwks_url: j, tenant_id: t } }
+auth: { registry_token_secret: shh }
 base_image:
   allowed_ids: [rhel]
 `)
@@ -82,10 +155,11 @@ base_image:
 func TestLoadKeepsExplicitShutdownTimeout(t *testing.T) {
 	p := writeTemp(t, `
 acr:
-  registry: myreg.azurecr.io
-auth:
-  issuer: https://issuer
-  audience: api://merlin
+  registry_template: "{prefix}acr.azurecr.io"
+  base_domain: c3ci.cloud
+tenants:
+  - { prefix: c3dev, acr_client_id: cid, auth: { issuer: i, audience: a, jwks_url: j, tenant_id: t } }
+auth: { registry_token_secret: shh }
 base_image:
   allowed_ids: [rhel]
 server:
@@ -100,66 +174,14 @@ server:
 	}
 }
 
-func TestLoadRejectsMissingACRRegistry(t *testing.T) {
-	p := writeTemp(t, `
-auth:
-  issuer: https://issuer
-  audience: api://merlin
-base_image:
-  allowed_ids: [rhel]
-`)
-	_, err := Load(p)
-	if err == nil {
-		t.Fatal("expected error for missing acr.registry, got nil")
-	}
-	if !strings.Contains(err.Error(), "acr.registry") {
-		t.Errorf("expected acr.registry error, got: %v", err)
-	}
-}
-
-func TestLoadRejectsMissingAuthIssuer(t *testing.T) {
-	p := writeTemp(t, `
-acr:
-  registry: myreg.azurecr.io
-auth:
-  audience: api://merlin
-base_image:
-  allowed_ids: [rhel]
-`)
-	_, err := Load(p)
-	if err == nil {
-		t.Fatal("expected error for missing auth.issuer")
-	}
-	if !strings.Contains(err.Error(), "auth.issuer") {
-		t.Errorf("expected auth.issuer error, got: %v", err)
-	}
-}
-
-func TestLoadRejectsMissingAuthAudience(t *testing.T) {
-	p := writeTemp(t, `
-acr:
-  registry: myreg.azurecr.io
-auth:
-  issuer: https://issuer
-base_image:
-  allowed_ids: [rhel]
-`)
-	_, err := Load(p)
-	if err == nil {
-		t.Fatal("expected error for missing auth.audience")
-	}
-	if !strings.Contains(err.Error(), "auth.audience") {
-		t.Errorf("expected auth.audience error, got: %v", err)
-	}
-}
-
 func TestLoadRejectsEmptyAllowedIDs(t *testing.T) {
 	p := writeTemp(t, `
 acr:
-  registry: myreg.azurecr.io
-auth:
-  issuer: https://issuer
-  audience: api://merlin
+  registry_template: "{prefix}acr.azurecr.io"
+  base_domain: c3ci.cloud
+tenants:
+  - { prefix: c3dev, acr_client_id: cid, auth: { issuer: i, audience: a, jwks_url: j, tenant_id: t } }
+auth: { registry_token_secret: shh }
 `)
 	_, err := Load(p)
 	if err == nil {
@@ -175,10 +197,11 @@ func TestLoadRejectsInvalidThreshold(t *testing.T) {
 trivy:
   severity_threshold: SUPER_CRITICAL
 acr:
-  registry: myreg.azurecr.io
-auth:
-  issuer: https://issuer
-  audience: api://merlin
+  registry_template: "{prefix}acr.azurecr.io"
+  base_domain: c3ci.cloud
+tenants:
+  - { prefix: c3dev, acr_client_id: cid, auth: { issuer: i, audience: a, jwks_url: j, tenant_id: t } }
+auth: { registry_token_secret: shh }
 base_image:
   allowed_ids: [rhel]
 `)
@@ -196,10 +219,11 @@ func TestLoadExpandsEnvVars(t *testing.T) {
 	t.Setenv("TEST_CH_PW", "test_password_123")
 	p := writeTemp(t, `
 acr:
-  registry: myreg.azurecr.io
-auth:
-  issuer: https://issuer
-  audience: api://merlin
+  registry_template: "{prefix}acr.azurecr.io"
+  base_domain: c3ci.cloud
+tenants:
+  - { prefix: c3dev, acr_client_id: cid, auth: { issuer: i, audience: a, jwks_url: j, tenant_id: t } }
+auth: { registry_token_secret: shh }
 base_image:
   allowed_ids: [rhel]
 audit:
@@ -219,10 +243,11 @@ func TestLoadRejectsUnsetEnvVar(t *testing.T) {
 	// Test case (b): config referencing UNSET var returns error naming the var
 	p := writeTemp(t, `
 acr:
-  registry: myreg.azurecr.io
-auth:
-  issuer: https://issuer
-  audience: api://merlin
+  registry_template: "{prefix}acr.azurecr.io"
+  base_domain: c3ci.cloud
+tenants:
+  - { prefix: c3dev, acr_client_id: cid, auth: { issuer: i, audience: a, jwks_url: j, tenant_id: t } }
+auth: { registry_token_secret: shh }
 base_image:
   allowed_ids: [rhel]
 audit:
@@ -244,10 +269,11 @@ func TestLoadWithNoEnvRefsStillWorks(t *testing.T) {
 	// Test case (c): config with no env refs still loads fine (regression)
 	p := writeTemp(t, `
 acr:
-  registry: myreg.azurecr.io
-auth:
-  issuer: https://issuer
-  audience: api://merlin
+  registry_template: "{prefix}acr.azurecr.io"
+  base_domain: c3ci.cloud
+tenants:
+  - { prefix: c3dev, acr_client_id: cid, auth: { issuer: i, audience: a, jwks_url: j, tenant_id: t } }
+auth: { registry_token_secret: shh }
 base_image:
   allowed_ids: [rhel]
 audit:
@@ -266,10 +292,11 @@ audit:
 func TestLoadAppliesTokenEndpointDefaults(t *testing.T) {
 	p := writeTemp(t, `
 acr:
-  registry: r.azurecr.io
-auth:
-  issuer: https://issuer
-  audience: api://merlin
+  registry_template: "{prefix}acr.azurecr.io"
+  base_domain: c3ci.cloud
+tenants:
+  - { prefix: c3dev, acr_client_id: cid, auth: { issuer: i, audience: a, jwks_url: j, tenant_id: t } }
+auth: { registry_token_secret: shh }
 base_image:
   allowed_ids: [rhel]
 `)
@@ -288,11 +315,11 @@ base_image:
 func TestLoadReadsTokenEndpointFields(t *testing.T) {
 	p := writeTemp(t, `
 acr:
-  registry: r.azurecr.io
+  registry_template: "{prefix}acr.azurecr.io"
+  base_domain: c3ci.cloud
+tenants:
+  - { prefix: c3dev, acr_client_id: cid, auth: { issuer: i, audience: a, jwks_url: j, tenant_id: my-tenant } }
 auth:
-  issuer: https://issuer
-  audience: api://merlin
-  tenant_id: my-tenant
   service: myreg
   registry_token_secret: shh
   registry_token_ttl: 10m
@@ -303,20 +330,24 @@ base_image:
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if cfg.Auth.TenantID != "my-tenant" || cfg.Auth.Service != "myreg" ||
+	if cfg.Auth.Service != "myreg" ||
 		cfg.Auth.RegistryTokenSecret != "shh" || cfg.Auth.RegistryTokenTTL != "10m" {
 		t.Errorf("token fields not read: %+v", cfg.Auth)
+	}
+	// TenantID is now per-tenant
+	if cfg.Tenants[0].Auth.TenantID != "my-tenant" {
+		t.Errorf("tenant_id not read from tenant auth: %+v", cfg.Tenants[0].Auth)
 	}
 }
 
 func TestDashboardAndRetentionDefaults(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
-	// Minimal valid config (mirrors other tests in this file): acr.registry,
-	// auth.issuer, auth.audience, base_image.allowed_ids are required.
+	// Minimal valid config: acr with template + base_domain, tenants, base_image.allowed_ids
 	yaml := "" +
-		"acr:\n  registry: example.azurecr.io\n" +
-		"auth:\n  issuer: https://issuer\n  audience: api://merlin\n" +
+		"acr:\n  registry_template: \"{prefix}acr.azurecr.io\"\n  base_domain: c3ci.cloud\n" +
+		"tenants:\n  - { prefix: c3dev, acr_client_id: cid, auth: { issuer: i, audience: a, jwks_url: j, tenant_id: t } }\n" +
+		"auth: { registry_token_secret: shh }\n" +
 		"base_image:\n  allowed_ids: [\"ubi9\"]\n"
 	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
 		t.Fatal(err)
@@ -338,8 +369,9 @@ func TestDashboardAddrOffPreserved(t *testing.T) {
 	path := filepath.Join(dir, "config.yaml")
 	// "off" is the explicit disable sentinel; applyDefaults must NOT override it.
 	yaml := "" +
-		"acr:\n  registry: example.azurecr.io\n" +
-		"auth:\n  issuer: https://issuer\n  audience: api://merlin\n" +
+		"acr:\n  registry_template: \"{prefix}acr.azurecr.io\"\n  base_domain: c3ci.cloud\n" +
+		"tenants:\n  - { prefix: c3dev, acr_client_id: cid, auth: { issuer: i, audience: a, jwks_url: j, tenant_id: t } }\n" +
+		"auth: { registry_token_secret: shh }\n" +
 		"base_image:\n  allowed_ids: [\"ubi9\"]\n" +
 		"server:\n  dashboard_addr: \"off\"\n"
 	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
@@ -358,8 +390,9 @@ func TestDashboardAddrParsed(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 	yaml := "" +
-		"acr:\n  registry: example.azurecr.io\n" +
-		"auth:\n  issuer: https://issuer\n  audience: api://merlin\n" +
+		"acr:\n  registry_template: \"{prefix}acr.azurecr.io\"\n  base_domain: c3ci.cloud\n" +
+		"tenants:\n  - { prefix: c3dev, acr_client_id: cid, auth: { issuer: i, audience: a, jwks_url: j, tenant_id: t } }\n" +
+		"auth: { registry_token_secret: shh }\n" +
 		"base_image:\n  allowed_ids: [\"ubi9\"]\n" +
 		"server:\n  dashboard_addr: \":8080\"\n" +
 		"audit:\n  retention_days: 7\n"
