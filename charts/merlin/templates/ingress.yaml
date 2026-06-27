@@ -16,11 +16,17 @@ spec:
   {{- with .Values.ingress.className }}
   ingressClassName: {{ . }}
   {{- end }}
+  # One host per tenant: <prefix>.<acr.baseDomain>. Each docker push is routed to
+  # its tenant ACR by the gate based on the subdomain prefix it arrives on.
   tls:
-    - hosts: [{{ .Values.ingress.host | quote }}]
+    - hosts:
+      {{- range .Values.merlin.tenants }}
+        - {{ printf "%s.%s" .prefix $.Values.merlin.acr.baseDomain | quote }}
+      {{- end }}
       secretName: {{ .Values.ingress.tlsSecretName }}
   rules:
-    - host: {{ .Values.ingress.host | quote }}
+  {{- range .Values.merlin.tenants }}
+    - host: {{ printf "%s.%s" .prefix $.Values.merlin.acr.baseDomain | quote }}
       http:
         paths:
           {{- if $pathRoute }}
@@ -33,28 +39,29 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: {{ include "merlin.fullname" . }}
-                port: { number: {{ .Values.service.port }} }
+                name: {{ include "merlin.fullname" $ }}
+                port: { number: {{ $.Values.service.port }} }
           - path: /token
             pathType: Prefix
             backend:
               service:
-                name: {{ include "merlin.fullname" . }}
-                port: { number: {{ .Values.service.port }} }
+                name: {{ include "merlin.fullname" $ }}
+                port: { number: {{ $.Values.service.port }} }
           - path: /reports
             pathType: Prefix
             backend:
               service:
-                name: {{ include "merlin.fullname" . }}
-                port: { number: {{ .Values.service.port }} }
+                name: {{ include "merlin.fullname" $ }}
+                port: { number: {{ $.Values.service.port }} }
           {{- else }}
           - path: /
             pathType: Prefix
             backend:
               service:
-                name: {{ include "merlin.fullname" . }}
-                port: { number: {{ .Values.service.port }} }
+                name: {{ include "merlin.fullname" $ }}
+                port: { number: {{ $.Values.service.port }} }
           {{- end }}
+  {{- end }}
 {{- if or $pathRoute $dashHost }}
 {{- $dhost := .Values.ingress.host }}{{- if $dashHost }}{{ $dhost = .Values.ingress.dashboardHost }}{{- end }}
 ---
