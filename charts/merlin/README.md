@@ -1,10 +1,10 @@
 # Merlin Helm Chart
 
-Helm chart for deploying Merlin, an image-publishing gate proxy that validates container images before forwarding them to Azure Container Registry (ACR).
+Helm chart for deploying Merlin, an image-publishing gate proxy that validates container images before forwarding them to per-tenant Azure Container Registries (ACR), routed by DNS subdomain prefix.
 
 ## Overview
 
-Merlin acts as a gating layer in front of ACR, enforcing security policies on pushed images:
+Merlin acts as a gating layer in front of one or more ACRs, enforcing security policies on pushed images. Each push is routed to a per-tenant ACR by the host prefix: a client pushing to `<prefix>.<merlin.acr.baseDomain>` (e.g. `c3dev.c3ci.cloud`) is forwarded to the ACR derived from `merlin.acr.registryTemplate` with `{prefix}` substituted (e.g. `c3devacr.azurecr.io`). Each tenant has its own inbound Entra auth and its own outbound workload-identity client ID. Unknown prefixes return `404`, and a registry token minted on one tenant host is rejected (`401`) on another. The gate enforces:
 - **Base image validation**: Ensures images are built on approved base images (Red Hat UBI, Wolfi, Chainguard)
 - **Vulnerability scanning**: Scans images with Trivy and rejects images with CRITICAL vulnerabilities
 - **Audit logging**: Records all push attempts and gate decisions to ClickHouse
@@ -161,10 +161,14 @@ The following values MUST be set in your production values file:
 | `ingress.tlsSecretName` | TLS secret name | `merlin-tls` |
 | `externalSecrets.secretStoreRef.name` | ESO SecretStore name | `azure-keyvault-store` |
 | `externalSecrets.data` | Secret mappings | `[{secretKey: clickhouse-password, remoteKey: merlin-ch-pass}]` |
-| `merlin.acr.registry` | Upstream ACR URL | `myacr.azurecr.io` |
-| `merlin.auth.issuer` | Entra tenant issuer | `https://sts.windows.net/<tenant-id>/` |
-| `merlin.auth.audience` | Token audience | `<acr-client-id>` |
-| `merlin.auth.jwksURL` | Entra JWKS URL | `https://login.microsoftonline.com/<tenant-id>/discovery/v2.0/keys` |
+| `merlin.acr.registryTemplate` | ACR host template (must contain `{prefix}`) | `{prefix}acr.azurecr.io` |
+| `merlin.acr.baseDomain` | Base DNS domain; ingress exposes `<prefix>.<baseDomain>` per tenant | `c3ci.cloud` |
+| `merlin.tenants[].prefix` | DNS subdomain prefix for this tenant | `c3dev` |
+| `merlin.tenants[].acrClientId` | Workload-identity client ID with `AcrPush` on this tenant's ACR | `<client-id>` |
+| `merlin.tenants[].auth.issuer` | Per-tenant Entra issuer | `https://sts.windows.net/<tenant-id>/` |
+| `merlin.tenants[].auth.audience` | Per-tenant token audience | `<acr-client-id>` |
+| `merlin.tenants[].auth.jwksUrl` | Per-tenant Entra JWKS URL | `https://login.microsoftonline.com/<tenant-id>/discovery/v2.0/keys` |
+| `merlin.tenants[].auth.tenantId` | Per-tenant Entra tenant ID | `<tenant-id>` |
 | `merlin.staging.blobAccountURL` | Blob Storage account URL | `https://mystorageacct.blob.core.windows.net` |
 | `merlin.staging.blobContainer` | Blob container name | `merlin-staging` |
 | `valkey.storage.storageClassName` | StorageClass for Valkey | `managed-premium` or `""` (default) |
@@ -246,29 +250,33 @@ IP allowlist, or an auth proxy). Leave it empty to keep the dashboard cluster-in
 
 ## Usage
 
-After installation, developers can push images through Merlin:
+After installation, developers push images through the tenant host they belong to.
+Push to `<prefix>.<merlin.acr.baseDomain>`; Merlin routes to that tenant's ACR.
 
 ```bash
 # 1. Authenticate with Azure
 az login
-az acr login --name <your-acr-name>
-docker login merlin.example.com
+# Log in to the tenant host (prefix c3dev, baseDomain c3ci.cloud)
+docker login c3dev.c3ci.cloud
 
-# 2. Push an image (gated by Merlin)
-docker tag myimage:latest merlin.example.com/myrepo:mytag
-docker push merlin.example.com/myrepo:mytag
+# 2. Push an image (gated by Merlin, forwarded to c3devacr.azurecr.io)
+docker tag myimage:latest c3dev.c3ci.cloud/myrepo:mytag
+docker push c3dev.c3ci.cloud/myrepo:mytag
 
-# 3. Query the scan report
+# 3. Query the scan report (same tenant host)
 PUSH_ID="<push-id>"
 curl -H "Authorization: Bearer $(az account get-access-token --query accessToken -o tsv)" \
-     https://merlin.example.com/reports/$PUSH_ID
+     https://c3dev.c3ci.cloud/reports/$PUSH_ID
 ```
+
+Pushing to an unknown prefix returns `404`. A registry token obtained from one
+tenant host cannot be used against another tenant host (`401`).
 
 Merlin will:
 1. Validate the base image (must be UBI, Wolfi, or Chainguard)
 2. Scan for CRITICAL vulnerabilities with Trivy
 3. Reject images that fail the gate
-4. Forward approved images to the upstream ACR
+4. Forward approved images to the tenant's ACR (`registryTemplate` with `{prefix}` substituted)
 
 ## Known Limitations
 
