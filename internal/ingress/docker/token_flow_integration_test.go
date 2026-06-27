@@ -11,13 +11,15 @@ import (
 	"time"
 
 	"github.com/merlin-gate/merlin/internal/auth"
+	"github.com/merlin-gate/merlin/internal/tenant"
 )
 
 func TestDockerTokenHandshake(t *testing.T) {
 	iss := auth.NewRegistryTokenIssuer([]byte("s"), "merlin", time.Minute)
-	h := NewHandler(fakeAuth{ok: true}, nil, nil, nil, "myreg.azurecr.io", nil)
+	res := anyResolver{t: &tenant.Tenant{Prefix: "c3dev", Registry: "myreg.azurecr.io", Authn: stubAuthn{ok: true}}}
+	h := NewHandler(res, nil, nil, nil, nil)
 	h.SetRegistryAuth(iss, "", "merlin") // realm filled below via server URL
-	th := &TokenHandler{Authn: stubAuthn{ok: true}, ClientCreds: stubClientCreds{ok: false}, Issuer: iss}
+	th := &TokenHandler{Resolver: res, ClientCreds: stubClientCreds{ok: false}, Issuer: iss}
 	h.SetTokenHandler(th)
 
 	srv := httptest.NewServer(h)

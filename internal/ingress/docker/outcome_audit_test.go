@@ -30,7 +30,6 @@ func (s *spyRecorder) Record(_ context.Context, d audit.Decision, findings []pol
 func TestOutcome_RecordsPassDecision(t *testing.T) {
 	spy := &spyRecorder{}
 	o := Outcome{
-		Pusher:        &acr.FakePusher{},
 		ReportBaseURL: "http://reports",
 		Recorder:      spy,
 		IDGen:         func() string { return "test-id-001" },
@@ -56,7 +55,7 @@ func TestOutcome_RecordsPassDecision(t *testing.T) {
 		TrivyDBVersion: "db-v1",
 	}
 
-	_, err := o.Apply(context.Background(), req, res, nil)
+	_, err := o.Apply(context.Background(), &acr.FakePusher{}, req, res, nil)
 	if err != nil {
 		t.Fatalf("Apply failed: %v", err)
 	}
@@ -100,7 +99,6 @@ func TestOutcome_RecordsPassDecision(t *testing.T) {
 func TestOutcome_RecordsFailDecision(t *testing.T) {
 	spy := &spyRecorder{}
 	o := Outcome{
-		Pusher:        &acr.FakePusher{},
 		ReportBaseURL: "http://reports",
 		Recorder:      spy,
 		IDGen:         func() string { return "test-id-002" },
@@ -125,7 +123,7 @@ func TestOutcome_RecordsFailDecision(t *testing.T) {
 		TrivyDBVersion: "db-v1",
 	}
 
-	_, err := o.Apply(context.Background(), req, res, nil)
+	_, err := o.Apply(context.Background(), &acr.FakePusher{}, req, res, nil)
 	if err != nil {
 		t.Fatalf("Apply failed: %v", err)
 	}
@@ -168,7 +166,6 @@ func TestOutcome_RecordsFailDecision(t *testing.T) {
 func TestOutcome_RecordsInfraErrorDecision(t *testing.T) {
 	spy := &spyRecorder{}
 	o := Outcome{
-		Pusher:        &acr.FakePusher{},
 		ReportBaseURL: "http://reports",
 		Recorder:      spy,
 		IDGen:         func() string { return "test-id-003" },
@@ -183,7 +180,7 @@ func TestOutcome_RecordsInfraErrorDecision(t *testing.T) {
 	}
 	res := policy.Result{Passed: false}
 
-	_, err := o.Apply(context.Background(), req, res, errFake)
+	_, err := o.Apply(context.Background(), &acr.FakePusher{}, req, res, errFake)
 	if err != nil {
 		t.Fatalf("Apply failed: %v", err)
 	}
@@ -199,7 +196,6 @@ func TestOutcome_RecordsInfraErrorDecision(t *testing.T) {
 
 func TestOutcome_NilRecorderDoesNotPanic(t *testing.T) {
 	o := Outcome{
-		Pusher:        &acr.FakePusher{},
 		ReportBaseURL: "http://reports",
 		Recorder:      nil, // no recorder
 		IDGen:         func() string { return "test-id-004" },
@@ -214,7 +210,7 @@ func TestOutcome_NilRecorderDoesNotPanic(t *testing.T) {
 	}
 	res := policy.Result{Passed: true}
 
-	_, err := o.Apply(context.Background(), req, res, nil)
+	_, err := o.Apply(context.Background(), &acr.FakePusher{}, req, res, nil)
 	if err != nil {
 		t.Fatalf("Apply failed: %v", err)
 	}

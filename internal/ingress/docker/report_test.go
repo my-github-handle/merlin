@@ -43,8 +43,9 @@ func (errReports) FindingsByImageRef(_ context.Context, _, _ string) ([]policy.F
 
 func TestReportEndpointReturnsFindings(t *testing.T) {
 	rs := &fakeReports{findings: []policy.Finding{{CVE: "CVE-1", Severity: "CRITICAL", Pkg: "openssl"}}}
-	h := NewHandler(fakeAuth{ok: true}, nil, nil, nil, "myreg.azurecr.io", rs)
+	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), nil, nil, nil, rs)
 	req := httptest.NewRequest(http.MethodGet, "/reports/push-123", nil)
+	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -85,8 +86,9 @@ func TestSplitImageRef(t *testing.T) {
 
 func TestReportEndpointByImageTag(t *testing.T) {
 	rs := &fakeReports{findings: []policy.Finding{{CVE: "CVE-X", Severity: "CRITICAL"}}}
-	h := NewHandler(fakeAuth{ok: true}, nil, nil, nil, "myreg.azurecr.io", rs)
+	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), nil, nil, nil, rs)
 	req := httptest.NewRequest(http.MethodGet, "/reports/c3aiops:2.13.25-as", nil)
+	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -101,8 +103,9 @@ func TestReportEndpointByImageTag(t *testing.T) {
 
 func TestReportEndpointByImageDigest(t *testing.T) {
 	rs := &fakeReports{}
-	h := NewHandler(fakeAuth{ok: true}, nil, nil, nil, "myreg.azurecr.io", rs)
+	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), nil, nil, nil, rs)
 	req := httptest.NewRequest(http.MethodGet, "/reports/e2e/app@sha256:deadbeef", nil)
+	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -116,8 +119,9 @@ func TestReportEndpointByImageDigest(t *testing.T) {
 
 func TestReportEndpointByPushIDStillWorks(t *testing.T) {
 	rs := &fakeReports{}
-	h := NewHandler(fakeAuth{ok: true}, nil, nil, nil, "myreg.azurecr.io", rs)
+	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), nil, nil, nil, rs)
 	req := httptest.NewRequest(http.MethodGet, "/reports/88824db0a4604bf48aad9ec246144d20", nil)
+	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -131,8 +135,9 @@ func TestReportEndpointByPushIDStillWorks(t *testing.T) {
 
 func TestReportEndpointRejectsUnauthenticated(t *testing.T) {
 	rs := &fakeReports{}
-	h := NewHandler(fakeAuth{ok: false}, nil, nil, nil, "myreg.azurecr.io", rs)
+	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: false}), nil, nil, nil, rs)
 	req := httptest.NewRequest(http.MethodGet, "/reports/push-123", nil)
+	req.Host = testTenantHost
 	// no Authorization header
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -143,8 +148,9 @@ func TestReportEndpointRejectsUnauthenticated(t *testing.T) {
 
 func TestReportEndpointErrorIs500(t *testing.T) {
 	rs := errReports{} // FindingsByPush returns an error
-	h := NewHandler(fakeAuth{ok: true}, nil, nil, nil, "myreg.azurecr.io", rs)
+	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), nil, nil, nil, rs)
 	req := httptest.NewRequest(http.MethodGet, "/reports/push-123", nil)
+	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -155,8 +161,9 @@ func TestReportEndpointErrorIs500(t *testing.T) {
 
 func TestReportEndpointEmptyFindingsOK(t *testing.T) {
 	rs := &fakeReports{findings: nil}
-	h := NewHandler(fakeAuth{ok: true}, nil, nil, nil, "myreg.azurecr.io", rs)
+	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), nil, nil, nil, rs)
 	req := httptest.NewRequest(http.MethodGet, "/reports/push-123", nil)
+	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)

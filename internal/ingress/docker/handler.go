@@ -10,15 +10,15 @@ import (
 	"github.com/merlin-gate/merlin/internal/auth"
 	"github.com/merlin-gate/merlin/internal/router"
 	"github.com/merlin-gate/merlin/internal/staging"
+	"github.com/merlin-gate/merlin/internal/tenant"
 )
 
 // Handler implements the inbound Docker Registry V2 surface.
 type Handler struct {
-	auth           auth.Authenticator
+	resolver       tenant.Resolver
 	store          *staging.Store
 	router         *router.Router
 	outcome        *Outcome
-	registry       string
 	reports        ReportSource
 	mux            *http.ServeMux
 	maxUploadBytes int64
@@ -32,8 +32,8 @@ type Handler struct {
 }
 
 // NewHandler builds the V2 handler. reports backs GET /reports/<push_id>.
-func NewHandler(a auth.Authenticator, st *staging.Store, r *router.Router, o *Outcome, registry string, reports ReportSource) *Handler {
-	h := &Handler{auth: a, store: st, router: r, outcome: o, registry: registry, reports: reports, mux: http.NewServeMux()}
+func NewHandler(resolver tenant.Resolver, st *staging.Store, r *router.Router, o *Outcome, reports ReportSource) *Handler {
+	h := &Handler{resolver: resolver, store: st, router: r, outcome: o, reports: reports, mux: http.NewServeMux()}
 	h.mux.HandleFunc("/v2/", h.route)
 	h.mux.HandleFunc("/reports/", h.handleReport)
 	return h
@@ -118,7 +118,14 @@ func (h *Handler) SetTokenHandler(th *TokenHandler) {
 }
 
 func (h *Handler) route(w http.ResponseWriter, r *http.Request) {
-	if !h.authenticate(w, r) {
+	// Resolve the tenant from the request host first: an unknown host/prefix is a
+	// 404 (before auth), so an unrecognized registry cannot probe the auth surface.
+	t, err := h.resolver.ForHost(r.Host)
+	if err != nil {
+		http.Error(w, "unknown registry", http.StatusNotFound)
+		return
+	}
+	if !h.authenticate(w, r, t) {
 		return
 	}
 	// Base version check.
@@ -136,7 +143,7 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) {
 	case strings.Contains(r.URL.Path, "/manifests/"):
 		switch r.Method {
 		case http.MethodPut:
-			h.handleManifest(w, r)
+			h.handleManifest(w, r, t)
 		case http.MethodGet, http.MethodHead:
 			// Docker issues a GET/HEAD manifest existence check during push. Merlin
 			// is a push gate, not a pull-through registry, so it holds no manifest
@@ -151,18 +158,21 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *Handler) authenticate(w http.ResponseWriter, r *http.Request) bool {
+func (h *Handler) authenticate(w http.ResponseWriter, r *http.Request, t *tenant.Tenant) bool {
 	if h.regIssuer != nil {
 		bearer := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if _, _, err := h.regIssuer.Verify(bearer); err != nil {
+		// The registry token carries a prefix claim bound to the tenant it was minted
+		// for; a token minted for one tenant presented to another is rejected (401).
+		_, _, prefix, err := h.regIssuer.Verify(bearer)
+		if err != nil || prefix != t.Prefix {
 			h.challenge(w, r)
 			return false
 		}
 		return true
 	}
-	// Legacy path: validate the Entra token directly (pre-Phase-9 behavior).
+	// Legacy path: validate the Entra token directly against the tenant's authn.
 	bearer := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if _, err := h.auth.Validate(r.Context(), bearer); err != nil {
+	if _, err := t.Authn.Validate(r.Context(), bearer); err != nil {
 		w.Header().Set("WWW-Authenticate", `Bearer realm="merlin",service="registry"`)
 		w.WriteHeader(http.StatusUnauthorized)
 		return false
@@ -201,16 +211,16 @@ func repoFromV2Path(path string) string {
 // validatedIdentity returns the caller identity from the bearer token, using the
 // same dual-mode logic as authenticate(): verify Merlin's registry token when
 // registry auth is active, otherwise validate the Entra token (legacy path).
-func (h *Handler) validatedIdentity(r *http.Request) (auth.Identity, bool) {
+func (h *Handler) validatedIdentity(r *http.Request, t *tenant.Tenant) (auth.Identity, bool) {
 	bearer := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if h.regIssuer != nil {
-		subject, _, err := h.regIssuer.Verify(bearer)
+		subject, _, _, err := h.regIssuer.Verify(bearer)
 		if err != nil {
 			return auth.Identity{}, false
 		}
 		return auth.Identity{Subject: subject}, true
 	}
-	identity, err := h.auth.Validate(r.Context(), bearer)
+	identity, err := t.Authn.Validate(r.Context(), bearer)
 	if err != nil {
 		return auth.Identity{}, false
 	}

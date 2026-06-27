@@ -46,6 +46,7 @@ func TestHTTPPushUBIGood(t *testing.T) {
 
 	// PUT the manifest
 	req := httptest.NewRequest(http.MethodPut, "/v2/"+repo+"/manifests/"+ref, bytes.NewReader(manifestBytes))
+	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -84,6 +85,7 @@ func TestHTTPPushCriticalCVE(t *testing.T) {
 	manifestBytes, _ := json.Marshal(manifest)
 
 	req := httptest.NewRequest(http.MethodPut, "/v2/"+repo+"/manifests/"+ref, bytes.NewReader(manifestBytes))
+	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -115,6 +117,7 @@ func TestHTTPPushAlpineRejected(t *testing.T) {
 	manifestBytes, _ := json.Marshal(manifest)
 
 	req := httptest.NewRequest(http.MethodPut, "/v2/"+repo+"/manifests/"+ref, bytes.NewReader(manifestBytes))
+	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -138,12 +141,13 @@ func TestHTTPPushUnauthenticated(t *testing.T) {
 	bp := baseimage.New([]string{"rhel", "wolfi", "chainguard"})
 	rt := router.New(policy.NewEngine(tp, bp))
 	fp := &acr.FakePusher{}
-	o := &Outcome{Pusher: fp, ReportBaseURL: "/reports"}
+	o := &Outcome{ReportBaseURL: "/reports"}
 	// Use fakeAuth{ok: false} for unauthenticated test
-	h := NewHandler(fakeAuth{ok: false}, st, rt, o, "myreg.azurecr.io", nil)
+	h := NewHandler(testResolver("myreg.azurecr.io", fp, fakeAuth{ok: false}), st, rt, o, nil)
 
 	// Try to access /v2/ without auth
 	req := httptest.NewRequest(http.MethodGet, "/v2/", nil)
+	req.Host = testTenantHost
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
@@ -170,8 +174,8 @@ func TestHTTPPushSaturated(t *testing.T) {
 	rt := router.New(policy.NewEngine(bp))
 	pool := router.NewPool(rt, 1)
 	fp := &acr.FakePusher{}
-	o := &Outcome{Pusher: fp, ReportBaseURL: "/reports"}
-	h := NewHandler(fakeAuth{ok: true}, st, rt, o, "myreg.azurecr.io", nil)
+	o := &Outcome{ReportBaseURL: "/reports"}
+	h := NewHandler(testResolver("myreg.azurecr.io", fp, fakeAuth{ok: true}), st, rt, o, nil)
 	h.SetPool(pool)
 	h.SetGateTimeout(5 * time.Second) // long enough for first request to stay alive
 
@@ -189,6 +193,7 @@ func TestHTTPPushSaturated(t *testing.T) {
 	// Start a goroutine that occupies the pool slot
 	go func() {
 		req := httptest.NewRequest(http.MethodPut, "/v2/app1/manifests/v1", bytes.NewReader(manifestBytes))
+		req.Host = testTenantHost
 		req.Header.Set("Authorization", "Bearer good")
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
@@ -213,6 +218,7 @@ func TestHTTPPushSaturated(t *testing.T) {
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel2()
 	req := httptest.NewRequest(http.MethodPut, "/v2/app2/manifests/v2", bytes.NewReader(manifestBytes2))
+	req.Host = testTenantHost
 	req = req.WithContext(ctx2)
 	req.Header.Set("Authorization", "Bearer good")
 	rec := httptest.NewRecorder()
@@ -243,8 +249,8 @@ func buildHTTPHandler(t *testing.T, trivyReport trivy.Report, poolSize int) (*Ha
 	rt := router.New(policy.NewEngine(tp, bp))
 	pool := router.NewPool(rt, poolSize)
 	fp := &acr.FakePusher{}
-	o := &Outcome{Pusher: fp, ReportBaseURL: "/reports"}
-	h := NewHandler(fakeAuth{ok: true}, st, rt, o, "myreg.azurecr.io", nil)
+	o := &Outcome{ReportBaseURL: "/reports"}
+	h := NewHandler(testResolver("myreg.azurecr.io", fp, fakeAuth{ok: true}), st, rt, o, nil)
 	h.SetPool(pool)
 	h.SetGateTimeout(5 * time.Second)
 	return h, fp
@@ -258,6 +264,7 @@ func httpUploadBlob(t *testing.T, h *Handler, repo string, blob []byte) string {
 
 	// POST to begin upload
 	req := httptest.NewRequest(http.MethodPost, "/v2/"+repo+"/blobs/uploads/", nil)
+	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -271,6 +278,7 @@ func httpUploadBlob(t *testing.T, h *Handler, repo string, blob []byte) string {
 
 	// PATCH the blob data
 	req = httptest.NewRequest(http.MethodPatch, "/v2/"+repo+"/blobs/uploads/"+uploadID, bytes.NewReader(blob))
+	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -280,6 +288,7 @@ func httpUploadBlob(t *testing.T, h *Handler, repo string, blob []byte) string {
 
 	// PUT to complete
 	req = httptest.NewRequest(http.MethodPut, "/v2/"+repo+"/blobs/uploads/"+uploadID+"?digest="+digest, nil)
+	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)

@@ -12,9 +12,9 @@ import (
 
 func TestOutcomePassPushesAndReturns201(t *testing.T) {
 	fp := &acr.FakePusher{}
-	o := &Outcome{Pusher: fp, ReportBaseURL: "https://merlin/reports"}
+	o := &Outcome{ReportBaseURL: "https://merlin/reports"}
 	req := router.GateRequest{Target: "myreg.azurecr.io/app:v1", Image: policy.StagedImage{OCIPath: "/oci", Digest: "sha256:abc"}}
-	d, err := o.Apply(context.Background(), req, policy.Result{Passed: true}, nil)
+	d, err := o.Apply(context.Background(), fp, req, policy.Result{Passed: true}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -28,10 +28,10 @@ func TestOutcomePassPushesAndReturns201(t *testing.T) {
 
 func TestOutcomeFailDoesNotPush(t *testing.T) {
 	fp := &acr.FakePusher{}
-	o := &Outcome{Pusher: fp, ReportBaseURL: "https://merlin/reports"}
+	o := &Outcome{ReportBaseURL: "https://merlin/reports"}
 	req := router.GateRequest{Target: "t", Image: policy.StagedImage{Digest: "sha256:abc"}}
 	res := policy.Result{Passed: false, Findings: []policy.Finding{{CVE: "CVE-1", Severity: "CRITICAL", Pkg: "p"}}}
-	d, _ := o.Apply(context.Background(), req, res, nil)
+	d, _ := o.Apply(context.Background(), fp, req, res, nil)
 	if len(fp.Pushed) != 0 {
 		t.Error("must not push on fail")
 	}
@@ -42,9 +42,9 @@ func TestOutcomeFailDoesNotPush(t *testing.T) {
 
 func TestOutcomeInfraErrorIs500(t *testing.T) {
 	fp := &acr.FakePusher{}
-	o := &Outcome{Pusher: fp}
+	o := &Outcome{}
 	req := router.GateRequest{Image: policy.StagedImage{Digest: "sha256:abc"}}
-	d, _ := o.Apply(context.Background(), req, policy.Result{}, context.DeadlineExceeded)
+	d, _ := o.Apply(context.Background(), fp, req, policy.Result{}, context.DeadlineExceeded)
 	if d.StatusCode != 500 || !d.InfraError {
 		t.Errorf("expected 500 infra, got %+v", d)
 	}
@@ -61,13 +61,12 @@ func TestOutcomeReportURLMatchesRecordedPushID(t *testing.T) {
 	fp := &acr.FakePusher{}
 	spy := &spyRecorder{}
 	o := &Outcome{
-		Pusher:        fp,
 		ReportBaseURL: "https://merlin/reports",
 		Recorder:      spy,
 		IDGen:         func() string { return "push-xyz" },
 	}
 	req := router.GateRequest{Target: "myreg.azurecr.io/app:v1", Image: policy.StagedImage{OCIPath: "/oci"}}
-	d, err := o.Apply(context.Background(), req, policy.Result{Passed: true}, nil)
+	d, err := o.Apply(context.Background(), fp, req, policy.Result{Passed: true}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,9 +87,9 @@ func TestOutcomeReportURLMatchesRecordedPushID(t *testing.T) {
 
 func TestOutcomePushFailureIs502(t *testing.T) {
 	fp := &acr.FakePusher{Err: errors.New("acr unreachable")}
-	o := &Outcome{Pusher: fp, ReportBaseURL: "https://merlin/reports"}
+	o := &Outcome{ReportBaseURL: "https://merlin/reports"}
 	req := router.GateRequest{Target: "myreg.azurecr.io/app:v1", Image: policy.StagedImage{OCIPath: "/oci", Digest: "sha256:abc"}}
-	d, err := o.Apply(context.Background(), req, policy.Result{Passed: true}, nil)
+	d, err := o.Apply(context.Background(), fp, req, policy.Result{Passed: true}, nil)
 	if err == nil {
 		t.Error("expected error when ACR push fails")
 	}

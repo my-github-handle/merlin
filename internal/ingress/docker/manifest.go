@@ -16,6 +16,7 @@ import (
 	"github.com/merlin-gate/merlin/internal/policy"
 	"github.com/merlin-gate/merlin/internal/router"
 	"github.com/merlin-gate/merlin/internal/staging"
+	"github.com/merlin-gate/merlin/internal/tenant"
 )
 
 // forwardManifest pushes a non-filesystem manifest (image index or attestation) to
@@ -23,14 +24,14 @@ import (
 // target ref mirrors how the client addressed it: by digest (sub-manifests, e.g. the
 // attestation) or by tag (the index). On success it echoes Docker-Content-Digest so
 // the docker client accepts the response.
-func (h *Handler) forwardManifest(w http.ResponseWriter, ctx context.Context, repo, ref string, raw []byte, m parsedManifest, kind manifestKind) {
+func (h *Handler) forwardManifest(w http.ResponseWriter, ctx context.Context, t *tenant.Tenant, repo, ref string, raw []byte, m parsedManifest, kind manifestKind) {
 	sum := sha256.Sum256(raw)
 	digest := "sha256:" + hex.EncodeToString(sum[:])
 
 	// Address the manifest in ACR exactly as the client addressed it here: a
 	// digest ref (sha256:...) pushes by digest; anything else is a tag.
-	repoRef := h.registry + "/" + repo
-	target := targetRef(h.registry, repo, ref)
+	repoRef := t.Registry + "/" + repo
+	target := targetRef(t.Registry, repo, ref)
 
 	// An attestation manifest references its own blobs (config + in-toto layers)
 	// that Merlin staged but never forwarded; the registry rejects the manifest
@@ -38,14 +39,14 @@ func (h *Handler) forwardManifest(w http.ResponseWriter, ctx context.Context, re
 	// index references only sub-manifests, already in ACR from the gated image, so
 	// it needs no blob seeding.)
 	if kind == kindAttestation {
-		if err := h.seedAttestationBlobs(ctx, repoRef, m); err != nil {
+		if err := h.seedAttestationBlobs(ctx, t, repoRef, m); err != nil {
 			log.Printf("forward attestation %s: seed blobs failed: %v", digest, err)
 			http.Error(w, fmt.Sprintf("manifest not published: %v", err), http.StatusBadRequest)
 			return
 		}
 	}
 
-	if err := h.outcome.Pusher.PushManifest(ctx, raw, m.MediaType, target); err != nil {
+	if err := t.Pusher.PushManifest(ctx, raw, m.MediaType, target); err != nil {
 		// An index whose gated image was rejected has no sub-manifest in ACR, so
 		// this PUT fails — that is the gate holding, not an internal fault. Surface
 		// it as a 400 so the push fails cleanly with the reason.
@@ -61,7 +62,7 @@ func (h *Handler) forwardManifest(w http.ResponseWriter, ctx context.Context, re
 // + layers) from staging to ACR, so the subsequent manifest forward resolves. Each
 // blob was staged during the push; it is fetched (digest re-verified) and pushed
 // addressed by content digest.
-func (h *Handler) seedAttestationBlobs(ctx context.Context, repoRef string, m parsedManifest) error {
+func (h *Handler) seedAttestationBlobs(ctx context.Context, t *tenant.Tenant, repoRef string, m parsedManifest) error {
 	type blob struct{ digest, mediaType string }
 	var blobs []blob
 	if m.Config.Digest != "" {
@@ -75,7 +76,7 @@ func (h *Handler) seedAttestationBlobs(ctx context.Context, repoRef string, m pa
 		if err != nil {
 			return fmt.Errorf("fetch staged blob %s: %w", b.digest, err)
 		}
-		if err := h.outcome.Pusher.PushBlob(ctx, raw, b.mediaType, repoRef); err != nil {
+		if err := t.Pusher.PushBlob(ctx, raw, b.mediaType, repoRef); err != nil {
 			return fmt.Errorf("push blob %s: %w", b.digest, err)
 		}
 	}
@@ -107,7 +108,7 @@ func kindName(k manifestKind) string {
 // so two concurrent pushes sharing a base layer can have one delete a blob the
 // other still needs (spurious 500, not a security issue). Needs content-addressed
 // ref-counting or TTL-GC instead of per-push deletion. Tracked for hardening.
-func (h *Handler) handleManifest(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) handleManifest(w http.ResponseWriter, r *http.Request, t *tenant.Tenant) {
 	ctx := r.Context()
 
 	// Parse repo and ref from path: /v2/<repo>/manifests/<ref>
@@ -118,7 +119,7 @@ func (h *Handler) handleManifest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get validated identity
-	identity, ok := h.validatedIdentity(r)
+	identity, ok := h.validatedIdentity(r, t)
 	if !ok {
 		w.Header().Set("WWW-Authenticate", `Bearer realm="merlin",service="registry"`)
 		w.WriteHeader(http.StatusUnauthorized)
@@ -147,7 +148,7 @@ func (h *Handler) handleManifest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if kind == kindIndex || kind == kindAttestation {
-		h.forwardManifest(w, ctx, repo, ref, manifestBytes, manifest, kind)
+		h.forwardManifest(w, ctx, t, repo, ref, manifestBytes, manifest, kind)
 		return
 	}
 
@@ -188,7 +189,7 @@ func (h *Handler) handleManifest(w http.ResponseWriter, r *http.Request) {
 	// Build gate request. The target must address ACR the same way the client
 	// addressed Merlin: by digest (buildx pushes the image manifest by digest) or
 	// by tag. A digest ref needs "@", not ":", or the reference is unparseable.
-	target := targetRef(h.registry, repo, ref)
+	target := targetRef(t.Registry, repo, ref)
 	req := router.GateRequest{
 		Source:   "docker",
 		Identity: identity.Subject,
@@ -225,7 +226,7 @@ func (h *Handler) handleManifest(w http.ResponseWriter, r *http.Request) {
 	// 500/502 by Apply. An ACR push failure surfaces as a returned error (502);
 	// the Decision still carries the right status to render. Log the infra error so
 	// an operator can diagnose a 500/502 (the client only sees a terse summary).
-	d, applyErr := h.outcome.Apply(ctx, req, res, gateErr)
+	d, applyErr := h.outcome.Apply(ctx, t.Pusher, req, res, gateErr)
 	if applyErr != nil {
 		log.Printf("manifest %s gate outcome infra error: %v", target, applyErr)
 	}
