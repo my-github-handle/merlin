@@ -63,6 +63,11 @@ type ServerConfig struct {
 	ExternalURL    string `yaml:"external_url"`
 	MaxUploadBytes int64  `yaml:"max_upload_bytes"`
 	GateTimeout    string `yaml:"gate_timeout"`
+	// ShutdownTimeout bounds how long the servers drain in-flight requests on
+	// SIGTERM before backends are closed. It should exceed gate_timeout so a push
+	// already in the gate can finish, and stay under the pod terminationGracePeriod
+	// so Kubernetes does not SIGKILL mid-drain.
+	ShutdownTimeout string `yaml:"shutdown_timeout"`
 }
 
 // Load reads a YAML config file, applies defaults, and validates required fields.
@@ -114,6 +119,11 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Server.GateTimeout == "" {
 		c.Server.GateTimeout = "5m"
+	}
+	if c.Server.ShutdownTimeout == "" {
+		// Slightly above gate_timeout so a push already in the gate can complete its
+		// drain. Pair with a pod terminationGracePeriodSeconds >= this value.
+		c.Server.ShutdownTimeout = "6m"
 	}
 	if c.Auth.Service == "" {
 		c.Auth.Service = "merlin"

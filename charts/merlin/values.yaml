@@ -72,7 +72,15 @@ merlin:
     dashboardAddr: ":8080"   # dashboard on by default; set "off" to disable
     maxUploadBytes: 2147483648
     gateTimeout: 5m
+    # Drain window for in-flight pushes on SIGTERM/rolling restart. Keep it above
+    # gateTimeout (so a push in the gate can finish) and at or below
+    # terminationGracePeriodSeconds below (so the kubelet does not SIGKILL mid-drain).
+    shutdownTimeout: 6m
     externalURL: ""
+# Pod shutdown grace: must be >= server.shutdownTimeout (6m = 360s) so the kubelet
+# waits for Merlin to drain in-flight pushes before SIGKILL. The default 30s would
+# kill the pod mid-push on every rolling restart.
+terminationGracePeriodSeconds: 375
 # Valkey via Hyperspike valkey-operator (hyperspike.io/v1 Valkey CR).
 valkey:
   enabled: true

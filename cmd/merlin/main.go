@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/merlin-gate/merlin/internal/app"
 	"github.com/merlin-gate/merlin/internal/config"
@@ -46,6 +47,13 @@ func main() {
 		cleanup = func() {}
 	}
 
+	// Drain budget for in-flight pushes on SIGTERM. Parsed before serving so a bad
+	// value fails fast at startup rather than at shutdown.
+	shutdownTimeout, err := time.ParseDuration(cfg.Server.ShutdownTimeout)
+	if err != nil {
+		log.Fatalf("parse shutdown_timeout %q: %v", cfg.Server.ShutdownTimeout, err)
+	}
+
 	// Graceful shutdown
 	done := make(chan os.Signal, 1)
 	signal.Notify(done, syscall.SIGINT, syscall.SIGTERM)
@@ -75,6 +83,25 @@ func main() {
 	}
 
 	<-done
-	log.Println("Shutting down gracefully...")
+	log.Printf("Shutting down gracefully (drain up to %s)...", shutdownTimeout)
+
+	// Drain in-flight requests BEFORE closing backends: a layer upload or a manifest
+	// PUT sitting in the gate keeps using Valkey/Blob/ACR, so cleanup() must run only
+	// after Shutdown returns. Shutdown stops accepting new connections and waits for
+	// active handlers to finish (or the timeout to elapse).
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancelShutdown()
+	if err := mainSrv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("main server shutdown: %v", err)
+	}
+	if err := metricsSrv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("metrics server shutdown: %v", err)
+	}
+	if dashboardSrv != nil {
+		if err := dashboardSrv.Shutdown(shutdownCtx); err != nil {
+			log.Printf("dashboard server shutdown: %v", err)
+		}
+	}
+
 	cleanup()
 }

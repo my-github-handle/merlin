@@ -60,6 +60,46 @@ base_image:
 	}
 }
 
+func TestLoadAppliesShutdownTimeoutDefault(t *testing.T) {
+	p := writeTemp(t, `
+acr:
+  registry: myreg.azurecr.io
+auth:
+  issuer: https://issuer
+  audience: api://merlin
+base_image:
+  allowed_ids: [rhel]
+`)
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Server.ShutdownTimeout != "6m" {
+		t.Errorf("default shutdown_timeout = %q, want 6m", cfg.Server.ShutdownTimeout)
+	}
+}
+
+func TestLoadKeepsExplicitShutdownTimeout(t *testing.T) {
+	p := writeTemp(t, `
+acr:
+  registry: myreg.azurecr.io
+auth:
+  issuer: https://issuer
+  audience: api://merlin
+base_image:
+  allowed_ids: [rhel]
+server:
+  shutdown_timeout: 90s
+`)
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Server.ShutdownTimeout != "90s" {
+		t.Errorf("shutdown_timeout = %q, want 90s", cfg.Server.ShutdownTimeout)
+	}
+}
+
 func TestLoadRejectsMissingACRRegistry(t *testing.T) {
 	p := writeTemp(t, `
 auth:
