@@ -157,7 +157,7 @@ The following values MUST be set in your production values file:
 | `image.tag` | Image tag (git SHA) | `abc1234` |
 | `serviceAccount.workloadIdentityClientID` | Entra app/MI client ID | `12345678-1234-1234-1234-123456789abc` |
 | `ingress.className` | Ingress controller class | `nginx` |
-| `ingress.host` | Merlin registry hostname | `merlin.example.com` |
+| `ingress.host` | Dashboard ingress host / fallback when `ingress.dashboardHost` is unset — NOT the registry push host (those are per-tenant: `<prefix>.<baseDomain>`) | `merlin-dashboard.example.com` |
 | `ingress.tlsSecretName` | TLS secret name | `merlin-tls` |
 | `externalSecrets.secretStoreRef.name` | ESO SecretStore name | `azure-keyvault-store` |
 | `externalSecrets.data` | Secret mappings | `[{secretKey: clickhouse-password, remoteKey: merlin-ch-pass}]` |
