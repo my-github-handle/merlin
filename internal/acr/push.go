@@ -39,6 +39,25 @@ func NewACRPusherWithCredential(registry string) (Pusher, error) {
 	return &acrPusher{registry: registry, auth: &acrCredAuthenticator{registry: registry, cred: cred}}, nil
 }
 
+// NewACRPusherWithClientID builds a Pusher authenticated by a specific Azure
+// workload identity (federated, secretless), selected by clientID. Each tenant
+// prefix maps to its own client ID so a dev push cannot reach a prod ACR.
+func NewACRPusherWithClientID(registry, clientID string) (Pusher, error) {
+	if registry == "" {
+		return nil, fmt.Errorf("acr: registry is required")
+	}
+	if clientID == "" {
+		return nil, fmt.Errorf("acr: client id is required")
+	}
+	cred, err := azidentity.NewWorkloadIdentityCredential(&azidentity.WorkloadIdentityCredentialOptions{
+		ClientID: clientID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("acr workload identity credential (client %s): %w", clientID, err)
+	}
+	return &acrPusher{registry: registry, auth: &acrCredAuthenticator{registry: registry, cred: cred}}, nil
+}
+
 func (p *acrPusher) Push(ctx context.Context, ociPath, target string) error {
 	idx, err := layout.ImageIndexFromPath(ociPath)
 	if err != nil {
