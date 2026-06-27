@@ -41,6 +41,7 @@ func (s *staticResolver) ForHost(host string) (*Tenant, error) {
 // multi-label prefix.
 func PrefixFromHost(host, baseDomain string) string {
 	host = strings.ToLower(host)
+	baseDomain = strings.ToLower(baseDomain)
 	if i := strings.IndexByte(host, ':'); i != -1 {
 		host = host[:i]
 	}

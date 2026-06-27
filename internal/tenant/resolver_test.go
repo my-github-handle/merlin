@@ -10,6 +10,7 @@ func TestPrefixFromHost(t *testing.T) {
 		{"c3dev.c3ci.cloud", "c3ci.cloud", "c3dev"},
 		{"c3prod.c3ci.cloud:443", "c3ci.cloud", "c3prod"},
 		{"C3DEV.C3CI.CLOUD", "c3ci.cloud", "c3dev"},
+		{"x.c3ci.cloud", "C3CI.CLOUD", "x"},
 		{"c3ci.cloud", "c3ci.cloud", ""},       // bare base domain, no prefix
 		{"evil.example.com", "c3ci.cloud", ""}, // wrong base domain
 		{"a.b.c3ci.cloud", "c3ci.cloud", ""},   // multi-label prefix not allowed
