@@ -12,6 +12,7 @@ import (
 type Config struct {
 	Trivy     TrivyConfig     `yaml:"trivy"`
 	BaseImage BaseImageConfig `yaml:"base_image"`
+	ImageAge  ImageAgeConfig  `yaml:"image_age"`
 	ACR       ACRConfig       `yaml:"acr"`
 	Tenants   []TenantConfig  `yaml:"tenants"`
 	Auth      AuthConfig      `yaml:"auth"`
@@ -26,6 +27,13 @@ type TrivyConfig struct {
 
 type BaseImageConfig struct {
 	AllowedIDs []string `yaml:"allowed_ids"`
+}
+
+// ImageAgeConfig configures the image-age gate policy. Enabled is a pointer so an
+// unset value can inherit the default (true) rather than defaulting to false.
+type ImageAgeConfig struct {
+	Enabled       *bool `yaml:"enabled"`
+	ThresholdDays int   `yaml:"threshold_days"`
 }
 
 type ACRConfig struct {
@@ -44,6 +52,7 @@ type TenantConfig struct {
 	Prefix      string           `yaml:"prefix"`
 	ACRClientID string           `yaml:"acr_client_id"`
 	Auth        TenantAuthConfig `yaml:"auth"`
+	ImageAge    *ImageAgeConfig  `yaml:"image_age"`
 }
 
 // Registry substitutes this tenant's prefix into the ACR host template.
@@ -110,6 +119,13 @@ func Load(path string) (Config, error) {
 func (c *Config) applyDefaults() {
 	if c.Trivy.SeverityThreshold == "" {
 		c.Trivy.SeverityThreshold = "CRITICAL"
+	}
+	if c.ImageAge.ThresholdDays == 0 {
+		c.ImageAge.ThresholdDays = 60
+	}
+	if c.ImageAge.Enabled == nil {
+		enabled := true
+		c.ImageAge.Enabled = &enabled
 	}
 	if c.Staging.ScanPoolSize == 0 {
 		c.Staging.ScanPoolSize = 4
@@ -187,6 +203,14 @@ func (c *Config) validate() error {
 	}
 	if !validSeverities[c.Trivy.SeverityThreshold] {
 		return fmt.Errorf("config: trivy.severity_threshold %q is not a valid severity (UNKNOWN, LOW, MEDIUM, HIGH, CRITICAL)", c.Trivy.SeverityThreshold)
+	}
+	if c.ImageAge.ThresholdDays < 0 {
+		return fmt.Errorf("config: image_age.threshold_days must be >= 0")
+	}
+	for i, t := range c.Tenants {
+		if t.ImageAge != nil && t.ImageAge.ThresholdDays < 0 {
+			return fmt.Errorf("config: tenants[%d] (%s) image_age.threshold_days must be >= 0", i, t.Prefix)
+		}
 	}
 	return nil
 }

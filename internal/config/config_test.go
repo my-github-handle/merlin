@@ -410,3 +410,48 @@ func TestDashboardAddrParsed(t *testing.T) {
 		t.Errorf("RetentionDays = %d, want 7", cfg.Audit.RetentionDays)
 	}
 }
+
+func TestImageAgeDefaults(t *testing.T) {
+	p := writeTemp(t, `
+acr:
+  registry_template: "{prefix}acr.azurecr.io"
+  base_domain: c3ci.cloud
+tenants:
+  - { prefix: c3dev, acr_client_id: cid, auth: { issuer: i, audience: a, jwks_url: j, tenant_id: t } }
+auth: { registry_token_secret: shh }
+base_image:
+  allowed_ids: [rhel]
+`)
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.ImageAge.ThresholdDays != 60 {
+		t.Fatalf("default threshold = %d, want 60", cfg.ImageAge.ThresholdDays)
+	}
+	if cfg.ImageAge.Enabled == nil || !*cfg.ImageAge.Enabled {
+		t.Fatalf("default enabled = %v, want true", cfg.ImageAge.Enabled)
+	}
+}
+
+func TestImageAgeNegativeThresholdRejected(t *testing.T) {
+	p := writeTemp(t, `
+acr:
+  registry_template: "{prefix}acr.azurecr.io"
+  base_domain: c3ci.cloud
+tenants:
+  - { prefix: c3dev, acr_client_id: cid, auth: { issuer: i, audience: a, jwks_url: j, tenant_id: t } }
+auth: { registry_token_secret: shh }
+base_image:
+  allowed_ids: [rhel]
+image_age:
+  threshold_days: -1
+`)
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("expected validation error for negative threshold")
+	}
+	if !strings.Contains(err.Error(), "threshold_days") {
+		t.Errorf("expected threshold_days in error, got: %v", err)
+	}
+}
