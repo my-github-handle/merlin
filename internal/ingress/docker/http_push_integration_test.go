@@ -4,13 +4,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/merlin-gate/merlin/internal/acr"
 	"github.com/merlin-gate/merlin/internal/policies/baseimage"
+	"github.com/merlin-gate/merlin/internal/policies/imageage"
 	"github.com/merlin-gate/merlin/internal/policies/trivy"
 	"github.com/merlin-gate/merlin/internal/policy"
 	"github.com/merlin-gate/merlin/internal/router"
@@ -29,8 +32,10 @@ func TestHTTPPushUBIGood(t *testing.T) {
 	// Upload the layer blob
 	layerDigest := httpUploadBlob(t, h, repo, layer)
 
-	// Upload a config blob (can be same as layer for this test)
-	configDigest := httpUploadBlob(t, h, repo, layer)
+	// Upload a config blob with a recent created timestamp
+	created := time.Now().Add(-7 * 24 * time.Hour).UTC()
+	configBlob := configBlobWithCreated(created)
+	configDigest := httpUploadBlob(t, h, repo, configBlob)
 
 	// Build a Docker V2 manifest JSON
 	manifest := map[string]interface{}{
@@ -75,7 +80,9 @@ func TestHTTPPushCriticalCVE(t *testing.T) {
 	ref := "v1"
 
 	layerDigest := httpUploadBlob(t, h, repo, layer)
-	configDigest := httpUploadBlob(t, h, repo, layer)
+	created := time.Now().Add(-7 * 24 * time.Hour).UTC()
+	configBlob := configBlobWithCreated(created)
+	configDigest := httpUploadBlob(t, h, repo, configBlob)
 
 	manifest := map[string]interface{}{
 		"schemaVersion": 2,
@@ -107,7 +114,9 @@ func TestHTTPPushAlpineRejected(t *testing.T) {
 	ref := "v1"
 
 	layerDigest := httpUploadBlob(t, h, repo, layer)
-	configDigest := httpUploadBlob(t, h, repo, layer)
+	created := time.Now().Add(-7 * 24 * time.Hour).UTC()
+	configBlob := configBlobWithCreated(created)
+	configDigest := httpUploadBlob(t, h, repo, configBlob)
 
 	manifest := map[string]interface{}{
 		"schemaVersion": 2,
@@ -181,7 +190,9 @@ func TestHTTPPushSaturated(t *testing.T) {
 
 	// Upload the first layer
 	layerDigest := httpUploadBlob(t, h, "app1", layer)
-	configDigest := httpUploadBlob(t, h, "app1", layer)
+	created := time.Now().Add(-7 * 24 * time.Hour).UTC()
+	configBlob := configBlobWithCreated(created)
+	configDigest := httpUploadBlob(t, h, "app1", configBlob)
 
 	manifest := map[string]interface{}{
 		"schemaVersion": 2,
@@ -205,7 +216,8 @@ func TestHTTPPushSaturated(t *testing.T) {
 	// Now attempt a second manifest PUT with the saturated pool, using a short timeout
 	layer2 := layerWithOSID(t, "rhel")
 	digest2 := httpUploadBlob(t, h, "app2", layer2)
-	configDigest2 := httpUploadBlob(t, h, "app2", layer2)
+	configBlob2 := configBlobWithCreated(created)
+	configDigest2 := httpUploadBlob(t, h, "app2", configBlob2)
 
 	manifest2 := map[string]interface{}{
 		"schemaVersion": 2,
@@ -246,7 +258,9 @@ func buildHTTPHandler(t *testing.T, trivyReport trivy.Report, poolSize int) (*Ha
 	})
 	tp := trivy.New(staticRunner{report: trivyReport}, "CRITICAL")
 	bp := baseimage.New([]string{"rhel", "wolfi", "chainguard"})
-	rt := router.New(policy.NewEngine(tp, bp))
+	// Add image age policy with 60-day threshold for tests
+	ap := imageage.New(imageage.Rule{Enabled: true, ThresholdDays: 60}, nil)
+	rt := router.New(policy.NewEngine(tp, bp, ap))
 	pool := router.NewPool(rt, poolSize)
 	fp := &acr.FakePusher{}
 	o := &Outcome{ReportBaseURL: "/reports"}
@@ -300,3 +314,117 @@ func httpUploadBlob(t *testing.T, h *Handler, repo string, blob []byte) string {
 }
 
 // blockingPolicy is reused from manifest_flow_test.go (defined there).
+
+// configBlobWithCreated builds an image config JSON blob with the given created timestamp.
+func configBlobWithCreated(created time.Time) []byte {
+	cfg := map[string]interface{}{
+		"created":      created.Format(time.RFC3339),
+		"architecture": "amd64",
+		"os":           "linux",
+	}
+	b, _ := json.Marshal(cfg)
+	return b
+}
+
+// readBody is a test helper to read and return the response body as a string.
+func readBody(t *testing.T, resp *http.Response) string {
+	t.Helper()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
+	return string(b)
+}
+
+// TestPushRejectsOldImage verifies that an image with a 100-day-old created timestamp is rejected with 400.
+func TestPushRejectsOldImage(t *testing.T) {
+	layer := layerWithOSID(t, "rhel")
+	h, fp := buildHTTPHandler(t, trivy.Report{}, 2)
+
+	repo := "oldapp"
+	ref := "v1"
+
+	// Upload the layer blob
+	layerDigest := httpUploadBlob(t, h, repo, layer)
+
+	// Upload a config blob with a 100-day-old created timestamp
+	created := time.Now().Add(-100 * 24 * time.Hour).UTC()
+	configBlob := configBlobWithCreated(created)
+	configDigest := httpUploadBlob(t, h, repo, configBlob)
+
+	// Build a Docker V2 manifest JSON
+	manifest := map[string]interface{}{
+		"schemaVersion": 2,
+		"config": map[string]interface{}{
+			"digest": configDigest,
+		},
+		"layers": []map[string]interface{}{
+			{"digest": layerDigest},
+		},
+	}
+	manifestBytes, _ := json.Marshal(manifest)
+
+	// PUT the manifest
+	req := httptest.NewRequest(http.MethodPut, "/v2/"+repo+"/manifests/"+ref, bytes.NewReader(manifestBytes))
+	req.Host = testTenantHost
+	req.Header.Set("Authorization", "Bearer good")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "image age") || !strings.Contains(body, "exceeds max") {
+		t.Fatalf("expected age reject reason, got %q", body)
+	}
+	if len(fp.Pushed) != 0 {
+		t.Error("must not forward a rejected image with old age")
+	}
+}
+
+// TestPushFreshImageSetsAgeHeader verifies that a fresh image (5 days old) passes and sets the age header.
+func TestPushFreshImageSetsAgeHeader(t *testing.T) {
+	layer := layerWithOSID(t, "rhel")
+	h, fp := buildHTTPHandler(t, trivy.Report{}, 2)
+
+	repo := "freshapp"
+	ref := "v1"
+
+	// Upload the layer blob
+	layerDigest := httpUploadBlob(t, h, repo, layer)
+
+	// Upload a config blob with a 5-day-old created timestamp
+	created := time.Now().Add(-5 * 24 * time.Hour).UTC()
+	configBlob := configBlobWithCreated(created)
+	configDigest := httpUploadBlob(t, h, repo, configBlob)
+
+	// Build a Docker V2 manifest JSON
+	manifest := map[string]interface{}{
+		"schemaVersion": 2,
+		"config": map[string]interface{}{
+			"digest": configDigest,
+		},
+		"layers": []map[string]interface{}{
+			{"digest": layerDigest},
+		},
+	}
+	manifestBytes, _ := json.Marshal(manifest)
+
+	// PUT the manifest
+	req := httptest.NewRequest(http.MethodPut, "/v2/"+repo+"/manifests/"+ref, bytes.NewReader(manifestBytes))
+	req.Host = testTenantHost
+	req.Header.Set("Authorization", "Bearer good")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-Merlin-Image-Age-Days"); got != "5" {
+		t.Fatalf("age header = %q, want \"5\"", got)
+	}
+	if len(fp.Pushed) != 1 {
+		t.Errorf("expected ACR push, got %d pushes", len(fp.Pushed))
+	}
+}

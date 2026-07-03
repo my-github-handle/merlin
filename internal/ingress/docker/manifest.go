@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -189,6 +190,7 @@ func (h *Handler) handleManifest(w http.ResponseWriter, r *http.Request, t *tena
 	// Build gate request. The target must address ACR the same way the client
 	// addressed Merlin: by digest (buildx pushes the image manifest by digest) or
 	// by tag. A digest ref needs "@", not ":", or the reference is unparseable.
+	img.Prefix = t.Prefix
 	target := targetRef(t.Registry, repo, ref)
 	req := router.GateRequest{
 		Source:   "docker",
@@ -232,6 +234,11 @@ func (h *Handler) handleManifest(w http.ResponseWriter, r *http.Request, t *tena
 	}
 	if d.ReportURL != "" {
 		w.Header().Set("X-Merlin-Scan-Report-URL", d.ReportURL)
+	}
+	// Surface image age to raw-HTTP clients (CI) without a second call. Omitted
+	// when age is unknown/disabled (absent header == age not determined).
+	if res.Age != nil && res.Age.Known {
+		w.Header().Set("X-Merlin-Image-Age-Days", strconv.Itoa(res.Age.AgeDays))
 	}
 	code := d.StatusCode
 	if code == 0 {

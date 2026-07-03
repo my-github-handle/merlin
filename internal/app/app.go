@@ -22,6 +22,7 @@ import (
 	dockeringress "github.com/merlin-gate/merlin/internal/ingress/docker"
 	"github.com/merlin-gate/merlin/internal/observability"
 	"github.com/merlin-gate/merlin/internal/policies/baseimage"
+	"github.com/merlin-gate/merlin/internal/policies/imageage"
 	"github.com/merlin-gate/merlin/internal/policies/trivy"
 	"github.com/merlin-gate/merlin/internal/policy"
 	"github.com/merlin-gate/merlin/internal/router"
@@ -48,7 +49,9 @@ func Build(cfg config.Config) (*http.Server, *http.Server, error) {
 	// Policies + engine.
 	trivyPolicy := trivy.New(trivy.NewExecRunner("trivy"), cfg.Trivy.SeverityThreshold)
 	basePolicy := baseimage.New(cfg.BaseImage.AllowedIDs)
-	engine := policy.NewEngine(trivyPolicy, basePolicy)
+	def, per := imageAgeRules(cfg)
+	agePolicy := imageage.New(def, per)
+	engine := policy.NewEngine(trivyPolicy, basePolicy, agePolicy)
 
 	// Auth — stub keyfunc for hermetic unit testing. See TODO(production / BuildWithBackends)
 	// for production wiring requirements.
@@ -221,7 +224,9 @@ func BuildWithBackends(ctx context.Context, cfg config.Config) (*http.Server, *h
 	// Policies + engine
 	trivyPolicy := trivy.New(trivy.NewExecRunner("trivy"), cfg.Trivy.SeverityThreshold)
 	basePolicy := baseimage.New(cfg.BaseImage.AllowedIDs)
-	engine := policy.NewEngine(trivyPolicy, basePolicy)
+	def, per := imageAgeRules(cfg)
+	agePolicy := imageage.New(def, per)
+	engine := policy.NewEngine(trivyPolicy, basePolicy, agePolicy)
 
 	// Router + pool
 	rt := router.New(engine)
@@ -292,4 +297,28 @@ func generatePushID() string {
 		panic(fmt.Sprintf("crypto/rand failed: %v", err))
 	}
 	return hex.EncodeToString(b)
+}
+
+// imageAgeRules derives the default age rule and the per-tenant overrides from
+// config. A nil per-tenant ImageAge inherits the deployment default.
+func imageAgeRules(cfg config.Config) (imageage.Rule, map[string]imageage.Rule) {
+	def := imageage.Rule{
+		Enabled:       cfg.ImageAge.Enabled == nil || *cfg.ImageAge.Enabled,
+		ThresholdDays: cfg.ImageAge.ThresholdDays,
+	}
+	per := make(map[string]imageage.Rule, len(cfg.Tenants))
+	for _, tc := range cfg.Tenants {
+		if tc.ImageAge == nil {
+			continue
+		}
+		r := def // start from the default, override present fields
+		if tc.ImageAge.Enabled != nil {
+			r.Enabled = *tc.ImageAge.Enabled
+		}
+		if tc.ImageAge.ThresholdDays != 0 {
+			r.ThresholdDays = tc.ImageAge.ThresholdDays
+		}
+		per[tc.Prefix] = r
+	}
+	return def, per
 }
