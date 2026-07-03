@@ -53,6 +53,10 @@ type DecisionHeader struct {
 	BaseImageID    string
 	TrivyDBVersion string
 	Ts             time.Time
+
+	ImageCreated          time.Time
+	ImageAgeDays          uint16
+	ImageAgeThresholdDays uint16
 }
 
 // ImageRow is one gated image (one push) with its severity tallies.

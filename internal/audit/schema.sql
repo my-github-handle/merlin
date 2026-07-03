@@ -10,7 +10,10 @@ CREATE TABLE IF NOT EXISTS gate_decisions (
     reasons          Array(String),
     base_image_id    String,
     trivy_db_version String,
-    duration_ms      UInt32
+    duration_ms      UInt32,
+    image_created            DateTime64(3) DEFAULT 0,
+    image_age_days           UInt16 DEFAULT 0,
+    image_age_threshold_days UInt16 DEFAULT 0
 ) ENGINE = MergeTree
 ORDER BY (image_digest, ts);
 
@@ -33,3 +36,8 @@ ORDER BY (cve_id, severity, ts);
 ALTER TABLE vulnerability_findings ADD INDEX IF NOT EXISTS idx_pkg (pkg_name) TYPE bloom_filter GRANULARITY 4;
 ALTER TABLE vulnerability_findings ADD INDEX IF NOT EXISTS idx_identity (identity) TYPE bloom_filter GRANULARITY 4;
 ALTER TABLE gate_decisions ADD INDEX IF NOT EXISTS idx_identity (identity) TYPE bloom_filter GRANULARITY 4;
+
+-- Online ALTER for existing deployments: add age columns.
+ALTER TABLE gate_decisions ADD COLUMN IF NOT EXISTS image_created DateTime64(3) DEFAULT 0;
+ALTER TABLE gate_decisions ADD COLUMN IF NOT EXISTS image_age_days UInt16 DEFAULT 0;
+ALTER TABLE gate_decisions ADD COLUMN IF NOT EXISTS image_age_threshold_days UInt16 DEFAULT 0;

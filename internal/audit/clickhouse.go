@@ -114,10 +114,11 @@ func splitStatements(sql string) []string {
 func (c *clickhouseWriter) WriteDecision(ctx context.Context, d Decision) error {
 	return c.conn.Exec(ctx, `
 INSERT INTO gate_decisions
-(ts, push_id, image_repo, image_tag, image_digest, identity, passed, failed_policies, reasons, base_image_id, trivy_db_version, duration_ms)
-VALUES (now64(3), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+(ts, push_id, image_repo, image_tag, image_digest, identity, passed, failed_policies, reasons, base_image_id, trivy_db_version, duration_ms, image_created, image_age_days, image_age_threshold_days)
+VALUES (now64(3), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		d.PushID, d.Repo, d.Tag, d.Digest, d.Identity, d.Passed,
-		d.FailedPolicies, d.Reasons, d.BaseImageID, d.TrivyDBVersion, d.DurationMS)
+		d.FailedPolicies, d.Reasons, d.BaseImageID, d.TrivyDBVersion, d.DurationMS,
+		d.ImageCreated, d.ImageAgeDays, d.ImageAgeThresholdDays)
 }
 
 func (c *clickhouseWriter) WriteFindings(ctx context.Context, d Decision, findings []policy.Finding) error {

@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/merlin-gate/merlin/internal/policy"
 )
@@ -40,5 +41,40 @@ func TestClickHouseReverseLookups(t *testing.T) {
 	decs, err := r.DecisionsByDigest(ctx, "sha256:abc") // B
 	if err != nil || len(decs) == 0 {
 		t.Errorf("DecisionsByDigest: decs=%v err=%v", decs, err)
+	}
+}
+
+func TestDecisionAgeRoundTrip(t *testing.T) {
+	dsn := os.Getenv("MERLIN_CLICKHOUSE_DSN")
+	if dsn == "" {
+		t.Skip("set MERLIN_CLICKHOUSE_DSN to run")
+	}
+	w, err := NewClickHouseWriter(dsn, 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.(*clickhouseWriter).Close()
+
+	ctx := context.Background()
+	created := time.Date(2026, 4, 20, 10, 31, 0, 0, time.UTC)
+	d := Decision{
+		PushID: "00000000-0000-0000-0000-000000000002", Repo: "app", Tag: "v1", Digest: "sha256:abc",
+		Identity: "sp", Passed: false, FailedPolicies: []string{"imageage"},
+		Reasons:               []string{"rejected: image age 74d exceeds max 60d"},
+		ImageCreated:          created,
+		ImageAgeDays:          74,
+		ImageAgeThresholdDays: 60,
+	}
+	if err := w.WriteDecision(ctx, d); err != nil {
+		t.Fatalf("WriteDecision: %v", err)
+	}
+
+	r := &Reader{conn: w.(*clickhouseWriter).conn}
+	hdr, err := r.DecisionHeaderByPush(ctx, d.PushID)
+	if err != nil {
+		t.Fatalf("DecisionHeaderByPush: %v", err)
+	}
+	if !hdr.ImageCreated.Equal(created) || hdr.ImageAgeDays != 74 || hdr.ImageAgeThresholdDays != 60 {
+		t.Fatalf("age not round-tripped: created=%v days=%d threshold=%d", hdr.ImageCreated, hdr.ImageAgeDays, hdr.ImageAgeThresholdDays)
 	}
 }
