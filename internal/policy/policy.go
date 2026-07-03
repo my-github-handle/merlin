@@ -1,7 +1,10 @@
 // Package policy defines the extensible gate engine and its Policy interface.
 package policy
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // StagedImage is the assembled image a policy evaluates.
 type StagedImage struct {
@@ -10,6 +13,12 @@ type StagedImage struct {
 	Digest  string
 	FSPath  string // assembled root filesystem directory (for os-release reads)
 	OCIPath string // on-disk OCI layout (for Trivy)
+	// Created is the image config's "created" timestamp (RFC3339). Zero value means
+	// the timestamp could not be determined; the image-age policy fails closed on it.
+	Created time.Time
+	// Prefix is the resolved tenant prefix (set by the ingress handler). The image-age
+	// policy uses it to select the per-tenant age rule.
+	Prefix string
 }
 
 // Verdict is a single policy's decision. Zero value is a fail (Passed=false).
