@@ -6,6 +6,18 @@ import (
 	"time"
 )
 
+// AgeInfo is the image-age policy's structured result, carried back on the
+// Verdict and surfaced on Result so the outcome/report/audit can record it.
+// Known=false means the image's created timestamp could not be determined
+// (Created is then the zero value and Compliant is false — fail closed).
+type AgeInfo struct {
+	Known         bool
+	Created       time.Time
+	AgeDays       int
+	ThresholdDays int
+	Compliant     bool
+}
+
 // StagedImage is the assembled image a policy evaluates.
 type StagedImage struct {
 	Repo    string
@@ -29,6 +41,7 @@ type Verdict struct {
 	Reasons          []string
 	Findings         []Finding
 	ScannerDBVersion string
+	Age              *AgeInfo // set by the image-age policy; nil for other policies
 }
 
 // Finding is one vulnerability detected during scanning.
@@ -52,4 +65,5 @@ type Result struct {
 	Verdicts       map[string]Verdict
 	Findings       []Finding
 	TrivyDBVersion string
+	Age            *AgeInfo // nil when the age policy is disabled/absent
 }

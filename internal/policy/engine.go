@@ -38,6 +38,9 @@ func (e *Engine) Run(ctx context.Context, img StagedImage) (Result, error) {
 		if v.ScannerDBVersion != "" {
 			res.TrivyDBVersion = v.ScannerDBVersion
 		}
+		if v.Age != nil {
+			res.Age = v.Age
+		}
 	}
 	if infraErr != nil {
 		res.Passed = false
