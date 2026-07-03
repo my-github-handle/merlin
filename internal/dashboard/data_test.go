@@ -124,6 +124,7 @@ func TestReportViewModelWithFindings(t *testing.T) {
 		ImageCreated:          time.Date(2026, 4, 20, 10, 31, 0, 0, time.UTC),
 		ImageAgeDays:          74,
 		ImageAgeThresholdDays: 60,
+		ImageAgeKnown:         true,
 	}
 	findings := []policy.Finding{
 		{CVE: "CVE-2024-2", Severity: "HIGH", Pkg: "pkg-b", Version: "1.0", FixedVersion: "1.1"},

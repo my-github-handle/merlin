@@ -52,7 +52,7 @@ func (p *Policy) Evaluate(_ context.Context, img policy.StagedImage) (policy.Ver
 	if img.Created.IsZero() {
 		return policy.Verdict{
 			Passed:  false,
-			Reasons: []string{"rejected: could not determine image age (image config is missing a readable created timestamp)"},
+			Reasons: []string{"could not determine image age (image config is missing a readable created timestamp)"},
 			Age:     &policy.AgeInfo{Known: false, ThresholdDays: rule.ThresholdDays, Compliant: false},
 		}, nil
 	}
@@ -72,7 +72,7 @@ func (p *Policy) Evaluate(_ context.Context, img policy.StagedImage) (policy.Ver
 	return policy.Verdict{
 		Passed: false,
 		Reasons: []string{fmt.Sprintf(
-			"rejected: image age %dd exceeds max %dd (created %s)",
+			"image age %dd exceeds max %dd (created %s)",
 			age, rule.ThresholdDays, img.Created.Format(time.RFC3339))},
 		Age: info,
 	}, nil

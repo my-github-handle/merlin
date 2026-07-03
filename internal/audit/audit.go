@@ -24,10 +24,12 @@ type Decision struct {
 	DurationMS     uint32
 
 	// Image-age policy result. ImageCreated is zero when age was not determined /
-	// the age policy was disabled (readers treat zero as "unknown").
+	// the age policy was disabled. ImageAgeKnown explicitly tracks whether age was
+	// determined (readers key off this instead of IsZero() to avoid DateTime64 clamping).
 	ImageCreated          time.Time
 	ImageAgeDays          uint16
 	ImageAgeThresholdDays uint16
+	ImageAgeKnown         bool
 }
 
 // Writer persists decisions and findings (e.g. to ClickHouse).

@@ -107,6 +107,7 @@ func (o *Outcome) recordDecision(ctx context.Context, pushID string, req router.
 		decision.ImageCreated = res.Age.Created
 		decision.ImageAgeDays = clampUint16(res.Age.AgeDays)
 		decision.ImageAgeThresholdDays = clampUint16(res.Age.ThresholdDays)
+		decision.ImageAgeKnown = true
 	}
 
 	o.Recorder.Record(ctx, decision, res.Findings)

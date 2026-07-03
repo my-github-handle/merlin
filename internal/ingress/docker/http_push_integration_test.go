@@ -378,6 +378,9 @@ func TestPushRejectsOldImage(t *testing.T) {
 	if !strings.Contains(body, "image age") || !strings.Contains(body, "exceeds max") {
 		t.Fatalf("expected age reject reason, got %q", body)
 	}
+	if strings.Contains(body, "rejected: rejected:") {
+		t.Fatalf("body has double 'rejected:' prefix: %q", body)
+	}
 	if len(fp.Pushed) != 0 {
 		t.Error("must not forward a rejected image with old age")
 	}

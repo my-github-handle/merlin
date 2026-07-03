@@ -56,25 +56,61 @@ func TestDecisionAgeRoundTrip(t *testing.T) {
 	defer w.(*clickhouseWriter).Close()
 
 	ctx := context.Background()
-	created := time.Date(2026, 4, 20, 10, 31, 0, 0, time.UTC)
-	d := Decision{
-		PushID: "00000000-0000-0000-0000-000000000002", Repo: "app", Tag: "v1", Digest: "sha256:abc",
-		Identity: "sp", Passed: false, FailedPolicies: []string{"imageage"},
-		Reasons:               []string{"rejected: image age 74d exceeds max 60d"},
-		ImageCreated:          created,
-		ImageAgeDays:          74,
-		ImageAgeThresholdDays: 60,
-	}
-	if err := w.WriteDecision(ctx, d); err != nil {
-		t.Fatalf("WriteDecision: %v", err)
-	}
 
-	r := &Reader{conn: w.(*clickhouseWriter).conn}
-	hdr, err := r.DecisionHeaderByPush(ctx, d.PushID)
-	if err != nil {
-		t.Fatalf("DecisionHeaderByPush: %v", err)
-	}
-	if !hdr.ImageCreated.Equal(created) || hdr.ImageAgeDays != 74 || hdr.ImageAgeThresholdDays != 60 {
-		t.Fatalf("age not round-tripped: created=%v days=%d threshold=%d", hdr.ImageCreated, hdr.ImageAgeDays, hdr.ImageAgeThresholdDays)
-	}
+	t.Run("known age", func(t *testing.T) {
+		created := time.Date(2026, 4, 20, 10, 31, 0, 0, time.UTC)
+		d := Decision{
+			PushID: "00000000-0000-0000-0000-000000000002", Repo: "app", Tag: "v1", Digest: "sha256:abc",
+			Identity: "sp", Passed: false, FailedPolicies: []string{"imageage"},
+			Reasons:               []string{"image age 74d exceeds max 60d"},
+			ImageCreated:          created,
+			ImageAgeDays:          74,
+			ImageAgeThresholdDays: 60,
+			ImageAgeKnown:         true,
+		}
+		if err := w.WriteDecision(ctx, d); err != nil {
+			t.Fatalf("WriteDecision: %v", err)
+		}
+
+		r := &Reader{conn: w.(*clickhouseWriter).conn}
+		hdr, err := r.DecisionHeaderByPush(ctx, d.PushID)
+		if err != nil {
+			t.Fatalf("DecisionHeaderByPush: %v", err)
+		}
+		if !hdr.ImageCreated.Equal(created) || hdr.ImageAgeDays != 74 || hdr.ImageAgeThresholdDays != 60 {
+			t.Fatalf("age not round-tripped: created=%v days=%d threshold=%d", hdr.ImageCreated, hdr.ImageAgeDays, hdr.ImageAgeThresholdDays)
+		}
+		if !hdr.ImageAgeKnown {
+			t.Fatal("ImageAgeKnown should be true")
+		}
+	})
+
+	t.Run("unknown age", func(t *testing.T) {
+		d := Decision{
+			PushID:                "00000000-0000-0000-0000-000000000003",
+			Repo:                  "app",
+			Tag:                   "v2",
+			Digest:                "sha256:def",
+			Identity:              "sp",
+			Passed:                false,
+			FailedPolicies:        []string{"imageage"},
+			Reasons:               []string{"could not determine image age (image config is missing a readable created timestamp)"},
+			ImageCreated:          time.Time{}, // zero
+			ImageAgeDays:          0,
+			ImageAgeThresholdDays: 0,
+			ImageAgeKnown:         false,
+		}
+		if err := w.WriteDecision(ctx, d); err != nil {
+			t.Fatalf("WriteDecision unknown: %v", err)
+		}
+
+		r := &Reader{conn: w.(*clickhouseWriter).conn}
+		hdr, err := r.DecisionHeaderByPush(ctx, d.PushID)
+		if err != nil {
+			t.Fatalf("DecisionHeaderByPush unknown: %v", err)
+		}
+		if hdr.ImageAgeKnown {
+			t.Fatal("ImageAgeKnown should be false for unknown age")
+		}
+	})
 }

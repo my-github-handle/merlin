@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS gate_decisions (
     duration_ms      UInt32,
     image_created            DateTime64(3) DEFAULT 0,
     image_age_days           UInt16 DEFAULT 0,
-    image_age_threshold_days UInt16 DEFAULT 0
+    image_age_threshold_days UInt16 DEFAULT 0,
+    image_age_known          Bool DEFAULT 0
 ) ENGINE = MergeTree
 ORDER BY (image_digest, ts);
 
@@ -41,3 +42,4 @@ ALTER TABLE gate_decisions ADD INDEX IF NOT EXISTS idx_identity (identity) TYPE 
 ALTER TABLE gate_decisions ADD COLUMN IF NOT EXISTS image_created DateTime64(3) DEFAULT 0;
 ALTER TABLE gate_decisions ADD COLUMN IF NOT EXISTS image_age_days UInt16 DEFAULT 0;
 ALTER TABLE gate_decisions ADD COLUMN IF NOT EXISTS image_age_threshold_days UInt16 DEFAULT 0;
+ALTER TABLE gate_decisions ADD COLUMN IF NOT EXISTS image_age_known Bool DEFAULT 0;

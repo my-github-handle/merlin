@@ -86,7 +86,7 @@ func (s *Service) Report(ctx context.Context, repo, ref, pushID string) (ReportV
 		Identity: hdr.Identity, Passed: hdr.Passed, FailedPolicies: hdr.FailedPolicies,
 		Reasons: hdr.Reasons, BaseImageID: hdr.BaseImageID, TrivyDBVersion: hdr.TrivyDBVersion, Ts: hdr.Ts,
 	}
-	vm.ImageAgeKnown = !hdr.ImageCreated.IsZero()
+	vm.ImageAgeKnown = hdr.ImageAgeKnown
 	if vm.ImageAgeKnown {
 		vm.ImageCreated = hdr.ImageCreated
 		vm.ImageAgeDays = int(hdr.ImageAgeDays)

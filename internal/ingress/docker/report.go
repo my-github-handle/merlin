@@ -80,7 +80,7 @@ func (h *Handler) handleReport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	env := reportEnvelope{Findings: findings}
-	if hdr.Found && !hdr.ImageCreated.IsZero() {
+	if hdr.Found && hdr.ImageAgeKnown {
 		env.Age = &ReportAge{
 			Known:         true,
 			Created:       hdr.ImageCreated,

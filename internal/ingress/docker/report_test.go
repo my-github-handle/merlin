@@ -200,6 +200,7 @@ func TestReportEnvelopeIncludesAge(t *testing.T) {
 			ImageCreated:          created,
 			ImageAgeDays:          74,
 			ImageAgeThresholdDays: 60,
+			ImageAgeKnown:         true,
 		},
 	}
 	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), nil, nil, nil, rs)
