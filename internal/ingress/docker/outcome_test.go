@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/merlin-gate/merlin/internal/acr"
 	"github.com/merlin-gate/merlin/internal/policy"
@@ -95,5 +96,31 @@ func TestOutcomePushFailureIs502(t *testing.T) {
 	}
 	if d.StatusCode != 502 || !d.InfraError {
 		t.Errorf("expected 502 infra after failed push, got %+v", d)
+	}
+}
+
+func TestApplyRecordsImageAge(t *testing.T) {
+	spy := &spyRecorder{}
+	o := &Outcome{ReportBaseURL: "/reports", Recorder: spy, IDGen: func() string { return "pid" }}
+
+	created := time.Date(2026, 4, 20, 10, 31, 0, 0, time.UTC)
+	res := policy.Result{
+		Passed: false,
+		Verdicts: map[string]policy.Verdict{
+			"imageage": {Passed: false, Reasons: []string{"rejected: image age 74d exceeds max 60d"}},
+		},
+		Age: &policy.AgeInfo{Known: true, Created: created, AgeDays: 74, ThresholdDays: 60, Compliant: false},
+	}
+	req := router.GateRequest{Image: policy.StagedImage{Repo: "app", Tag: "v1"}, Identity: "sp"}
+
+	_, _ = o.Apply(context.Background(), &acr.FakePusher{}, req, res, nil)
+
+	if len(spy.calls) != 1 {
+		t.Fatalf("expected 1 recorded call, got %d", len(spy.calls))
+	}
+	got := spy.calls[0].decision
+	if !got.ImageCreated.Equal(created) || got.ImageAgeDays != 74 || got.ImageAgeThresholdDays != 60 {
+		t.Fatalf("age not recorded: ImageCreated=%v (want %v), ImageAgeDays=%d (want 74), ImageAgeThresholdDays=%d (want 60)",
+			got.ImageCreated, created, got.ImageAgeDays, got.ImageAgeThresholdDays)
 	}
 }
