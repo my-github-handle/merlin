@@ -109,18 +109,21 @@ func TestReportViewModelNotFound(t *testing.T) {
 
 func TestReportViewModelWithFindings(t *testing.T) {
 	hdr := audit.DecisionHeader{
-		Found:          true,
-		PushID:         "push123",
-		Repo:           "a/b",
-		Tag:            "v1",
-		Digest:         "sha256:abc",
-		Identity:       "ci",
-		Passed:         false,
-		FailedPolicies: []string{"cve-policy"},
-		Reasons:        []string{"CRITICAL CVE found"},
-		BaseImageID:    "ubi9",
-		TrivyDBVersion: "2.0",
-		Ts:             time.Date(2026, 6, 25, 10, 0, 0, 0, time.UTC),
+		Found:                 true,
+		PushID:                "push123",
+		Repo:                  "a/b",
+		Tag:                   "v1",
+		Digest:                "sha256:abc",
+		Identity:              "ci",
+		Passed:                false,
+		FailedPolicies:        []string{"cve-policy"},
+		Reasons:               []string{"CRITICAL CVE found"},
+		BaseImageID:           "ubi9",
+		TrivyDBVersion:        "2.0",
+		Ts:                    time.Date(2026, 6, 25, 10, 0, 0, 0, time.UTC),
+		ImageCreated:          time.Date(2026, 4, 20, 10, 31, 0, 0, time.UTC),
+		ImageAgeDays:          74,
+		ImageAgeThresholdDays: 60,
 	}
 	findings := []policy.Finding{
 		{CVE: "CVE-2024-2", Severity: "HIGH", Pkg: "pkg-b", Version: "1.0", FixedVersion: "1.1"},
@@ -153,6 +156,10 @@ func TestReportViewModelWithFindings(t *testing.T) {
 	}
 	if vm.Findings[1].CVE != "CVE-2024-2" {
 		t.Errorf("second finding CVE=%v want CVE-2024-2", vm.Findings[1].CVE)
+	}
+	// Verify age fields
+	if !vm.ImageAgeKnown || vm.ImageAgeDays != 74 || vm.AgeCompliant {
+		t.Fatalf("age VM wrong: known=%v days=%d compliant=%v", vm.ImageAgeKnown, vm.ImageAgeDays, vm.AgeCompliant)
 	}
 }
 

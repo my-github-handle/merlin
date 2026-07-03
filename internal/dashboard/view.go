@@ -57,6 +57,11 @@ type ReportVM struct {
 	Ts                                  time.Time
 	Findings                            []FindingVM
 	Counts                              SeverityVM
+	ImageCreated                        time.Time
+	ImageAgeDays                        int
+	ImageAgeKnown                       bool
+	AgeThreshold                        int
+	AgeCompliant                        bool
 }
 
 type FindingVM struct {
