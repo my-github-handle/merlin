@@ -1,8 +1,16 @@
 # Image Age Compliance — Design
 
 **Date:** 2026-07-02
-**Status:** Proposed
+**Status:** SUPERSEDED by [`2026-07-03-merlin-image-age-compliance-spec.md`](./2026-07-03-merlin-image-age-compliance-spec.md)
 **Related:** `github.com/c3-e/c3aiops/cmd/imageComplianceReport` (reference tool)
+
+> **Superseded.** This draft proposed image age as *reported metadata only*
+> ("report now, policy later"). The authoritative c3aiops service spec dated
+> 2026-07-03 instead requires image age to be a **blocking gate policy** (default
+> 60 days → 400, configurable/disable-able per tenant, fail-closed when `created`
+> is unreadable). Implement the 2026-07-03 spec; this document is retained only
+> for its verified data-path notes (OCI config `created` source, staging/audit/
+> dashboard wiring), which remain accurate.
 
 ## Problem
 
