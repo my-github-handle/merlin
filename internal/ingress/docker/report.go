@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
+	"github.com/merlin-gate/merlin/internal/audit"
 	"github.com/merlin-gate/merlin/internal/policy"
 )
 
@@ -16,6 +18,24 @@ import (
 type ReportSource interface {
 	FindingsByPush(ctx context.Context, pushID string) ([]policy.Finding, error)
 	FindingsByImageRef(ctx context.Context, repo, ref string) ([]policy.Finding, error)
+	HeaderByPush(ctx context.Context, pushID string) (audit.DecisionHeader, error)
+	HeaderByImageRef(ctx context.Context, repo, ref string) (audit.DecisionHeader, error)
+}
+
+// ReportAge is the JSON view of the image-age result in a scan report.
+type ReportAge struct {
+	Known         bool      `json:"known"`
+	Created       time.Time `json:"created"`
+	AgeDays       int       `json:"age_days"`
+	ThresholdDays int       `json:"threshold_days"`
+	Compliant     bool      `json:"compliant"`
+}
+
+// reportEnvelope is the GET /reports/<ref> body: the age result (null when the
+// age policy was disabled / age unknown) plus the Trivy findings.
+type reportEnvelope struct {
+	Age      *ReportAge       `json:"age"`
+	Findings []policy.Finding `json:"findings"`
 }
 
 func (h *Handler) handleReport(w http.ResponseWriter, r *http.Request) {
@@ -39,18 +59,38 @@ func (h *Handler) handleReport(w http.ResponseWriter, r *http.Request) {
 	// caller pushed) or an opaque push_id. Detect a reference by the "@" digest
 	// separator or a ":" tag separator AFTER the last "/" (so a digest's own
 	// "sha256:" prefix in repo@sha256:... isn't mistaken for a tag).
-	var findings []policy.Finding
+	var (
+		findings []policy.Finding
+		hdr      audit.DecisionHeader
+	)
 	if repo, ref, ok := splitImageRef(id); ok {
 		findings, err = h.reports.FindingsByImageRef(r.Context(), repo, ref)
+		if err == nil {
+			hdr, _ = h.reports.HeaderByImageRef(r.Context(), repo, ref)
+		}
 	} else {
 		findings, err = h.reports.FindingsByPush(r.Context(), id)
+		if err == nil {
+			hdr, _ = h.reports.HeaderByPush(r.Context(), id)
+		}
 	}
 	if err != nil {
 		http.Error(w, "report unavailable", http.StatusInternalServerError)
 		return
 	}
+
+	env := reportEnvelope{Findings: findings}
+	if hdr.Found && !hdr.ImageCreated.IsZero() {
+		env.Age = &ReportAge{
+			Known:         true,
+			Created:       hdr.ImageCreated,
+			AgeDays:       int(hdr.ImageAgeDays),
+			ThresholdDays: int(hdr.ImageAgeThresholdDays),
+			Compliant:     int(hdr.ImageAgeDays) <= int(hdr.ImageAgeThresholdDays),
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(findings)
+	_ = json.NewEncoder(w).Encode(env)
 }
 
 // splitImageRef parses an image reference into (repo, ref) where ref is a tag or a

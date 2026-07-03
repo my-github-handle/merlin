@@ -86,6 +86,16 @@ SELECT toString(push_id), image_repo, image_tag, image_digest, identity, passed,
 FROM gate_decisions WHERE image_repo = ? ORDER BY ts DESC LIMIT 1`, repo)
 }
 
+// HeaderByPush and HeaderByImageRef alias the DecisionHeader lookups under the
+// names the report ingress depends on.
+func (r *Reader) HeaderByPush(ctx context.Context, pushID string) (DecisionHeader, error) {
+	return r.DecisionHeaderByPush(ctx, pushID)
+}
+
+func (r *Reader) HeaderByImageRef(ctx context.Context, repo, ref string) (DecisionHeader, error) {
+	return r.DecisionHeaderByRef(ctx, repo, ref)
+}
+
 // scanHeader runs a single-row header query; Found is false when no row matched.
 func (r *Reader) scanHeader(ctx context.Context, q string, args ...any) (DecisionHeader, error) {
 	var h DecisionHeader
