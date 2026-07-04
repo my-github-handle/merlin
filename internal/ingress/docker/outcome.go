@@ -103,6 +103,13 @@ func (o *Outcome) recordDecision(ctx context.Context, pushID string, req router.
 		DurationMS:     0, // not measured; acceptable to leave 0
 	}
 
+	if res.Age != nil && res.Age.Known {
+		decision.ImageCreated = res.Age.Created
+		decision.ImageAgeDays = clampUint16(res.Age.AgeDays)
+		decision.ImageAgeThresholdDays = clampUint16(res.Age.ThresholdDays)
+		decision.ImageAgeKnown = true
+	}
+
 	o.Recorder.Record(ctx, decision, res.Findings)
 }
 
@@ -114,4 +121,16 @@ func generatePushID() string {
 		return fmt.Sprintf("push-%d", len(b))
 	}
 	return hex.EncodeToString(b)
+}
+
+// clampUint16 converts a non-negative day count to uint16, saturating at the max
+// (an age past ~179 years is not a meaningful distinction for the audit row).
+func clampUint16(n int) uint16 {
+	if n < 0 {
+		return 0
+	}
+	if n > 65535 {
+		return 65535
+	}
+	return uint16(n)
 }

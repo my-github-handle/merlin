@@ -86,6 +86,13 @@ func (s *Service) Report(ctx context.Context, repo, ref, pushID string) (ReportV
 		Identity: hdr.Identity, Passed: hdr.Passed, FailedPolicies: hdr.FailedPolicies,
 		Reasons: hdr.Reasons, BaseImageID: hdr.BaseImageID, TrivyDBVersion: hdr.TrivyDBVersion, Ts: hdr.Ts,
 	}
+	vm.ImageAgeKnown = hdr.ImageAgeKnown
+	if vm.ImageAgeKnown {
+		vm.ImageCreated = hdr.ImageCreated
+		vm.ImageAgeDays = int(hdr.ImageAgeDays)
+		vm.AgeThreshold = int(hdr.ImageAgeThresholdDays)
+		vm.AgeCompliant = int(hdr.ImageAgeDays) <= int(hdr.ImageAgeThresholdDays)
+	}
 	for _, f := range findings {
 		vm.Findings = append(vm.Findings, FindingVM{
 			CVE: f.CVE, Severity: f.Severity, Pkg: f.Pkg, Version: f.Version, FixedVersion: f.FixedVersion})

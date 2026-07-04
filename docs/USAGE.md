@@ -112,6 +112,24 @@ Each finding has `CVE`, `Severity` (`LOW`/`MEDIUM`/`HIGH`/`CRITICAL`), `Pkg`,
 > The gate only **blocks** on `CRITICAL`. LOW/MEDIUM/HIGH findings are reported
 > in the scan result but do not stop the push.
 
+## Image age
+
+Merlin also gates on **image age**. It reads the image config's `created`
+timestamp and rejects any image older than the configured threshold (default
+**60 days**, configurable per tenant). A too-old image fails the push with, e.g.:
+
+    rejected: image age 74d exceeds max 60d (created 2026-04-20T10:31:00Z)
+
+An image whose `created` cannot be read is rejected (fail-closed) with a distinct
+"could not determine image age" reason.
+
+The manifest PUT response carries `X-Merlin-Image-Age-Days`, and the scan report
+includes an `age` object:
+
+    { "age": { "known": true, "created": "...", "age_days": 45,
+               "threshold_days": 60, "compliant": true },
+      "findings": [ ... ] }
+
 ## Observability Dashboard
 
 Merlin ships a built-in, read-only dashboard. It is **on by default**, served on

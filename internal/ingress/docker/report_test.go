@@ -7,12 +7,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
+	"github.com/merlin-gate/merlin/internal/audit"
 	"github.com/merlin-gate/merlin/internal/policy"
 )
 
 type fakeReports struct {
 	findings []policy.Finding
+	header   audit.DecisionHeader
 	// captured args from the last lookup, for assertions
 	gotPushID  string
 	gotRepo    string
@@ -31,6 +34,14 @@ func (f *fakeReports) FindingsByImageRef(_ context.Context, repo, ref string) ([
 	return f.findings, nil
 }
 
+func (f *fakeReports) HeaderByPush(_ context.Context, pushID string) (audit.DecisionHeader, error) {
+	return f.header, nil
+}
+
+func (f *fakeReports) HeaderByImageRef(_ context.Context, repo, ref string) (audit.DecisionHeader, error) {
+	return f.header, nil
+}
+
 type errReports struct{}
 
 func (errReports) FindingsByPush(_ context.Context, _ string) ([]policy.Finding, error) {
@@ -39,6 +50,14 @@ func (errReports) FindingsByPush(_ context.Context, _ string) ([]policy.Finding,
 
 func (errReports) FindingsByImageRef(_ context.Context, _, _ string) ([]policy.Finding, error) {
 	return nil, errors.New("audit store down")
+}
+
+func (errReports) HeaderByPush(_ context.Context, _ string) (audit.DecisionHeader, error) {
+	return audit.DecisionHeader{}, errors.New("audit store down")
+}
+
+func (errReports) HeaderByImageRef(_ context.Context, _, _ string) (audit.DecisionHeader, error) {
+	return audit.DecisionHeader{}, errors.New("audit store down")
 }
 
 func TestReportEndpointReturnsFindings(t *testing.T) {
@@ -52,12 +71,12 @@ func TestReportEndpointReturnsFindings(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("code = %d, want 200", rec.Code)
 	}
-	var got []policy.Finding
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+	var env reportEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(got) != 1 || got[0].CVE != "CVE-1" {
-		t.Errorf("findings = %+v", got)
+	if len(env.Findings) != 1 || env.Findings[0].CVE != "CVE-1" {
+		t.Errorf("findings = %+v", env.Findings)
 	}
 }
 
@@ -169,5 +188,45 @@ func TestReportEndpointEmptyFindingsOK(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Errorf("empty findings: code = %d, want 200", rec.Code)
+	}
+}
+
+func TestReportEnvelopeIncludesAge(t *testing.T) {
+	created := time.Date(2026, 4, 20, 10, 31, 0, 0, time.UTC)
+	rs := &fakeReports{
+		findings: []policy.Finding{{CVE: "CVE-1", Severity: "HIGH"}},
+		header: audit.DecisionHeader{
+			Found:                 true,
+			ImageCreated:          created,
+			ImageAgeDays:          74,
+			ImageAgeThresholdDays: 60,
+			ImageAgeKnown:         true,
+		},
+	}
+	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), nil, nil, nil, rs)
+	req := httptest.NewRequest(http.MethodGet, "/reports/app:v1", nil)
+	req.Host = testTenantHost
+	req.Header.Set("Authorization", "Bearer good")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200", rec.Code)
+	}
+	var env reportEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode envelope: %v", err)
+	}
+	if env.Age == nil {
+		t.Fatal("age is nil, expected non-nil")
+	}
+	if !env.Age.Known || env.Age.AgeDays != 74 || env.Age.ThresholdDays != 60 || env.Age.Compliant {
+		t.Fatalf("age wrong: Known=%v AgeDays=%d Threshold=%d Compliant=%v, want Known=true Days=74 Threshold=60 Compliant=false",
+			env.Age.Known, env.Age.AgeDays, env.Age.ThresholdDays, env.Age.Compliant)
+	}
+	if !env.Age.Created.Equal(created) {
+		t.Errorf("Created = %v, want %v", env.Age.Created, created)
+	}
+	if len(env.Findings) != 1 || env.Findings[0].CVE != "CVE-1" {
+		t.Fatalf("findings missing from envelope: %+v", env.Findings)
 	}
 }

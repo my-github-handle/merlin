@@ -4,6 +4,7 @@ package audit
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/merlin-gate/merlin/internal/policy"
 )
@@ -21,6 +22,14 @@ type Decision struct {
 	BaseImageID    string
 	TrivyDBVersion string
 	DurationMS     uint32
+
+	// Image-age policy result. ImageCreated is zero when age was not determined /
+	// the age policy was disabled. ImageAgeKnown explicitly tracks whether age was
+	// determined (readers key off this instead of IsZero() to avoid DateTime64 clamping).
+	ImageCreated          time.Time
+	ImageAgeDays          uint16
+	ImageAgeThresholdDays uint16
+	ImageAgeKnown         bool
 }
 
 // Writer persists decisions and findings (e.g. to ClickHouse).

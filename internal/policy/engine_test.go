@@ -138,3 +138,22 @@ func TestEnginePolicyWithoutFindings(t *testing.T) {
 		t.Errorf("TrivyDBVersion = %q, want empty string", res.TrivyDBVersion)
 	}
 }
+
+type agePolicyStub struct{ age *AgeInfo }
+
+func (agePolicyStub) Name() string { return "imageage" }
+func (p agePolicyStub) Evaluate(_ context.Context, _ StagedImage) (Verdict, error) {
+	return Verdict{Passed: p.age.Compliant, Age: p.age}, nil
+}
+
+func TestEngineForwardsAge(t *testing.T) {
+	age := &AgeInfo{Known: true, AgeDays: 12, ThresholdDays: 60, Compliant: true}
+	e := NewEngine(agePolicyStub{age: age})
+	res, err := e.Run(context.Background(), StagedImage{})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Age == nil || res.Age.AgeDays != 12 || !res.Age.Compliant {
+		t.Fatalf("Result.Age not forwarded: %+v", res.Age)
+	}
+}

@@ -10,9 +10,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/merlin-gate/merlin/internal/policy"
 )
@@ -35,6 +37,7 @@ func (s *Store) Assemble(ctx context.Context, mr ManifestRef, scratchDir string)
 
 	// The config blob (when present) goes into the OCI layout verbatim — it is
 	// JSON, not a filesystem layer, so it must never be tar-extracted.
+	var created time.Time
 	if mr.ConfigDigest != "" {
 		raw, err := s.fetchVerified(ctx, mr.ConfigDigest)
 		if err != nil {
@@ -42,6 +45,13 @@ func (s *Store) Assemble(ctx context.Context, mr ManifestRef, scratchDir string)
 		}
 		if err := writeOCIBlob(ociPath, mr.ConfigDigest, raw); err != nil {
 			return policy.StagedImage{}, err
+		}
+		// Extract the creation timestamp for the image-age policy. A parse failure is
+		// non-fatal here (leaves created zero); the age policy fails closed on unknown.
+		if c, perr := parseImageCreated(raw); perr != nil {
+			log.Printf("assemble %s/%s: could not read image created timestamp: %v", mr.Repo, mr.Ref, perr)
+		} else {
+			created = c
 		}
 	}
 
@@ -84,6 +94,7 @@ func (s *Store) Assemble(ctx context.Context, mr ManifestRef, scratchDir string)
 		Tag:     mr.Ref,
 		OCIPath: ociPath,
 		FSPath:  rootfs,
+		Created: created,
 	}, nil
 }
 
