@@ -10,7 +10,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -234,11 +233,6 @@ func (h *Handler) handleManifest(w http.ResponseWriter, r *http.Request, t *tena
 	}
 	if d.ReportURL != "" {
 		w.Header().Set("X-Merlin-Scan-Report-URL", d.ReportURL)
-	}
-	// Surface image age to raw-HTTP clients (CI) without a second call. Omitted
-	// when age is unknown/disabled (absent header == age not determined).
-	if res.Age != nil && res.Age.Known {
-		w.Header().Set("X-Merlin-Image-Age-Days", strconv.Itoa(res.Age.AgeDays))
 	}
 	code := d.StatusCode
 	if code == 0 {

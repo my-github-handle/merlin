@@ -123,12 +123,16 @@ timestamp and rejects any image older than the configured threshold (default
 An image whose `created` cannot be read is rejected (fail-closed) with a distinct
 "could not determine image age" reason.
 
-The manifest PUT response carries `X-Merlin-Image-Age-Days`, and the scan report
-includes an `age` object:
+The scan report includes an `age` object with the full result:
 
     { "age": { "known": true, "created": "...", "age_days": 45,
                "threshold_days": 60, "compliant": true },
       "findings": [ ... ] }
+
+To check an image's age locally (the same `created` field Merlin reads), use
+`docker inspect`:
+
+    docker inspect -f '{{.Created}}' <image>   # RFC3339 build timestamp
 
 ## Observability Dashboard
 

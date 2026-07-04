@@ -386,8 +386,10 @@ func TestPushRejectsOldImage(t *testing.T) {
 	}
 }
 
-// TestPushFreshImageSetsAgeHeader verifies that a fresh image (5 days old) passes and sets the age header.
-func TestPushFreshImageSetsAgeHeader(t *testing.T) {
+// TestPushFreshImagePasses verifies that a fresh image (5 days old) passes the
+// age gate and is forwarded to ACR. (Age is observable via GET /reports/<ref> —
+// see TestReportEnvelopeIncludesAge; clients compute local age via docker inspect.)
+func TestPushFreshImagePasses(t *testing.T) {
 	layer := layerWithOSID(t, "rhel")
 	h, fp := buildHTTPHandler(t, trivy.Report{}, 2)
 
@@ -423,9 +425,6 @@ func TestPushFreshImageSetsAgeHeader(t *testing.T) {
 
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
-	}
-	if got := rec.Header().Get("X-Merlin-Image-Age-Days"); got != "5" {
-		t.Fatalf("age header = %q, want \"5\"", got)
 	}
 	if len(fp.Pushed) != 1 {
 		t.Errorf("expected ACR push, got %d pushes", len(fp.Pushed))
