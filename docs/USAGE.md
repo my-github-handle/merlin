@@ -134,6 +134,16 @@ To check an image's age locally (the same `created` field Merlin reads), use
 
     docker inspect -f '{{.Created}}' <image>   # RFC3339 build timestamp
 
+> **Trust boundary.** Merlin computes age **server-side** from the image config
+> blob it staged and digest-verified — it never trusts a client-supplied age. But
+> `created` is **self-attested by whoever built the image**: digest verification
+> proves the bytes match the pushed digest, not that the timestamp is truthful. A
+> builder can set `created` to any value (e.g. via `SOURCE_DATE_EPOCH`), so this
+> gate is a **freshness control** (it catches images nobody rebuilt), **not an
+> anti-tamper control** (it won't stop a pusher who forges the timestamp).
+> Un-forgeable build-time proof requires signed provenance (SLSA/cosign), which
+> this gate does not perform.
+
 ## Observability Dashboard
 
 Merlin ships a built-in, read-only dashboard. It is **on by default**, served on

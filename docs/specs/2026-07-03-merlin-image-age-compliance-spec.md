@@ -76,10 +76,35 @@ from all-or-nothing to a per-image pass/reject consistent with the rest of the g
   whose age could not be determined; **fail-closed** (reject with a "could not determine
   age" reason) is preferred over fail-open.
 
+### 3.6 Trust boundary (age is self-attested, computed server-side)
+- Merlin computes age **entirely server-side**: it reads `created` from the image config blob
+  it fetched into staging and **digest-verified** (`fetchVerified` → `VerifyDigest`) before
+  the gate runs. The policy consumes only that server-derived value — it reads **no**
+  request-time client input (no header, query param, or client-asserted age). A client cannot
+  influence the verdict by anything other than the image bytes it pushes.
+- BUT `created` is **self-attested by whoever built the image**. Digest verification proves the
+  config bytes match the digest the pusher supplied — it does **not** prove the pusher was
+  honest about the contents. A builder can set `created` (via `docker build`, a crafted config,
+  or `SOURCE_DATE_EPOCH`) to any value, and the digest still verifies because it hashes the
+  claimed value. Every timestamp inside the artifact is in the same trust class — `created`,
+  `history[].created`, and layer file mtimes are all builder-controlled — so gating on a
+  different in-image field does **not** close this gap.
+- Consequence: this policy is a **freshness control, not an anti-tamper control**. It reliably
+  catches the real-world case it exists for — images that were genuinely not rebuilt (a team
+  forgot; a base drifted) — but it does **not** stop a motivated pusher who forges `created`.
+- The only un-forgeable age signals live **outside** the image and are explicit non-goals here
+  (see §4): (a) **registry receive-time** — server-authoritative, but measures "age since first
+  pushed to Merlin", not build age; (b) **signed provenance** (SLSA / in-toto / cosign) — a
+  trusted builder cryptographically attests the real build time, verified against a trust root.
+  Adopt one of those only if a threat model requires adversary-grade guarantees.
+
 ## 4. Non-goals
 - Merlin does **not** sweep the `.c3release.yaml` BOM or read `values.yaml`. Age is evaluated
   only on the image currently being pushed. (The fleet-wide freshness view, if still wanted,
   is a separate concern outside the gate.)
+- Merlin does **not** verify build-time authenticity: it trusts the self-attested `created`
+  timestamp (see §3.6). Registry receive-time gating and signed-provenance verification are
+  out of scope for this policy.
 - No CSV/markdown artifact generation inside Merlin — the JSON report at `/reports/<ref>` is
   the single source; CI archives it.
 
