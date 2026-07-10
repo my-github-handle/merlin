@@ -29,11 +29,16 @@ FROM gate_decisions ORDER BY ts DESC LIMIT ?`, limit)
 
 func (r *Reader) DecisionStatsSince(ctx context.Context, since time.Time) (DecisionStats, error) {
 	var s DecisionStats
+	// NOTE: the countIf aliases MUST NOT reuse the column name "passed". On strict
+	// ClickHouse versions (26.x) `countIf(passed) AS passed` is parsed as an aggregate
+	// nested inside an aggregate (ILLEGAL_AGGREGATION, code 184) because the alias
+	// shadows the column, and the whole stats query fails — silently zeroing the
+	// dashboard pass-rate/pushes/latency panels. Keep these aliases distinct.
 	row := r.conn.QueryRow(ctx, `
 SELECT
   count() AS total,
-  countIf(passed) AS passed,
-  countIf(NOT passed) AS rejected,
+  countIf(passed) AS n_passed,
+  countIf(NOT passed) AS n_rejected,
   quantile(0.5)(duration_ms) AS p50,
   quantile(0.95)(duration_ms) AS p95,
   quantile(0.99)(duration_ms) AS p99

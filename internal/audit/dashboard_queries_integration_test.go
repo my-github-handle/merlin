@@ -57,6 +57,14 @@ func TestDashboardQueriesRoundTrip(t *testing.T) {
 	if err != nil || st.Total == 0 {
 		t.Fatalf("DecisionStatsSince err=%v total=%d", err, st.Total)
 	}
+	// The fixture wrote exactly one decision, and it was rejected. Assert the
+	// countIf breakdown resolves — this pins the aggregate aliases against the
+	// ILLEGAL_AGGREGATION regression on strict ClickHouse (alias shadowing the
+	// "passed" column), which zeroes these fields instead of erroring on some
+	// driver paths.
+	if st.Rejected == 0 {
+		t.Fatalf("DecisionStatsSince rejected=%d, want >=1 (countIf alias regression?)", st.Rejected)
+	}
 	hdr, err := r.DecisionHeaderByRef(ctx, "dash/app", "v1")
 	if err != nil || !hdr.Found || hdr.BaseImageID != "ubi9" {
 		t.Fatalf("DecisionHeaderByRef err=%v found=%v base=%q", err, hdr.Found, hdr.BaseImageID)
