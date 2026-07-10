@@ -90,6 +90,7 @@ func Build(cfg config.Config) (*http.Server, *http.Server, error) {
 	// Metrics.
 	reg := prometheus.NewRegistry()
 	metrics := observability.NewMetrics(reg)
+	outcome.Metrics = metrics // observe push decisions, ACR pushes, scan latency
 
 	mainSrv := &http.Server{Addr: cfg.Server.Addr, Handler: handler}
 	metricsSrv := &http.Server{Addr: cfg.Server.MetricsAddr, Handler: metrics.Handler()}
@@ -255,6 +256,7 @@ func BuildWithBackends(ctx context.Context, cfg config.Config) (*http.Server, *h
 	// Metrics
 	reg := prometheus.NewRegistry()
 	metrics := observability.NewMetrics(reg)
+	outcome.Metrics = metrics // observe push decisions, ACR pushes, scan latency
 
 	mainSrv := &http.Server{Addr: cfg.Server.Addr, Handler: handler}
 	metricsSrv := &http.Server{Addr: cfg.Server.MetricsAddr, Handler: metrics.Handler()}
