@@ -204,6 +204,7 @@ func (h *Handler) handleManifest(w http.ResponseWriter, r *http.Request, t *tena
 		res     policy.Result
 		gateErr error
 	)
+	gateStart := time.Now()
 	if h.pool != nil {
 		timeout := h.gateTimeout
 		if timeout == 0 {
@@ -215,6 +216,7 @@ func (h *Handler) handleManifest(w http.ResponseWriter, r *http.Request, t *tena
 	} else {
 		res, gateErr = h.router.Gate(ctx, req)
 	}
+	scanDur := time.Since(gateStart)
 
 	// Handle ErrSaturated → 503 (before the Outcome runs)
 	if errors.Is(gateErr, router.ErrSaturated) {
@@ -227,7 +229,7 @@ func (h *Handler) handleManifest(w http.ResponseWriter, r *http.Request, t *tena
 	// 500/502 by Apply. An ACR push failure surfaces as a returned error (502);
 	// the Decision still carries the right status to render. Log the infra error so
 	// an operator can diagnose a 500/502 (the client only sees a terse summary).
-	d, applyErr := h.outcome.Apply(ctx, t.Pusher, req, res, gateErr)
+	d, applyErr := h.outcome.Apply(ctx, t.Pusher, req, res, gateErr, scanDur)
 	if applyErr != nil {
 		log.Printf("manifest %s gate outcome infra error: %v", target, applyErr)
 	}
