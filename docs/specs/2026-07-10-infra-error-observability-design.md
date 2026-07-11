@@ -22,7 +22,22 @@ Unauthorized** — an authorization problem on the tenant's workload identity, n
 a Merlin fault. Merlin correctly returned its application-level 502
 ("passed but ACR push failed", `internal/ingress/docker/outcome.go`).
 
-The failure recurred on PR 2432 (same 401), so it is persistent, not transient.
+The failure recurred on PR 2432/2424/2433 (same 401), so it is persistent, not
+transient.
+
+**Root cause (confirmed 2026-07-11 via live Azure + kubectl):** the Merlin pod
+runs under the shared `c3aiops` ServiceAccount (owned by the `c3aiops` Helm
+release, ~90 pods), annotated with managed identity `4eee465b`
+(`azplatdevops-c3-mi-01`), which had **no** AcrPush on `c3devops`. Merlin's config
+names a *different* identity `7bb01327` (`azplatinfosec5-c3-mi-01`,
+`acr_client_id` in `values.opsadmin.multiacr.yaml:61`) that *does* hold AcrPush.
+Both MIs are federated to the same SA subject
+`system:serviceaccount:c3-opsadmin:c3aiops`, so the identity that actually
+reached ACR (`4eee465b`) lacked push rights → 401 on the scoped-token leg. This
+is an **identity mismatch**, not a missing role on the configured identity.
+Interim fix: granted AcrPush to `4eee465b` on `c3devops` (broad blast radius —
+shared identity). Least-privilege fix would give Merlin its own SA annotated with
+the dedicated push identity.
 
 ### The observability gap this fixes
 
@@ -279,9 +294,15 @@ Following the repo's table-driven Go style, run with `-race`:
 
 ## Follow-ups (not in this work)
 
-1. **Azure RBAC:** grant/repair `AcrPush` for the `c3devops` tenant workload
-   identity on `c3devops.azurecr.io`; verify the federated-credential token scope.
-   This is what unblocks CI.
+1. **Credential-cache bug (ACTUAL root cause of the 401 — fixed in commit
+   a15447d):** `internal/acr/credential.go` cached the ACR refresh token but keyed
+   its expiry off the AAD access token's `ExpiresOn`. The two tokens have
+   independent lifetimes (AAD ~24h, ACR refresh ~3h), so a stale refresh token was
+   reused for hours and ACR's `/oauth2/token` leg rejected it with 401 → push 502.
+   Fixed by caching to the refresh token's own `exp` claim. Both earlier theories
+   (missing RBAC; dual-MI identity mismatch) were WRONG — the identity/roles were
+   fine. **Deploy a15447d to prod** (running `merlin:a925812`) to resolve CI, and
+   **revoke** the inert `4eee465b` AcrPush grant added under the wrong hypothesis.
 2. **Chart resource default:** reconcile `charts/merlin/values.yaml` 2Gi default
    with the live 10Gi to avoid a large-image OOM on a fresh tenant deploy.
 3. **k8s crash alert:** alert on
