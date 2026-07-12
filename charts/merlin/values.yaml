@@ -57,6 +57,12 @@ merlin:
   # rendered into /etc/merlin/config.yaml
   trivy: { severityThreshold: CRITICAL }
   baseImage: { allowedIDs: [rhel, wolfi, chainguard] }
+  # Image-age gate: rejects images whose OCI config `created` is older than
+  # thresholdDays. Omit this block to use the built-in defaults (enabled, 60 days).
+  # Set enabled: false to ship the code with the gate OFF. Fail-closed: an image
+  # whose `created` cannot be read is rejected. Per-tenant override: add an
+  # `imageAge:` block under a tenants[] entry (most-specific wins).
+  imageAge: { enabled: true, thresholdDays: 60 }
   # ACR host template + base DNS domain. Each push is routed to a per-tenant ACR
   # by substituting the tenant prefix into registryTemplate (must contain {prefix}).
   acr:

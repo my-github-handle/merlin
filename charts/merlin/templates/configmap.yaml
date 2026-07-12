@@ -10,6 +10,15 @@ data:
       severity_threshold: {{ .Values.merlin.trivy.severityThreshold }}
     base_image:
       allowed_ids: {{ toJson .Values.merlin.baseImage.allowedIDs }}
+    {{- with .Values.merlin.imageAge }}
+    image_age:
+      {{- if hasKey . "enabled" }}
+      enabled: {{ .enabled }}
+      {{- end }}
+      {{- if hasKey . "thresholdDays" }}
+      threshold_days: {{ .thresholdDays }}
+      {{- end }}
+    {{- end }}
     acr:
       registry_template: {{ .Values.merlin.acr.registryTemplate | quote }}
       base_domain: {{ .Values.merlin.acr.baseDomain | quote }}
@@ -22,6 +31,15 @@ data:
           audience: {{ .auth.audience | quote }}
           jwks_url: {{ .auth.jwksUrl | quote }}
           tenant_id: {{ .auth.tenantId | quote }}
+        {{- with .imageAge }}
+        image_age:
+          {{- if hasKey . "enabled" }}
+          enabled: {{ .enabled }}
+          {{- end }}
+          {{- if hasKey . "thresholdDays" }}
+          threshold_days: {{ .thresholdDays }}
+          {{- end }}
+        {{- end }}
     {{- end }}
     auth:
       service: {{ .Values.merlin.auth.service | default "merlin" | quote }}
