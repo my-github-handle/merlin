@@ -68,14 +68,14 @@ SELECT reason, count() AS c FROM (
 func (r *Reader) DecisionHeaderByPush(ctx context.Context, pushID string) (DecisionHeader, error) {
 	return r.scanHeader(ctx, `
 SELECT toString(push_id), image_repo, image_tag, image_digest, identity, passed,
-       failed_policies, reasons, base_image_id, trivy_db_version, ts, image_created, image_age_days, image_age_threshold_days, image_age_known
+       failed_policies, reasons, base_image_id, scanner_db_version, ts, image_created, image_age_days, image_age_threshold_days, image_age_known
 FROM gate_decisions WHERE push_id = ? ORDER BY ts DESC LIMIT 1`, pushID)
 }
 
 func (r *Reader) DecisionHeaderByRef(ctx context.Context, repo, ref string) (DecisionHeader, error) {
 	h, err := r.scanHeader(ctx, `
 SELECT toString(push_id), image_repo, image_tag, image_digest, identity, passed,
-       failed_policies, reasons, base_image_id, trivy_db_version, ts, image_created, image_age_days, image_age_threshold_days, image_age_known
+       failed_policies, reasons, base_image_id, scanner_db_version, ts, image_created, image_age_days, image_age_threshold_days, image_age_known
 FROM gate_decisions WHERE image_repo = ? AND (image_tag = ? OR image_digest = ?)
 ORDER BY ts DESC LIMIT 1`, repo, ref, ref)
 	if err != nil {
@@ -112,7 +112,7 @@ func (r *Reader) scanHeader(ctx context.Context, q string, args ...any) (Decisio
 	var h DecisionHeader
 	row := r.conn.QueryRow(ctx, q, args...)
 	err := row.Scan(&h.PushID, &h.Repo, &h.Tag, &h.Digest, &h.Identity, &h.Passed,
-		&h.FailedPolicies, &h.Reasons, &h.BaseImageID, &h.TrivyDBVersion, &h.Ts,
+		&h.FailedPolicies, &h.Reasons, &h.BaseImageID, &h.ScannerDBVersion, &h.Ts,
 		&h.ImageCreated, &h.ImageAgeDays, &h.ImageAgeThresholdDays, &h.ImageAgeKnown)
 	if err != nil {
 		// clickhouse-go returns sql.ErrNoRows-equivalent on no row; treat any scan

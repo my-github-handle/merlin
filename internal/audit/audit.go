@@ -20,7 +20,7 @@ type Decision struct {
 	FailedPolicies []string
 	Reasons        []string
 	BaseImageID    string
-	TrivyDBVersion string
+	ScannerDBVersion string
 	DurationMS     uint32
 
 	// Image-age policy result. ImageCreated is zero when age was not determined /

@@ -51,7 +51,7 @@ type DecisionHeader struct {
 	FailedPolicies []string
 	Reasons        []string
 	BaseImageID    string
-	TrivyDBVersion string
+	ScannerDBVersion string
 	Ts             time.Time
 
 	ImageCreated          time.Time

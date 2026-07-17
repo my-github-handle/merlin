@@ -126,7 +126,7 @@ func (o *Outcome) recordDecision(ctx context.Context, pushID string, req router.
 		FailedPolicies: failedPolicies,
 		Reasons:        reasons,
 		BaseImageID:    "", // not directly available; leave empty for now
-		TrivyDBVersion: res.TrivyDBVersion,
+		ScannerDBVersion: res.ScannerDBVersion,
 		DurationMS:     durMS,
 	}
 
