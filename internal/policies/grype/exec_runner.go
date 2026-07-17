@@ -26,7 +26,10 @@ func NewExecRunner(binary string) Runner {
 func (e *execRunner) Scan(ctx context.Context, ociPath string) (Report, error) {
 	// Grype scans the assembled OCI layout directory. "-q" silences the
 	// progress UI so stdout is clean JSON; "-o json" selects native output.
-	out, err := e.run(ctx, e.binary, ociPath, "-o", "json", "-q")
+	// "--by-cve" orients matches by their canonical CVE (falling back to the
+	// original advisory ID when no CVE mapping exists), so stored cve_id values
+	// match the c3securitytools grype import pipeline.
+	out, err := e.run(ctx, e.binary, ociPath, "-o", "json", "-q", "--by-cve")
 	if err != nil {
 		return Report{}, fmt.Errorf("run grype: %w", err)
 	}

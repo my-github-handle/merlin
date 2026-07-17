@@ -20,6 +20,12 @@ func TestExecRunnerBuildsGrypeCommand(t *testing.T) {
 			if !strings.Contains(joined, "/oci/path") {
 				t.Errorf("args missing oci path: %v", args)
 			}
+			// --by-cve normalizes advisory IDs (GO-/GHSA-) to their canonical
+			// CVE when a mapping exists, matching the c3securitytools grype
+			// import pipeline so stored cve_id values are consistent.
+			if !strings.Contains(joined, "--by-cve") {
+				t.Errorf("args missing --by-cve: %v", args)
+			}
 			return []byte(`{"matches":[],"descriptor":{"db":{"schemaVersion":5,"built":"2026-07-16T00:00:00Z"}}}`), nil
 		},
 	}
