@@ -14,7 +14,7 @@ type Metrics struct {
 	gatherer     prometheus.Gatherer
 	pushTotal    *prometheus.CounterVec
 	scanDuration prometheus.Histogram
-	trivyDBAge   prometheus.Gauge
+	scannerDBAge prometheus.Gauge
 	acrPush      *prometheus.CounterVec
 }
 
@@ -29,19 +29,19 @@ func NewMetrics(reg *prometheus.Registry) *Metrics {
 		}, []string{"outcome"}),
 		scanDuration: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Name:    "merlin_scan_duration_seconds",
-			Help:    "Trivy scan duration in seconds.",
+			Help:    "Scanner scan duration in seconds.",
 			Buckets: prometheus.DefBuckets,
 		}),
-		trivyDBAge: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "merlin_trivy_db_age_days",
-			Help: "Age of the Trivy vulnerability DB in days.",
+		scannerDBAge: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "merlin_scanner_db_age_days",
+			Help: "Age of the scanner vulnerability DB in days.",
 		}),
 		acrPush: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "merlin_acr_push_total",
 			Help: "ACR push attempts by result.",
 		}, []string{"result"}),
 	}
-	reg.MustRegister(m.pushTotal, m.scanDuration, m.trivyDBAge, m.acrPush)
+	reg.MustRegister(m.pushTotal, m.scanDuration, m.scannerDBAge, m.acrPush)
 	return m
 }
 
@@ -54,7 +54,7 @@ func (m *Metrics) ObservePush(passed bool) {
 }
 
 func (m *Metrics) ObserveScanDuration(seconds float64) { m.scanDuration.Observe(seconds) }
-func (m *Metrics) SetTrivyDBAgeDays(days float64)      { m.trivyDBAge.Set(days) }
+func (m *Metrics) SetScannerDBAgeDays(days float64)    { m.scannerDBAge.Set(days) }
 
 func (m *Metrics) ObserveACRPush(ok bool) {
 	result := "error"

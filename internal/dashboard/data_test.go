@@ -82,7 +82,7 @@ func newTestService(fr audit.DashboardReader) *Service {
 func newTestServiceWithMetrics(fr audit.DashboardReader, withMetrics bool) *Service {
 	reg := prometheus.NewRegistry()
 	if withMetrics {
-		g := prometheus.NewGauge(prometheus.GaugeOpts{Name: "merlin_trivy_db_age_days", Help: "x"})
+		g := prometheus.NewGauge(prometheus.GaugeOpts{Name: "merlin_scanner_db_age_days", Help: "x"})
 		g.Set(4)
 		reg.MustRegister(g)
 		cOk := prometheus.NewCounter(prometheus.CounterOpts{Name: "merlin_acr_push_total", Help: "x", ConstLabels: prometheus.Labels{"result": "ok"}})

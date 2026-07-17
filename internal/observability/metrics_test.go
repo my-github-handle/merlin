@@ -39,10 +39,10 @@ func counterValue(m *dto.Metric) float64 {
 	return 0
 }
 
-func TestSetTrivyDBAge(t *testing.T) {
+func TestSetScannerDBAge(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := NewMetrics(reg)
-	m.SetTrivyDBAgeDays(5)
+	m.SetScannerDBAgeDays(5)
 	// No panic + registered gauge is sufficient for this unit.
 	if m == nil {
 		t.Fatal("nil metrics")

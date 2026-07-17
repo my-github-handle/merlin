@@ -210,7 +210,7 @@ func (s *Service) Overview(ctx context.Context, rng Range) (OverviewVM, error) {
 	} else {
 		vm.Stats = toStatsVM(st)
 	}
-	vm.TrivyDBAgeDays = s.gaugeValue("merlin_trivy_db_age_days")
+	vm.TrivyDBAgeDays = s.gaugeValue("merlin_scanner_db_age_days")
 	ok := s.counterValue("merlin_acr_push_total", "result", "ok")
 	errc := s.counterValue("merlin_acr_push_total", "result", "error")
 	if ok+errc > 0 {

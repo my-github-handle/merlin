@@ -22,8 +22,8 @@ import (
 	dockeringress "github.com/merlin-gate/merlin/internal/ingress/docker"
 	"github.com/merlin-gate/merlin/internal/observability"
 	"github.com/merlin-gate/merlin/internal/policies/baseimage"
+	"github.com/merlin-gate/merlin/internal/policies/grype"
 	"github.com/merlin-gate/merlin/internal/policies/imageage"
-	"github.com/merlin-gate/merlin/internal/policies/trivy"
 	"github.com/merlin-gate/merlin/internal/policy"
 	"github.com/merlin-gate/merlin/internal/router"
 	"github.com/merlin-gate/merlin/internal/staging"
@@ -47,11 +47,11 @@ import (
 //     (see TODO(phase5) in manifest.go/upload.go) with a deadline-bearing context.
 func Build(cfg config.Config) (*http.Server, *http.Server, error) {
 	// Policies + engine.
-	trivyPolicy := trivy.New(trivy.NewExecRunner("trivy"), cfg.Trivy.SeverityThreshold)
+	grypePolicy := grype.New(grype.NewExecRunner("grype"), cfg.Grype.SeverityThreshold)
 	basePolicy := baseimage.New(cfg.BaseImage.AllowedIDs)
 	def, per := imageAgeRules(cfg)
 	agePolicy := imageage.New(def, per)
-	engine := policy.NewEngine(trivyPolicy, basePolicy, agePolicy)
+	engine := policy.NewEngine(grypePolicy, basePolicy, agePolicy)
 
 	// Auth — stub keyfunc for hermetic unit testing. See TODO(production / BuildWithBackends)
 	// for production wiring requirements.
@@ -226,11 +226,11 @@ func BuildWithBackends(ctx context.Context, cfg config.Config) (*http.Server, *h
 	closers = append(closers, func() { reportsReader.Close() })
 
 	// Policies + engine
-	trivyPolicy := trivy.New(trivy.NewExecRunner("trivy"), cfg.Trivy.SeverityThreshold)
+	grypePolicy := grype.New(grype.NewExecRunner("grype"), cfg.Grype.SeverityThreshold)
 	basePolicy := baseimage.New(cfg.BaseImage.AllowedIDs)
 	def, per := imageAgeRules(cfg)
 	agePolicy := imageage.New(def, per)
-	engine := policy.NewEngine(trivyPolicy, basePolicy, agePolicy)
+	engine := policy.NewEngine(grypePolicy, basePolicy, agePolicy)
 
 	// Router + pool
 	rt := router.New(engine)
