@@ -2,6 +2,7 @@ package acr
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -25,10 +26,42 @@ type acrCredAuthenticator struct {
 	// Overridable for testing
 	exchangeURL string
 	httpClient  *http.Client
+	nowFn       func() time.Time // defaults to time.Now
 
 	mu           sync.Mutex
 	cachedToken  string
 	cachedExpiry time.Time
+}
+
+// now returns the current time, using the overridable nowFn when set (tests).
+func (a *acrCredAuthenticator) now() time.Time {
+	if a.nowFn != nil {
+		return a.nowFn()
+	}
+	return time.Now()
+}
+
+// refreshTokenExpiry extracts the exp claim from an ACR refresh token (a JWT),
+// returning it as a time and ok=false when the token is not a parseable JWT with
+// an exp. The signature is NOT verified (we cannot — it is signed by ACR's key);
+// we only read exp to bound the local cache, so an unparseable token simply
+// disables caching (ok=false) rather than trusting a wrong expiry.
+func refreshTokenExpiry(token string) (time.Time, bool) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return time.Time{}, false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return time.Time{}, false
+	}
+	var claims struct {
+		Exp int64 `json:"exp"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil || claims.Exp == 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(claims.Exp, 0), true
 }
 
 // Authorization performs the AAD→ACR token exchange. It obtains an AAD access token
@@ -39,8 +72,12 @@ func (a *acrCredAuthenticator) Authorization() (*authn.AuthConfig, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	// Return cached token if still valid (with 1-minute buffer)
-	if a.cachedToken != "" && time.Now().Before(a.cachedExpiry.Add(-time.Minute)) {
+	// Return cached token if still valid (with 1-minute buffer). cachedExpiry is
+	// the ACR refresh token's OWN expiry (see below) — NOT the AAD access token's —
+	// because the two are distinct tokens with independent lifetimes. Keying the
+	// cache off the AAD expiry let an already-expired refresh token be reused,
+	// which ACR's /oauth2/token leg rejects with 401 (surfacing as a push 502).
+	if a.cachedToken != "" && a.now().Before(a.cachedExpiry.Add(-time.Minute)) {
 		return &authn.AuthConfig{IdentityToken: a.cachedToken}, nil
 	}
 
@@ -59,9 +96,21 @@ func (a *acrCredAuthenticator) Authorization() (*authn.AuthConfig, error) {
 		return nil, err
 	}
 
-	// Cache the token with the AAD token's expiry
-	a.cachedToken = refreshToken
-	a.cachedExpiry = token.ExpiresOn
+	// Cache the refresh token keyed off ITS OWN expiry (the exp claim in the ACR
+	// refresh-token JWT), bounded above by the AAD access token's expiry as a
+	// safety cap. If the refresh token's exp is unparseable, skip caching entirely
+	// (re-exchange every call) rather than trust the AAD expiry — correctness over
+	// a micro-optimization on a low-volume push path.
+	if exp, ok := refreshTokenExpiry(refreshToken); ok {
+		if token.ExpiresOn.Before(exp) {
+			exp = token.ExpiresOn
+		}
+		a.cachedToken = refreshToken
+		a.cachedExpiry = exp
+	} else {
+		a.cachedToken = ""
+		a.cachedExpiry = time.Time{}
+	}
 
 	return &authn.AuthConfig{IdentityToken: refreshToken}, nil
 }
