@@ -31,8 +31,8 @@ func TestDashboardQueriesRoundTrip(t *testing.T) {
 	d := Decision{
 		PushID: "11111111-1111-1111-1111-111111111111", Repo: "dash/app", Tag: "v1",
 		Digest: "sha256:dash", Identity: "tester", Passed: false,
-		FailedPolicies: []string{"trivy"}, Reasons: []string{"CRITICAL CVE-2024-0001"},
-		BaseImageID: "ubi9", TrivyDBVersion: "v2026-06-25", DurationMS: 4200,
+		FailedPolicies: []string{"grype"}, Reasons: []string{"CRITICAL CVE-2024-0001"},
+		BaseImageID: "ubi9", ScannerDBVersion: "v2026-06-25", DurationMS: 4200,
 	}
 	if err := w.WriteDecision(ctx, d); err != nil {
 		t.Fatal(err)
@@ -100,7 +100,7 @@ func TestReportByRefFallbackScope(t *testing.T) {
 	d := Decision{
 		PushID: "22222222-2222-2222-2222-222222222222", Repo: repo, Tag: "v1",
 		Digest: "sha256:seeded", Identity: "tester", Passed: true,
-		BaseImageID: "ubi9", TrivyDBVersion: "v2026-06-25",
+		BaseImageID: "ubi9", ScannerDBVersion: "v2026-06-25",
 	}
 	if err := w.WriteDecision(ctx, d); err != nil {
 		t.Fatal(err)

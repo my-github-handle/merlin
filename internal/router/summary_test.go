@@ -11,7 +11,7 @@ func TestSummarizeReject(t *testing.T) {
 	res := policy.Result{
 		Passed: false,
 		Verdicts: map[string]policy.Verdict{
-			"trivy": {
+			"grype": {
 				Passed:  false,
 				Reasons: []string{"CVE-1 (CRITICAL) in openssl 1.1.1", "CVE-2 (CRITICAL) in glibc 2.31"},
 			},
@@ -39,7 +39,7 @@ func TestSummarizeBaseImageOnlyReject(t *testing.T) {
 		Passed: false,
 		Verdicts: map[string]policy.Verdict{
 			"baseimage": {Passed: false, Reasons: []string{"base image not permitted: detected \"alpine\", allowed: rhel(ubi), wolfi/chainguard"}},
-			"trivy":     {Passed: true},
+			"grype":     {Passed: true},
 		},
 	}
 	got := SummarizeResult(res)

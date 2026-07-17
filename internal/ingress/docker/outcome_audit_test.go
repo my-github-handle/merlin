@@ -49,10 +49,10 @@ func TestOutcome_RecordsPassDecision(t *testing.T) {
 	res := policy.Result{
 		Passed: true,
 		Verdicts: map[string]policy.Verdict{
-			"trivy": {Passed: true, ScannerDBVersion: "db-v1"},
+			"grype": {Passed: true, ScannerDBVersion: "db-v1"},
 		},
 		Findings:       []policy.Finding{{CVE: "CVE-2024-1234", Severity: "LOW"}},
-		TrivyDBVersion: "db-v1",
+		ScannerDBVersion: "db-v1",
 	}
 
 	_, err := o.Apply(context.Background(), &acr.FakePusher{}, req, res, nil, 0)
@@ -85,8 +85,8 @@ func TestOutcome_RecordsPassDecision(t *testing.T) {
 	if len(call.decision.FailedPolicies) != 0 {
 		t.Errorf("FailedPolicies = %v, want []", call.decision.FailedPolicies)
 	}
-	if call.decision.TrivyDBVersion != "db-v1" {
-		t.Errorf("TrivyDBVersion = %q, want db-v1", call.decision.TrivyDBVersion)
+	if call.decision.ScannerDBVersion != "db-v1" {
+		t.Errorf("ScannerDBVersion = %q, want db-v1", call.decision.ScannerDBVersion)
 	}
 	if len(call.findings) != 1 {
 		t.Fatalf("findings count = %d, want 1", len(call.findings))
@@ -116,11 +116,11 @@ func TestOutcome_RecordsFailDecision(t *testing.T) {
 	res := policy.Result{
 		Passed: false,
 		Verdicts: map[string]policy.Verdict{
-			"trivy": {Passed: false, Reasons: []string{"critical vuln found"}, ScannerDBVersion: "db-v1"},
+			"grype": {Passed: false, Reasons: []string{"critical vuln found"}, ScannerDBVersion: "db-v1"},
 			"base":  {Passed: false, Reasons: []string{"base image rejected"}},
 		},
 		Findings:       []policy.Finding{{CVE: "CVE-2024-9999", Severity: "CRITICAL"}},
-		TrivyDBVersion: "db-v1",
+		ScannerDBVersion: "db-v1",
 	}
 
 	_, err := o.Apply(context.Background(), &acr.FakePusher{}, req, res, nil, 0)
@@ -139,18 +139,18 @@ func TestOutcome_RecordsFailDecision(t *testing.T) {
 		t.Errorf("FailedPolicies count = %d, want 2", len(call.decision.FailedPolicies))
 	}
 	// FailedPolicies order may vary (from map), just check they're present
-	hasTrivyFail := false
+	hasGrypeFail := false
 	hasBaseFail := false
 	for _, p := range call.decision.FailedPolicies {
-		if p == "trivy" {
-			hasTrivyFail = true
+		if p == "grype" {
+			hasGrypeFail = true
 		}
 		if p == "base" {
 			hasBaseFail = true
 		}
 	}
-	if !hasTrivyFail || !hasBaseFail {
-		t.Errorf("FailedPolicies = %v, want [trivy, base]", call.decision.FailedPolicies)
+	if !hasGrypeFail || !hasBaseFail {
+		t.Errorf("FailedPolicies = %v, want [grype, base]", call.decision.FailedPolicies)
 	}
 	if len(call.decision.Reasons) != 2 {
 		t.Errorf("Reasons count = %d, want 2", len(call.decision.Reasons))

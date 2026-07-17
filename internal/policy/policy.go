@@ -24,7 +24,7 @@ type StagedImage struct {
 	Tag     string
 	Digest  string
 	FSPath  string // assembled root filesystem directory (for os-release reads)
-	OCIPath string // on-disk OCI layout (for Trivy)
+	OCIPath string // on-disk OCI layout (for Grype)
 	// Created is the image config's "created" timestamp (RFC3339). Zero value means
 	// the timestamp could not be determined; the image-age policy fails closed on it.
 	Created time.Time

@@ -44,7 +44,7 @@ func TestEngineCollectsAllFailures(t *testing.T) {
 }
 
 func TestEnginePolicyErrorIsBlockingInfraFailure(t *testing.T) {
-	boom := errors.New("trivy crashed")
+	boom := errors.New("grype crashed")
 	e := NewEngine(
 		staticPolicy{name: "ok", verdict: Verdict{Passed: true}},
 		staticPolicy{name: "broken", err: boom},
@@ -68,7 +68,7 @@ func TestEngineCollectsFindingsFromVerdict(t *testing.T) {
 	}
 	e := NewEngine(
 		staticPolicy{name: "baseline", verdict: Verdict{Passed: true}},
-		staticPolicy{name: "trivy", verdict: Verdict{
+		staticPolicy{name: "grype", verdict: Verdict{
 			Passed:           true,
 			Findings:         findings,
 			ScannerDBVersion: "db-2023-12-01",
@@ -97,7 +97,7 @@ func TestEngineCollectsFindingsOnBothPassAndFail(t *testing.T) {
 		{CVE: "CVE-2023-9999", Severity: "CRITICAL", Pkg: "zlib", Version: "1.2.3"},
 	}
 	e := NewEngine(
-		staticPolicy{name: "trivy", verdict: Verdict{
+		staticPolicy{name: "grype", verdict: Verdict{
 			Passed:           false,
 			Reasons:          []string{"blocking CVE"},
 			Findings:         findings,

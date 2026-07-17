@@ -93,7 +93,7 @@ ORDER BY ts DESC LIMIT 1`, repo, ref, ref)
 	}
 	return r.scanHeader(ctx, `
 SELECT toString(push_id), image_repo, image_tag, image_digest, identity, passed,
-       failed_policies, reasons, base_image_id, trivy_db_version, ts, image_created, image_age_days, image_age_threshold_days, image_age_known
+       failed_policies, reasons, base_image_id, scanner_db_version, ts, image_created, image_age_days, image_age_threshold_days, image_age_known
 FROM gate_decisions WHERE image_repo = ? ORDER BY ts DESC LIMIT 1`, repo)
 }
 
