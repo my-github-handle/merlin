@@ -21,7 +21,7 @@ func TestLoadMultiTenantConfig(t *testing.T) {
 	t.Setenv("DEV_CID", "dev-client-id")
 	t.Setenv("PROD_CID", "prod-client-id")
 	p := writeTemp(t, `
-trivy:
+grype:
   severity_threshold: CRITICAL
 base_image:
   allowed_ids: [rhel]
@@ -127,8 +127,8 @@ base_image:
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.Trivy.SeverityThreshold != "CRITICAL" {
-		t.Errorf("default threshold = %q, want CRITICAL", cfg.Trivy.SeverityThreshold)
+	if cfg.Grype.SeverityThreshold != "CRITICAL" {
+		t.Errorf("default threshold = %q, want CRITICAL", cfg.Grype.SeverityThreshold)
 	}
 }
 
@@ -194,7 +194,7 @@ auth: { registry_token_secret: shh }
 
 func TestLoadRejectsInvalidThreshold(t *testing.T) {
 	p := writeTemp(t, `
-trivy:
+grype:
   severity_threshold: SUPER_CRITICAL
 acr:
   registry_template: "{prefix}acr.azurecr.io"

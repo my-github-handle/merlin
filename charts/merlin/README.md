@@ -6,7 +6,7 @@ Helm chart for deploying Merlin, an image-publishing gate proxy that validates c
 
 Merlin acts as a gating layer in front of one or more ACRs, enforcing security policies on pushed images. Each push is routed to a per-tenant ACR by the host prefix: a client pushing to `<prefix>.<merlin.acr.baseDomain>` (e.g. `c3dev.c3ci.cloud`) is forwarded to the ACR derived from `merlin.acr.registryTemplate` with `{prefix}` substituted (e.g. `c3devacr.azurecr.io`). Each tenant has its own inbound Entra auth and its own outbound workload-identity client ID. Unknown prefixes return `404`, and a registry token minted on one tenant host is rejected (`401`) on another. The gate enforces:
 - **Base image validation**: Ensures images are built on approved base images (Red Hat UBI, Wolfi, Chainguard)
-- **Vulnerability scanning**: Scans images with Trivy and rejects images with CRITICAL vulnerabilities
+- **Vulnerability scanning**: Scans images with Grype and rejects images with CRITICAL vulnerabilities
 - **Audit logging**: Records all push attempts and gate decisions to ClickHouse
 - **Entra (Azure AD) authentication**: Integrates with Azure Workload Identity for seamless ACR token acquisition
 
@@ -274,7 +274,7 @@ tenant host cannot be used against another tenant host (`401`).
 
 Merlin will:
 1. Validate the base image (must be UBI, Wolfi, or Chainguard)
-2. Scan for CRITICAL vulnerabilities with Trivy
+2. Scan for CRITICAL vulnerabilities with Grype
 3. Reject images that fail the gate
 4. Forward approved images to the tenant's ACR (`registryTemplate` with `{prefix}` substituted)
 
@@ -296,8 +296,8 @@ The following items are tracked as technical debt from Phase 6 and Phase 7 devel
 
 - **ClickHouse networks/ip 0.0.0.0/0**: The ClickHouseInstallation CR specifies `ip: "0.0.0.0/0"` in the networks configuration, which is overly permissive. This is used as a placeholder until proper in-cluster network policies are defined. **Fix**: Restrict ClickHouse network access to the Merlin namespace or specific pod CIDR.
 
-- **Trivy vulnerability database download**: Trivy requires a vulnerability database to perform scans. The Dockerfile bundles the `trivy` binary, and the Deployment sets `TRIVY_CACHE_DIR` to a writable `emptyDir` volume, but the pod needs internet egress to download the DB on first scan. **Options**:
-  - Allow egress to `ghcr.io` and `github.com` for DB downloads
+- **Grype vulnerability database download**: Grype requires a vulnerability database to perform scans. The Dockerfile bundles the `grype` binary, and the Deployment sets `GRYPE_DB_CACHE_DIR` to a writable `emptyDir` volume, but the pod needs internet egress to download the DB on first scan. **Options**:
+  - Allow egress to `toolbox-data.anchore.io` for DB downloads
   - Pre-seed the cache by mounting a PersistentVolume with a pre-downloaded DB
   - Use a sidecar or init container to pre-populate the cache
 
@@ -329,11 +329,11 @@ The following items are tracked as technical debt from Phase 6 and Phase 7 devel
 - Verify that the specified `storageClassName` exists: `kubectl get storageclass`
 - Check events: `kubectl describe pod <pod-name> -n merlin`
 
-### Trivy Scans Fail
+### Grype Scans Fail
 
-- Ensure the pod has egress to download the Trivy vulnerability database
-- Check pod logs for Trivy errors: `kubectl logs <pod-name> -n merlin | grep trivy`
-- Verify that `TRIVY_CACHE_DIR` is writable (should be `/tmp/trivy-cache` mounted as emptyDir)
+- Ensure the pod has egress to download the Grype vulnerability database
+- Check pod logs for Grype errors: `kubectl logs <pod-name> -n merlin | grep grype`
+- Verify that `GRYPE_DB_CACHE_DIR` is writable (should be `/var/cache/grype` mounted as emptyDir)
 
 ## Upgrade
 
