@@ -53,7 +53,7 @@ type ReportVM struct {
 	PushID, Repo, Tag, Digest, Identity string
 	Passed                              bool
 	FailedPolicies, Reasons             []string
-	BaseImageID, TrivyDBVersion         string
+	BaseImageID, ScannerDBVersion       string
 	Ts                                  time.Time
 	Findings                            []FindingVM
 	Counts                              SeverityVM

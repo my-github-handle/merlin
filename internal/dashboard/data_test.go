@@ -119,7 +119,7 @@ func TestReportViewModelWithFindings(t *testing.T) {
 		FailedPolicies:        []string{"cve-policy"},
 		Reasons:               []string{"CRITICAL CVE found"},
 		BaseImageID:           "ubi9",
-		TrivyDBVersion:        "2.0",
+		ScannerDBVersion:      "2.0",
 		Ts:                    time.Date(2026, 6, 25, 10, 0, 0, 0, time.UTC),
 		ImageCreated:          time.Date(2026, 4, 20, 10, 31, 0, 0, time.UTC),
 		ImageAgeDays:          74,

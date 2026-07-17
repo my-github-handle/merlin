@@ -4,7 +4,7 @@
 {{else}}
 <section class="rep-head">
   <div><div class="img">{{.VM.Repo}}{{if .VM.Tag}}:{{.VM.Tag}}{{end}}</div>
-  <div class="dig">{{.VM.Digest}} · {{.VM.Identity}} · {{.VM.Ts.Format "2006-01-02 15:04:05"}} · base {{.VM.BaseImageID}} · trivy {{.VM.TrivyDBVersion}}</div>
+  <div class="dig">{{.VM.Digest}} · {{.VM.Identity}} · {{.VM.Ts.Format "2006-01-02 15:04:05"}} · base {{.VM.BaseImageID}} · scanner {{.VM.ScannerDBVersion}}</div>
   {{if .VM.ImageAgeKnown}}
   <div class="dig {{if .VM.AgeCompliant}}ok{{else}}bad{{end}}">Image age: {{.VM.ImageAgeDays}}d (threshold {{.VM.AgeThreshold}}d) — created {{.VM.ImageCreated.Format "2006-01-02 15:04"}}</div>
   {{else}}
