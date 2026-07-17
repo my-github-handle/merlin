@@ -210,9 +210,12 @@ func BuildWithBackends(ctx context.Context, cfg config.Config) (*http.Server, *h
 		closers = append(closers, func() { writerCloser.Close() })
 	}
 
-	auditor := audit.NewAuditor(auditWriter, cfg.Audit.QueueSize, func(err error) {
-		// TODO(observability): log dropped audit events
-		_ = err
+	auditor := audit.NewAuditor(auditWriter, cfg.Audit.QueueSize, func(d audit.Decision, err error) {
+		// A dropped decision means a scan ran but its audit record was lost — the
+		// report endpoint will then have nothing to serve for that image. Log which
+		// image was affected so this is diagnosable instead of silently invisible.
+		log.Printf("audit drop: decision NOT recorded for %s/%s (push_id=%s passed=%t): %v",
+			d.Repo, d.Tag, d.PushID, d.Passed, err)
 	})
 	closers = append(closers, func() { auditor.Close() })
 

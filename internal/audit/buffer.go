@@ -17,15 +17,17 @@ type job struct {
 type Auditor struct {
 	w         Writer
 	queue     chan job
-	onDrop    func(error)
+	onDrop    func(Decision, error)
 	workerWg  sync.WaitGroup // tracks worker goroutine
 	closeOnce sync.Once      // guards close(a.queue) against double-close
 }
 
 // NewAuditor starts a background worker draining into w. If the queue is full or
-// a write fails, onDrop is called and the push is never blocked.
+// a write fails, onDrop is called with the affected decision and the push is never
+// blocked. Passing the decision lets the callback name which image's audit record
+// was lost — a silent drop is how a passed-but-unrecorded scan goes invisible.
 // IMPORTANT: onDrop must NOT call Record/Flush/Close on the same Auditor (re-entrancy).
-func NewAuditor(w Writer, queueSize int, onDrop func(error)) *Auditor {
+func NewAuditor(w Writer, queueSize int, onDrop func(Decision, error)) *Auditor {
 	a := &Auditor{w: w, queue: make(chan job, queueSize), onDrop: onDrop}
 	a.workerWg.Add(1)
 	go a.run()
@@ -41,12 +43,12 @@ func (a *Auditor) run() {
 		}
 		ctx := context.Background()
 		if err := a.w.WriteDecision(ctx, j.decision); err != nil {
-			a.onDrop(err)
+			a.onDrop(j.decision, err)
 			continue
 		}
 		if len(j.findings) > 0 {
 			if err := a.w.WriteFindings(ctx, j.decision, j.findings); err != nil {
-				a.onDrop(err)
+				a.onDrop(j.decision, err)
 			}
 		}
 	}
@@ -57,7 +59,7 @@ func (a *Auditor) Record(_ context.Context, d Decision, findings []policy.Findin
 	select {
 	case a.queue <- job{decision: d, findings: findings}:
 	default:
-		a.onDrop(errQueueFull)
+		a.onDrop(d, errQueueFull)
 	}
 }
 

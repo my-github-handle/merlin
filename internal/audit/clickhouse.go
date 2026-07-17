@@ -240,11 +240,18 @@ func (r *Reader) FindingsByImageRef(ctx context.Context, repo, ref string) ([]po
 		 ORDER BY ts DESC LIMIT 1`, repo, ref, ref)
 	if err := row.Scan(&pushID); err != nil {
 		// No exact match. A buildx/attested push records the image manifest by
-		// DIGEST (the tag lives only on the index, which is never scanned), so the
-		// human tag won't match. Fall back to the most recent push for the repo —
-		// the common "one image in flight per repo" case. (Caveat: concurrent
+		// DIGEST (the tag lives only on the index, which is never scanned), so a
+		// by-digest ref won't match and falls back to the most recent push for the
+		// repo — the common "one image in flight per repo" case. (Caveat: concurrent
 		// pushes of different images to the same repo may return a sibling push's
 		// report; use the by-digest form repo@sha256:... to disambiguate.)
+		//
+		// A TAG miss, by contrast, means that tag was never scanned; falling back
+		// would serve a different image's findings mislabeled as the requested tag,
+		// so return "no findings" instead.
+		if !refAllowsRepoFallback(ref) {
+			return nil, nil
+		}
 		row2 := r.conn.QueryRow(ctx,
 			`SELECT toString(push_id) FROM gate_decisions
 			 WHERE image_repo = ? ORDER BY ts DESC LIMIT 1`, repo)

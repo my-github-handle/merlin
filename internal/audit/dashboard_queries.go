@@ -79,7 +79,13 @@ ORDER BY ts DESC LIMIT 1`, repo, ref, ref)
 	if h.Found {
 		return h, nil
 	}
-	// Fall back to the most recent push for the repo (mirrors FindingsByImageRef).
+	// Only a digest ref may fall back to the newest push for the repo (buildx case).
+	// A tag miss means that tag was never scanned; falling back would serve a
+	// different image under the requested tag. Return not-found instead. Mirrors
+	// FindingsByImageRef.
+	if !refAllowsRepoFallback(ref) {
+		return DecisionHeader{Found: false}, nil
+	}
 	return r.scanHeader(ctx, `
 SELECT toString(push_id), image_repo, image_tag, image_digest, identity, passed,
        failed_policies, reasons, base_image_id, trivy_db_version, ts, image_created, image_age_days, image_age_threshold_days, image_age_known

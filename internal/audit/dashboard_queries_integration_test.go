@@ -74,3 +74,52 @@ func TestDashboardQueriesRoundTrip(t *testing.T) {
 		t.Fatalf("filtered ImagesPage err=%v total=%d", err, pgc.Total)
 	}
 }
+
+// TestReportByRefFallbackScope pins the fallback boundary: a TAG that was never
+// scanned must NOT resolve to a sibling image in the same repo (the deceptive-report
+// bug), while a by-DIGEST miss still falls back to the one image in flight (the
+// buildx case). Seeds one push under tag "v1" and asserts both lookups.
+func TestReportByRefFallbackScope(t *testing.T) {
+	dsn := clickhouseTestDSN(t)
+	w, err := NewClickHouseWriter(dsn, 30)
+	if err != nil {
+		t.Fatalf("writer: %v", err)
+	}
+	defer w.(interface{ Close() error }).Close()
+	ctx := context.Background()
+
+	repo := "fallback/app"
+	d := Decision{
+		PushID: "22222222-2222-2222-2222-222222222222", Repo: repo, Tag: "v1",
+		Digest: "sha256:seeded", Identity: "tester", Passed: true,
+		BaseImageID: "ubi9", TrivyDBVersion: "v2026-06-25",
+	}
+	if err := w.WriteDecision(ctx, d); err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := NewClickHouseReader(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+
+	// A tag that was never scanned must not resolve to the seeded sibling.
+	if hdr, err := r.DecisionHeaderByRef(ctx, repo, "v2-never-scanned"); err != nil {
+		t.Fatalf("DecisionHeaderByRef(tag miss) err=%v", err)
+	} else if hdr.Found {
+		t.Errorf("tag miss resolved to a sibling (found=%v tag=%q) — deceptive fallback", hdr.Found, hdr.Tag)
+	}
+	if f, err := r.FindingsByImageRef(ctx, repo, "v2-never-scanned"); err != nil {
+		t.Fatalf("FindingsByImageRef(tag miss) err=%v", err)
+	} else if f != nil {
+		t.Errorf("tag miss returned %d findings — deceptive fallback", len(f))
+	}
+
+	// A by-digest miss still falls back to the one image in flight for the repo.
+	if hdr, err := r.DecisionHeaderByRef(ctx, repo, "sha256:doesnotexist"); err != nil {
+		t.Fatalf("DecisionHeaderByRef(digest miss) err=%v", err)
+	} else if !hdr.Found || hdr.Tag != "v1" {
+		t.Errorf("digest miss did not fall back to seeded image: found=%v tag=%q", hdr.Found, hdr.Tag)
+	}
+}
