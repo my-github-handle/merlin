@@ -45,5 +45,5 @@ ALTER TABLE gate_decisions ADD COLUMN IF NOT EXISTS image_age_threshold_days UIn
 ALTER TABLE gate_decisions ADD COLUMN IF NOT EXISTS image_age_known Bool DEFAULT 0;
 -- Online ALTER for existing deployments: scanner-agnostic DB-version column.
 ALTER TABLE gate_decisions ADD COLUMN IF NOT EXISTS scanner_db_version String;
--- Grype emits Negligible; extend the findings severity enum to accept it.
+-- Grype emits Negligible severity, so the findings enum must accept it.
 ALTER TABLE vulnerability_findings MODIFY COLUMN severity Enum8('UNKNOWN'=0,'LOW'=1,'MEDIUM'=2,'HIGH'=3,'CRITICAL'=4,'NEGLIGIBLE'=5);

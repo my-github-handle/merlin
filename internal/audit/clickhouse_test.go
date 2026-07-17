@@ -52,6 +52,17 @@ func TestSplitStatements(t *testing.T) {
 			want: []string{"CREATE TABLE foo (id INT)", "CREATE TABLE bar (name STRING)"},
 		},
 		{
+			// A comment containing a ';' splits into a comment-only fragment;
+			// ClickHouse rejects a comment-only query as "Empty query" (code 62),
+			// so such fragments must be filtered out, not sent as statements.
+			name: "comment containing a semicolon is not emitted as a statement",
+			sql:  "ALTER TABLE t ADD COLUMN c String;\n-- Grype emits Negligible; extend the enum\nALTER TABLE t MODIFY COLUMN s Enum8('X'=0);",
+			want: []string{
+				"ALTER TABLE t ADD COLUMN c String",
+				"ALTER TABLE t MODIFY COLUMN s Enum8('X'=0)",
+			},
+		},
+		{
 			name: "real schema.sql snippet",
 			sql: `CREATE TABLE IF NOT EXISTS gate_decisions (
     ts DateTime64(3)

@@ -97,9 +97,23 @@ func bootstrapSchema(opts *clickhouse.Options, retentionDays int) error {
 }
 
 // splitStatements splits a SQL script into individual statements on semicolons.
-// Filters out empty or whitespace-only statements. Does not handle SQL comments.
+// Full-line "--" comments are stripped BEFORE splitting: a ';' inside a comment
+// (e.g. "-- extend the enum; accept Negligible") must not split a statement, and
+// a comment-only fragment would otherwise be sent to ClickHouse as an "Empty
+// query" (code 62). Filters out empty or whitespace-only statements.
 func splitStatements(sql string) []string {
-	parts := strings.Split(sql, ";")
+	// Drop whole-line comments so their content — including any ';' — never
+	// affects statement boundaries. Inline trailing comments are rare in the
+	// bootstrap schema and are left as-is.
+	var b strings.Builder
+	for _, line := range strings.Split(sql, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "--") {
+			continue
+		}
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	parts := strings.Split(b.String(), ";")
 	var stmts []string
 	for _, p := range parts {
 		trimmed := strings.TrimSpace(p)
