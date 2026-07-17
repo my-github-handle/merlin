@@ -36,7 +36,7 @@ func (e *Engine) Run(ctx context.Context, img StagedImage) (Result, error) {
 		// Collect findings carried back on the verdict (request-local, no shared state).
 		res.Findings = append(res.Findings, v.Findings...)
 		if v.ScannerDBVersion != "" {
-			res.TrivyDBVersion = v.ScannerDBVersion
+			res.ScannerDBVersion = v.ScannerDBVersion
 		}
 		if v.Age != nil {
 			res.Age = v.Age

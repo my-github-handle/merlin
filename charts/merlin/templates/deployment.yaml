@@ -52,16 +52,16 @@ spec:
               value: production
             - name: MERLIN_CONFIG
               value: /etc/merlin/config.yaml
-            # readOnlyRootFilesystem=true means trivy cannot use its default
-            # ~/.cache/trivy; point its cache at the writable emptyDir below.
-            - name: TRIVY_CACHE_DIR
-              value: /var/cache/trivy
-            # TMPDIR: Point trivy's layer extraction to the scratch emptyDir mount.
-            # With readOnlyRootFilesystem=true, /tmp is read-only, so trivy's
+            # readOnlyRootFilesystem=true means grype cannot use its default
+            # ~/.cache/grype; point its cache at the writable emptyDir below.
+            - name: GRYPE_DB_CACHE_DIR
+              value: /var/cache/grype
+            # TMPDIR: Point grype's layer extraction to the scratch emptyDir mount.
+            # With readOnlyRootFilesystem=true, /tmp is read-only, so grype's
             # temporary layer extraction during scanning would fail. Setting TMPDIR
-            # to the scratch mount ensures trivy writes to a writable location.
+            # to the scratch mount ensures grype writes to a writable location.
             # This also ensures all image assembly scratch dirs (via SetScratchBaseDir)
-            # and trivy's temporary operations write to the same writable emptyDir,
+            # and grype's temporary operations write to the same writable emptyDir,
             # keeping the root filesystem truly read-only for defense-in-depth.
             - name: TMPDIR
               value: {{ .Values.merlin.staging.scratchDir | quote }}
@@ -104,8 +104,8 @@ spec:
               readOnly: true
             - name: scratch
               mountPath: {{ .Values.merlin.staging.scratchDir }}
-            - name: trivy-cache
-              mountPath: /var/cache/trivy
+            - name: grype-cache
+              mountPath: /var/cache/grype
           # TODO: Add a real /healthz endpoint for HTTP probes.
           # Current state: /v2/ returns 401 (auth required), which fails HTTP 200 probes.
           # TCP socket probes work around this by checking the port is listening.
@@ -131,5 +131,5 @@ spec:
             name: {{ include "merlin.fullname" . }}-config
         - name: scratch
           emptyDir: {}
-        - name: trivy-cache
+        - name: grype-cache
           emptyDir: {}

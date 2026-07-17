@@ -20,7 +20,7 @@ import (
 )
 
 // Assemble writes the staged blobs into a valid OCI image layout under
-// scratchDir/oci (consumable by `trivy image --input`) and extracts the layered
+// scratchDir/oci (consumable by `grype oci-dir:...`) and extracts the layered
 // root filesystem into scratchDir/rootfs (for the base-image os-release check).
 //
 // A real Docker/OCI push references a JSON config blob plus tar+gzip filesystem
@@ -213,7 +213,7 @@ func extractTar(raw []byte, dest string) error {
 
 		// Handle entry types intentionally: only reproduce directories and regular files.
 		// Symlinks, hardlinks, and device nodes are skipped because the assembled rootfs
-		// is only used for read-only policy scanning (os-release + Trivy), and reproducing
+		// is only used for read-only policy scanning (os-release + Grype), and reproducing
 		// them would add escape surface.
 		switch hdr.Typeflag {
 		case tar.TypeDir:

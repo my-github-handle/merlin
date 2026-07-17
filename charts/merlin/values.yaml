@@ -55,7 +55,7 @@ externalSecrets:
   data: []             # e.g. [{secretKey: clickhouse-password, remoteKey: merlin-ch-pass}]
 merlin:
   # rendered into /etc/merlin/config.yaml
-  trivy: { severityThreshold: CRITICAL }
+  grype: { severityThreshold: CRITICAL }
   baseImage: { allowedIDs: [rhel, wolfi, chainguard] }
   # Image-age gate: rejects images whose OCI config `created` is older than
   # thresholdDays. Omit this block to use the built-in defaults (enabled, 60 days).

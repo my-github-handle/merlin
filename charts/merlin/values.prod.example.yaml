@@ -84,8 +84,8 @@ externalSecrets:
 
 # Merlin application configuration
 merlin:
-  # Trivy security scanning settings
-  trivy:
+  # Grype security scanning settings
+  grype:
     severityThreshold: CRITICAL
 
   # Base image allowlist (Merlin will reject images not based on these)

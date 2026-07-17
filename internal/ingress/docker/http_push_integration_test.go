@@ -13,8 +13,8 @@ import (
 
 	"github.com/merlin-gate/merlin/internal/acr"
 	"github.com/merlin-gate/merlin/internal/policies/baseimage"
+	"github.com/merlin-gate/merlin/internal/policies/grype"
 	"github.com/merlin-gate/merlin/internal/policies/imageage"
-	"github.com/merlin-gate/merlin/internal/policies/trivy"
 	"github.com/merlin-gate/merlin/internal/policy"
 	"github.com/merlin-gate/merlin/internal/router"
 	"github.com/merlin-gate/merlin/internal/staging"
@@ -24,7 +24,7 @@ import (
 // real HTTP handler, PUT manifest → 201 + ACR push + scan report URL.
 func TestHTTPPushUBIGood(t *testing.T) {
 	layer := layerWithOSID(t, "rhel")
-	h, fp := buildHTTPHandler(t, trivy.Report{}, 2)
+	h, fp := buildHTTPHandler(t, grype.Report{}, 2)
 
 	repo := "testapp"
 	ref := "v1"
@@ -71,7 +71,7 @@ func TestHTTPPushUBIGood(t *testing.T) {
 // TestHTTPPushCriticalCVE tests that a CRITICAL CVE finding rejects the push with 400 + no ACR push.
 func TestHTTPPushCriticalCVE(t *testing.T) {
 	layer := layerWithOSID(t, "rhel")
-	report := trivy.Report{
+	report := grype.Report{
 		Findings: []policy.Finding{{CVE: "CVE-2024-1", Severity: "CRITICAL", Pkg: "openssl", Version: "1.1.1"}},
 	}
 	h, fp := buildHTTPHandler(t, report, 2)
@@ -108,7 +108,7 @@ func TestHTTPPushCriticalCVE(t *testing.T) {
 // TestHTTPPushAlpineRejected tests that an Alpine base layer is rejected with 400 + no ACR push.
 func TestHTTPPushAlpineRejected(t *testing.T) {
 	layer := layerWithOSID(t, "alpine")
-	h, fp := buildHTTPHandler(t, trivy.Report{}, 2)
+	h, fp := buildHTTPHandler(t, grype.Report{}, 2)
 
 	repo := "alpineapp"
 	ref := "v1"
@@ -146,7 +146,7 @@ func TestHTTPPushUnauthenticated(t *testing.T) {
 		n++
 		return "u" + string(rune('0'+n))
 	})
-	tp := trivy.New(staticRunner{report: trivy.Report{}}, "CRITICAL")
+	tp := grype.New(staticRunner{report: grype.Report{}}, "CRITICAL")
 	bp := baseimage.New([]string{"rhel", "wolfi", "chainguard"})
 	rt := router.New(policy.NewEngine(tp, bp))
 	fp := &acr.FakePusher{}
@@ -249,14 +249,14 @@ func TestHTTPPushSaturated(t *testing.T) {
 }
 
 // buildHTTPHandler assembles a handler with in-memory staging, pool, and fake ACR for HTTP tests.
-func buildHTTPHandler(t *testing.T, trivyReport trivy.Report, poolSize int) (*Handler, *acr.FakePusher) {
+func buildHTTPHandler(t *testing.T, gryReport grype.Report, poolSize int) (*Handler, *acr.FakePusher) {
 	t.Helper()
 	n := 0
 	st := staging.New(staging.NewMemoryBlobStore(), staging.NewMemorySessionStore(), func() string {
 		n++
 		return "u" + string(rune('0'+n))
 	})
-	tp := trivy.New(staticRunner{report: trivyReport}, "CRITICAL")
+	tp := grype.New(staticRunner{report: gryReport}, "CRITICAL")
 	bp := baseimage.New([]string{"rhel", "wolfi", "chainguard"})
 	// Add image age policy with 60-day threshold for tests
 	ap := imageage.New(imageage.Rule{Enabled: true, ThresholdDays: 60}, nil)
@@ -339,7 +339,7 @@ func readBody(t *testing.T, resp *http.Response) string {
 // TestPushRejectsOldImage verifies that an image with a 100-day-old created timestamp is rejected with 400.
 func TestPushRejectsOldImage(t *testing.T) {
 	layer := layerWithOSID(t, "rhel")
-	h, fp := buildHTTPHandler(t, trivy.Report{}, 2)
+	h, fp := buildHTTPHandler(t, grype.Report{}, 2)
 
 	repo := "oldapp"
 	ref := "v1"
@@ -391,7 +391,7 @@ func TestPushRejectsOldImage(t *testing.T) {
 // see TestReportEnvelopeIncludesAge; clients compute local age via docker inspect.)
 func TestPushFreshImagePasses(t *testing.T) {
 	layer := layerWithOSID(t, "rhel")
-	h, fp := buildHTTPHandler(t, trivy.Report{}, 2)
+	h, fp := buildHTTPHandler(t, grype.Report{}, 2)
 
 	repo := "freshapp"
 	ref := "v1"

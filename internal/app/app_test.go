@@ -9,7 +9,7 @@ import (
 
 func minimalConfig() config.Config {
 	return config.Config{
-		Trivy:     config.TrivyConfig{SeverityThreshold: "CRITICAL"},
+		Grype:     config.GrypeConfig{SeverityThreshold: "CRITICAL"},
 		BaseImage: config.BaseImageConfig{AllowedIDs: []string{"rhel", "wolfi", "chainguard"}},
 		ACR:       config.ACRConfig{RegistryTemplate: "{prefix}acr.azurecr.io", BaseDomain: "c3ci.cloud"},
 		Auth:      config.AuthConfig{Service: "merlin"},

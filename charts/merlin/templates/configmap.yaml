@@ -6,8 +6,8 @@ metadata:
 data:
   config.yaml: |
     # Merlin configuration (snake_case keys match internal/config/config.go yaml tags)
-    trivy:
-      severity_threshold: {{ .Values.merlin.trivy.severityThreshold }}
+    grype:
+      severity_threshold: {{ .Values.merlin.grype.severityThreshold }}
     base_image:
       allowed_ids: {{ toJson .Values.merlin.baseImage.allowedIDs }}
     {{- with .Values.merlin.imageAge }}

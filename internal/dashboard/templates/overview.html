@@ -20,7 +20,7 @@
   <div class="card">
     <div class="lbl">Infra health</div>
     <div class="kv"><span>ACR push success</span><b>{{printf "%.1f" .VM.ACRPushSuccess}}%</b></div>
-    <div class="kv"><span>Trivy DB age</span><b>{{printf "%.0f" .VM.TrivyDBAgeDays}}d</b></div>
+    <div class="kv"><span>Scanner DB age</span><b>{{printf "%.0f" .VM.ScannerDBAgeDays}}d</b></div>
   </div>
 </section>
 {{if .VM.Errored}}<p class="degraded">Some data is currently unavailable.</p>{{end}}

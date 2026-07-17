@@ -10,7 +10,7 @@ import (
 )
 
 type Config struct {
-	Trivy     TrivyConfig     `yaml:"trivy"`
+	Grype     GrypeConfig     `yaml:"grype"`
 	BaseImage BaseImageConfig `yaml:"base_image"`
 	ImageAge  ImageAgeConfig  `yaml:"image_age"`
 	ACR       ACRConfig       `yaml:"acr"`
@@ -21,7 +21,7 @@ type Config struct {
 	Server    ServerConfig    `yaml:"server"`
 }
 
-type TrivyConfig struct {
+type GrypeConfig struct {
 	SeverityThreshold string `yaml:"severity_threshold"`
 }
 
@@ -117,8 +117,8 @@ func Load(path string) (Config, error) {
 }
 
 func (c *Config) applyDefaults() {
-	if c.Trivy.SeverityThreshold == "" {
-		c.Trivy.SeverityThreshold = "CRITICAL"
+	if c.Grype.SeverityThreshold == "" {
+		c.Grype.SeverityThreshold = "CRITICAL"
 	}
 	if c.ImageAge.ThresholdDays == 0 {
 		c.ImageAge.ThresholdDays = 60
@@ -166,7 +166,7 @@ func (c *Config) applyDefaults() {
 }
 
 var validSeverities = map[string]bool{
-	"UNKNOWN": true, "LOW": true, "MEDIUM": true, "HIGH": true, "CRITICAL": true,
+	"NEGLIGIBLE": true, "UNKNOWN": true, "LOW": true, "MEDIUM": true, "HIGH": true, "CRITICAL": true,
 }
 
 func (c *Config) validate() error {
@@ -201,8 +201,8 @@ func (c *Config) validate() error {
 	if len(c.BaseImage.AllowedIDs) == 0 {
 		return fmt.Errorf("config: base_image.allowed_ids must not be empty")
 	}
-	if !validSeverities[c.Trivy.SeverityThreshold] {
-		return fmt.Errorf("config: trivy.severity_threshold %q is not a valid severity (UNKNOWN, LOW, MEDIUM, HIGH, CRITICAL)", c.Trivy.SeverityThreshold)
+	if !validSeverities[c.Grype.SeverityThreshold] {
+		return fmt.Errorf("config: grype.severity_threshold %q is not a valid severity (NEGLIGIBLE, UNKNOWN, LOW, MEDIUM, HIGH, CRITICAL)", c.Grype.SeverityThreshold)
 	}
 	if c.ImageAge.ThresholdDays < 0 {
 		return fmt.Errorf("config: image_age.threshold_days must be >= 0")

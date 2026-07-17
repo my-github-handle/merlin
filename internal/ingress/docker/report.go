@@ -32,7 +32,7 @@ type ReportAge struct {
 }
 
 // reportEnvelope is the GET /reports/<ref> body: the age result (null when the
-// age policy was disabled / age unknown) plus the Trivy findings.
+// age policy was disabled / age unknown) plus the Grype findings.
 type reportEnvelope struct {
 	Age      *ReportAge       `json:"age"`
 	Findings []policy.Finding `json:"findings"`

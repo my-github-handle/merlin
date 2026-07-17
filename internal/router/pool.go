@@ -11,7 +11,7 @@ import (
 // caller's context deadline. The handler maps it to a retryable 503.
 var ErrSaturated = errors.New("router: scan pool saturated")
 
-// Pool bounds the number of concurrent gates (Trivy scans) per node.
+// Pool bounds the number of concurrent gates (Grype scans) per node.
 type Pool struct {
 	router *Router
 	slots  chan struct{}

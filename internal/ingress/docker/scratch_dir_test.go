@@ -13,7 +13,7 @@ import (
 
 	"github.com/merlin-gate/merlin/internal/acr"
 	"github.com/merlin-gate/merlin/internal/policies/baseimage"
-	"github.com/merlin-gate/merlin/internal/policies/trivy"
+	"github.com/merlin-gate/merlin/internal/policies/grype"
 	"github.com/merlin-gate/merlin/internal/policy"
 	"github.com/merlin-gate/merlin/internal/router"
 	"github.com/merlin-gate/merlin/internal/staging"
@@ -28,7 +28,7 @@ func TestScratchBaseDirRespected(t *testing.T) {
 		n++
 		return "u" + string(rune('0'+n))
 	})
-	tp := trivy.New(staticRunner{report: trivy.Report{}}, "CRITICAL")
+	tp := grype.New(staticRunner{report: grype.Report{}}, "CRITICAL")
 	bp := baseimage.New([]string{"rhel", "wolfi", "chainguard"})
 	rt := router.New(policy.NewEngine(tp, bp))
 	pool := router.NewPool(rt, 2)
@@ -95,7 +95,7 @@ func TestScratchBaseDirDefaultBehavior(t *testing.T) {
 		n++
 		return "u" + string(rune('0'+n))
 	})
-	tp := trivy.New(staticRunner{report: trivy.Report{}}, "CRITICAL")
+	tp := grype.New(staticRunner{report: grype.Report{}}, "CRITICAL")
 	bp := baseimage.New([]string{"rhel", "wolfi", "chainguard"})
 	rt := router.New(policy.NewEngine(tp, bp))
 	fp := &acr.FakePusher{}
@@ -160,7 +160,7 @@ func TestScratchBaseDirPathValidation(t *testing.T) {
 	// Actually, a simpler approach: verify that the system doesn't fail when base dir is set,
 	// which implies the base dir was used correctly. The real integration test is deployment.
 
-	tp := trivy.New(staticRunner{report: trivy.Report{}}, "CRITICAL")
+	tp := grype.New(staticRunner{report: grype.Report{}}, "CRITICAL")
 	bp := baseimage.New([]string{"rhel"})
 	rt := router.New(policy.NewEngine(tp, bp))
 	fp := &acr.FakePusher{}
@@ -211,7 +211,7 @@ func TestScratchBaseDirInvalidPath(t *testing.T) {
 		n++
 		return "u" + string(rune('0'+n))
 	})
-	tp := trivy.New(staticRunner{report: trivy.Report{}}, "CRITICAL")
+	tp := grype.New(staticRunner{report: grype.Report{}}, "CRITICAL")
 	bp := baseimage.New([]string{"rhel"})
 	rt := router.New(policy.NewEngine(tp, bp))
 	fp := &acr.FakePusher{}

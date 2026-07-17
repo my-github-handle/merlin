@@ -82,7 +82,7 @@ func newTestService(fr audit.DashboardReader) *Service {
 func newTestServiceWithMetrics(fr audit.DashboardReader, withMetrics bool) *Service {
 	reg := prometheus.NewRegistry()
 	if withMetrics {
-		g := prometheus.NewGauge(prometheus.GaugeOpts{Name: "merlin_trivy_db_age_days", Help: "x"})
+		g := prometheus.NewGauge(prometheus.GaugeOpts{Name: "merlin_scanner_db_age_days", Help: "x"})
 		g.Set(4)
 		reg.MustRegister(g)
 		cOk := prometheus.NewCounter(prometheus.CounterOpts{Name: "merlin_acr_push_total", Help: "x", ConstLabels: prometheus.Labels{"result": "ok"}})
@@ -119,7 +119,7 @@ func TestReportViewModelWithFindings(t *testing.T) {
 		FailedPolicies:        []string{"cve-policy"},
 		Reasons:               []string{"CRITICAL CVE found"},
 		BaseImageID:           "ubi9",
-		TrivyDBVersion:        "2.0",
+		ScannerDBVersion:      "2.0",
 		Ts:                    time.Date(2026, 6, 25, 10, 0, 0, 0, time.UTC),
 		ImageCreated:          time.Date(2026, 4, 20, 10, 31, 0, 0, time.UTC),
 		ImageAgeDays:          74,

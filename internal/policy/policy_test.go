@@ -26,8 +26,8 @@ func (s staticPolicy) Evaluate(_ context.Context, _ StagedImage) (Verdict, error
 
 func TestPolicyInterfaceSatisfied(t *testing.T) {
 	var _ Policy = staticPolicy{name: "x"}
-	p := staticPolicy{name: "trivy", verdict: Verdict{Passed: true}}
-	if p.Name() != "trivy" {
-		t.Errorf("Name() = %q, want trivy", p.Name())
+	p := staticPolicy{name: "grype", verdict: Verdict{Passed: true}}
+	if p.Name() != "grype" {
+		t.Errorf("Name() = %q, want grype", p.Name())
 	}
 }

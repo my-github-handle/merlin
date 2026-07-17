@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS gate_decisions (
     failed_policies  Array(String),
     reasons          Array(String),
     base_image_id    String,
-    trivy_db_version String,
+    scanner_db_version String,
     duration_ms      UInt32,
     image_created            DateTime64(3) DEFAULT 0,
     image_age_days           UInt16 DEFAULT 0,
@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS vulnerability_findings (
     image_digest   String,
     image_repo     String,
     cve_id         String,
-    severity       Enum8('LOW'=1,'MEDIUM'=2,'HIGH'=3,'CRITICAL'=4,'UNKNOWN'=0),
+    severity       Enum8('UNKNOWN'=0,'LOW'=1,'MEDIUM'=2,'HIGH'=3,'CRITICAL'=4,'NEGLIGIBLE'=5),
     pkg_name       String,
     pkg_version    String,
     fixed_version  String,
@@ -43,3 +43,7 @@ ALTER TABLE gate_decisions ADD COLUMN IF NOT EXISTS image_created DateTime64(3) 
 ALTER TABLE gate_decisions ADD COLUMN IF NOT EXISTS image_age_days UInt16 DEFAULT 0;
 ALTER TABLE gate_decisions ADD COLUMN IF NOT EXISTS image_age_threshold_days UInt16 DEFAULT 0;
 ALTER TABLE gate_decisions ADD COLUMN IF NOT EXISTS image_age_known Bool DEFAULT 0;
+-- Online ALTER for existing deployments: scanner-agnostic DB-version column.
+ALTER TABLE gate_decisions ADD COLUMN IF NOT EXISTS scanner_db_version String;
+-- Grype emits Negligible; extend the findings severity enum to accept it.
+ALTER TABLE vulnerability_findings MODIFY COLUMN severity Enum8('UNKNOWN'=0,'LOW'=1,'MEDIUM'=2,'HIGH'=3,'CRITICAL'=4,'NEGLIGIBLE'=5);

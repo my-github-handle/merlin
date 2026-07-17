@@ -13,7 +13,7 @@ import (
 
 	"github.com/merlin-gate/merlin/internal/acr"
 	"github.com/merlin-gate/merlin/internal/policies/baseimage"
-	"github.com/merlin-gate/merlin/internal/policies/trivy"
+	"github.com/merlin-gate/merlin/internal/policies/grype"
 	"github.com/merlin-gate/merlin/internal/policy"
 	"github.com/merlin-gate/merlin/internal/router"
 	"github.com/merlin-gate/merlin/internal/staging"
@@ -35,15 +35,15 @@ func dg(b []byte) string {
 	return "sha256:" + hex.EncodeToString(s[:])
 }
 
-// buildGate assembles a handler with in-memory staging and a fake Trivy runner.
-func buildGate(t *testing.T, trivyReport trivy.Report) (*Handler, *acr.FakePusher, *staging.Store) {
+// buildGate assembles a handler with in-memory staging and a fake Grype runner.
+func buildGate(t *testing.T, gryReport grype.Report) (*Handler, *acr.FakePusher, *staging.Store) {
 	t.Helper()
 	n := 0
 	st := staging.New(staging.NewMemoryBlobStore(), staging.NewMemorySessionStore(), func() string {
 		n++
 		return "u" + string(rune('0'+n))
 	})
-	tp := trivy.New(staticRunner{report: trivyReport}, "CRITICAL")
+	tp := grype.New(staticRunner{report: gryReport}, "CRITICAL")
 	bp := baseimage.New([]string{"rhel", "wolfi", "chainguard"})
 	rt := router.New(policy.NewEngine(tp, bp))
 	fp := &acr.FakePusher{}
@@ -52,15 +52,15 @@ func buildGate(t *testing.T, trivyReport trivy.Report) (*Handler, *acr.FakePushe
 	return h, fp, st
 }
 
-type staticRunner struct{ report trivy.Report }
+type staticRunner struct{ report grype.Report }
 
-func (s staticRunner) Scan(context.Context, string) (trivy.Report, error) { return s.report, nil }
+func (s staticRunner) Scan(context.Context, string) (grype.Report, error) { return s.report, nil }
 
 // drivePush simulates docker's blob upload + manifest PUT against the handler,
 // then assembles + gates in-process via a helper exposed for the test.
 func TestPushGoodUBIForwarded(t *testing.T) {
 	layer := layerWithOSID(t, "rhel")
-	h, fp, st := buildGate(t, trivy.Report{}) // no findings
+	h, fp, st := buildGate(t, grype.Report{}) // no findings
 	ctx := context.Background()
 
 	// Upload the layer through the staging store (handler upload path is thin).
@@ -96,7 +96,7 @@ func TestPushGoodUBIForwarded(t *testing.T) {
 
 func TestPushCriticalCVERejected(t *testing.T) {
 	layer := layerWithOSID(t, "rhel")
-	report := trivy.Report{Findings: []policy.Finding{{CVE: "CVE-2024-1", Severity: "CRITICAL", Pkg: "openssl", Version: "1.1.1"}}}
+	report := grype.Report{Findings: []policy.Finding{{CVE: "CVE-2024-1", Severity: "CRITICAL", Pkg: "openssl", Version: "1.1.1"}}}
 	h, fp, st := buildGate(t, report)
 	ctx := context.Background()
 	up, err := st.BeginUpload(ctx, "app")
@@ -127,7 +127,7 @@ func TestPushCriticalCVERejected(t *testing.T) {
 
 func TestPushAlpineRejectedByBasePolicy(t *testing.T) {
 	layer := layerWithOSID(t, "alpine")
-	h, fp, st := buildGate(t, trivy.Report{})
+	h, fp, st := buildGate(t, grype.Report{})
 	ctx := context.Background()
 	up, err := st.BeginUpload(ctx, "app")
 	if err != nil {

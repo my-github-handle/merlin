@@ -13,21 +13,21 @@ import (
 
 	"github.com/merlin-gate/merlin/internal/acr"
 	"github.com/merlin-gate/merlin/internal/policies/baseimage"
-	"github.com/merlin-gate/merlin/internal/policies/trivy"
+	"github.com/merlin-gate/merlin/internal/policies/grype"
 	"github.com/merlin-gate/merlin/internal/policy"
 	"github.com/merlin-gate/merlin/internal/router"
 	"github.com/merlin-gate/merlin/internal/staging"
 )
 
 // TestConcurrentManifestPushesNoRace fires many manifest PUTs concurrently
-// through ONE shared handler (shared Outcome, shared trivy.Policy, Pool size 4)
+// through ONE shared handler (shared Outcome, shared grype.Policy, Pool size 4)
 // and asserts each response matches its OWN expected outcome.
 //
 // "good" repos push a UBI (rhel) layer → the base-image policy passes and the
 // scan is clean → expect 201 + ACR push. "bad" repos push an alpine layer →
 // the base-image policy rejects it → expect 400 and NO push.
 //
-// Before the request-local refactor, Outcome.last and trivy.Policy.lastReport
+// Before the request-local refactor, Outcome.last and grype.Policy.lastReport
 // were shared singleton fields written per request, so under concurrency one
 // request could read another request's decision/findings — the -race detector
 // fires and statuses cross. After the fix, decisions and findings flow back
@@ -55,9 +55,9 @@ func TestConcurrentManifestPushesNoRace(t *testing.T) {
 		n++
 		return fmt.Sprintf("u%d", n)
 	})
-	// Clean trivy report for all images; the verdict difference comes from the
+	// Clean grype report for all images; the verdict difference comes from the
 	// base-image policy so we can map repo -> expected status deterministically.
-	tp := trivy.New(staticRunner{report: trivy.Report{DBVersion: "db-test"}}, "CRITICAL")
+	tp := grype.New(staticRunner{report: grype.Report{DBVersion: "db-test"}}, "CRITICAL")
 	bp := baseimage.New([]string{"rhel", "wolfi", "chainguard"})
 	rt := router.New(policy.NewEngine(tp, bp))
 	pool := router.NewPool(rt, 4)

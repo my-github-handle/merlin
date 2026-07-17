@@ -24,7 +24,7 @@ type StagedImage struct {
 	Tag     string
 	Digest  string
 	FSPath  string // assembled root filesystem directory (for os-release reads)
-	OCIPath string // on-disk OCI layout (for Trivy)
+	OCIPath string // on-disk OCI layout (for Grype)
 	// Created is the image config's "created" timestamp (RFC3339). Zero value means
 	// the timestamp could not be determined; the image-age policy fails closed on it.
 	Created time.Time
@@ -61,9 +61,9 @@ type Policy interface {
 
 // Result is the aggregate outcome of running all policies.
 type Result struct {
-	Passed         bool
-	Verdicts       map[string]Verdict
-	Findings       []Finding
-	TrivyDBVersion string
-	Age            *AgeInfo // nil when the age policy is disabled/absent
+	Passed           bool
+	Verdicts         map[string]Verdict
+	Findings         []Finding
+	ScannerDBVersion string
+	Age              *AgeInfo // nil when the age policy is disabled/absent
 }

@@ -14,21 +14,21 @@ import (
 
 	"github.com/merlin-gate/merlin/internal/acr"
 	"github.com/merlin-gate/merlin/internal/policies/baseimage"
-	"github.com/merlin-gate/merlin/internal/policies/trivy"
+	"github.com/merlin-gate/merlin/internal/policies/grype"
 	"github.com/merlin-gate/merlin/internal/policy"
 	"github.com/merlin-gate/merlin/internal/router"
 	"github.com/merlin-gate/merlin/internal/staging"
 )
 
 // buildIntegrationHandler assembles a handler with in-memory staging, pool, and fake ACR.
-func buildIntegrationHandler(t *testing.T, trivyReport trivy.Report, poolSize int) (*Handler, *acr.FakePusher) {
+func buildIntegrationHandler(t *testing.T, gryReport grype.Report, poolSize int) (*Handler, *acr.FakePusher) {
 	t.Helper()
 	n := 0
 	st := staging.New(staging.NewMemoryBlobStore(), staging.NewMemorySessionStore(), func() string {
 		n++
 		return "u" + string(rune('0'+n))
 	})
-	tp := trivy.New(staticRunner{report: trivyReport}, "CRITICAL")
+	tp := grype.New(staticRunner{report: gryReport}, "CRITICAL")
 	bp := baseimage.New([]string{"rhel", "wolfi", "chainguard"})
 	rt := router.New(policy.NewEngine(tp, bp))
 	pool := router.NewPool(rt, poolSize)
@@ -86,7 +86,7 @@ func uploadLayer(t *testing.T, h *Handler, repo string, layer []byte) string {
 // TestManifestPUTUBILayerAccepted tests the happy path: upload a UBI layer, PUT manifest → 201 + ACR push.
 func TestManifestPUTUBILayerAccepted(t *testing.T) {
 	layer := layerWithOSID(t, "rhel")
-	h, fp := buildIntegrationHandler(t, trivy.Report{}, 2)
+	h, fp := buildIntegrationHandler(t, grype.Report{}, 2)
 
 	// Upload the layer
 	layerDigest := uploadLayer(t, h, "testapp", layer)
@@ -133,7 +133,7 @@ func TestManifestPUTUBILayerAccepted(t *testing.T) {
 // digest (as buildx does) is forwarded to ACR by digest (@), not as repo:sha256:...
 // which is an unparseable reference and 500s.
 func TestManifestPUTImageByDigestGated(t *testing.T) {
-	h, fp := buildIntegrationHandler(t, trivy.Report{}, 2)
+	h, fp := buildIntegrationHandler(t, grype.Report{}, 2)
 	layer := layerWithOSID(t, "rhel")
 	layerDigest := uploadLayer(t, h, "app", layer)
 
@@ -168,7 +168,7 @@ func TestManifestPUTImageByDigestGated(t *testing.T) {
 // (in-toto layer, no filesystem) is forwarded to ACR verbatim — NOT run through the
 // gate (which would tar-extract the in-toto JSON and 500).
 func TestManifestPUTAttestationForwarded(t *testing.T) {
-	h, fp := buildIntegrationHandler(t, trivy.Report{}, 2)
+	h, fp := buildIntegrationHandler(t, grype.Report{}, 2)
 
 	// Stage the attestation's referenced blobs (config + in-toto layer) as the
 	// docker client would before the manifest PUT, so they can be seeded to ACR.
@@ -219,7 +219,7 @@ func TestManifestPUTAttestationForwarded(t *testing.T) {
 
 // TestManifestPUTIndexForwarded verifies an image index is forwarded to ACR verbatim.
 func TestManifestPUTIndexForwarded(t *testing.T) {
-	h, fp := buildIntegrationHandler(t, trivy.Report{}, 2)
+	h, fp := buildIntegrationHandler(t, grype.Report{}, 2)
 
 	index := map[string]interface{}{
 		"schemaVersion": 2,
@@ -251,7 +251,7 @@ func TestManifestPUTIndexForwarded(t *testing.T) {
 // (e.g. the gated image was rejected so its sub-manifest is absent in ACR), the
 // push fails cleanly with 400 rather than publishing or 500ing.
 func TestManifestPUTIndexForwardFailureIs400(t *testing.T) {
-	h, fp := buildIntegrationHandler(t, trivy.Report{}, 2)
+	h, fp := buildIntegrationHandler(t, grype.Report{}, 2)
 	fp.Err = context.DeadlineExceeded // simulate ACR rejecting the index
 
 	index := map[string]interface{}{
@@ -276,7 +276,7 @@ func TestManifestPUTIndexForwardFailureIs400(t *testing.T) {
 // ref-counting, one push's cleanup must not delete the shared blob the other still
 // needs — both must succeed (201), not spuriously 500.
 func TestManifestPUTSharedBlobConcurrent(t *testing.T) {
-	h, fp := buildIntegrationHandler(t, trivy.Report{}, 4)
+	h, fp := buildIntegrationHandler(t, grype.Report{}, 4)
 	layer := layerWithOSID(t, "rhel") // same bytes => same digest, shared blob
 
 	const repos = 6
@@ -392,7 +392,7 @@ func TestManifestPUTPoolSaturated(t *testing.T) {
 
 // TestManifestPUTIncompletePush tests that when referenced blobs are missing, we get 400.
 func TestManifestPUTIncompletePush(t *testing.T) {
-	h, _ := buildIntegrationHandler(t, trivy.Report{}, 2)
+	h, _ := buildIntegrationHandler(t, grype.Report{}, 2)
 
 	// Build a manifest referencing a digest that was never uploaded
 	fakeDigest := "sha256:0000000000000000000000000000000000000000000000000000000000000000"

@@ -53,7 +53,7 @@ type ReportVM struct {
 	PushID, Repo, Tag, Digest, Identity string
 	Passed                              bool
 	FailedPolicies, Reasons             []string
-	BaseImageID, TrivyDBVersion         string
+	BaseImageID, ScannerDBVersion       string
 	Ts                                  time.Time
 	Findings                            []FindingVM
 	Counts                              SeverityVM
@@ -96,11 +96,11 @@ type ImagesVM struct {
 
 // OverviewVM is the single landing page: hero KPIs + first page of images.
 type OverviewVM struct {
-	Range          Range
-	Stats          StatsVM // pass rate + latency (existing)
-	TrivyDBAgeDays float64
-	ACRPushSuccess float64
-	Images         []ImageVM
+	Range            Range
+	Stats            StatsVM // pass rate + latency (existing)
+	ScannerDBAgeDays float64
+	ACRPushSuccess   float64
+	Images           []ImageVM
 	PageMeta
 	Errored bool
 }

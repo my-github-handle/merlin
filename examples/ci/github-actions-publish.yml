@@ -1,0 +1,78 @@
+# Example GitHub Actions workflow: build an image and publish it THROUGH Merlin.
+#
+# Merlin is a Registry V2 gate in front of ACR. `docker push` runs the Grype +
+# base-image scan in-band: a passing push returns 201 and lands in ACR; a
+# rejected push fails with 400 and is NOT published. So this workflow needs no
+# separate scan stage — the push IS the gate.
+#
+# Copy to .github/workflows/publish.yml and adjust `env` + the build context.
+#
+# Required repository secrets (Settings → Secrets and variables → Actions):
+#   MERLIN_CLIENT_ID      Entra service-principal (app) ID with AcrPush intent
+#   MERLIN_CLIENT_SECRET  that service principal's client secret
+#
+# See docs/CI.md for the full contract (status codes, report retrieval, routing).
+
+name: Build and Publish (Merlin gate)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  # <prefix>.<baseDomain> — the prefix selects which ACR the image is published to
+  # (e.g. c3devops.c3ci.cloud → c3devops.azurecr.io). Change per environment.
+  MERLIN_HOST: c3devops.c3ci.cloud
+  IMAGE_REPO: app
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # The manifest PUT blocks on the scan (Merlin's default gate timeout is 5 min).
+    # Give the job comfortable headroom above build + push + scan.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set image reference
+        id: ref
+        run: echo "image=${MERLIN_HOST}/${IMAGE_REPO}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Build image
+        run: docker build -t "${{ steps.ref.outputs.image }}" .
+
+      # CI auth = OAuth2 client-credentials: username is the app ID, password is
+      # the secret. Merlin's /token endpoint validates it against the tenant's
+      # Entra directory and mints the prefix-bound registry token that docker uses.
+      - name: Log in to Merlin
+        run: |
+          echo "${{ secrets.MERLIN_CLIENT_SECRET }}" | \
+            docker login "${MERLIN_HOST}" \
+              -u "${{ secrets.MERLIN_CLIENT_ID }}" --password-stdin
+
+      # The gate runs here. A CRITICAL CVE or a disallowed base image makes the
+      # manifest PUT return 400, `docker push` exits non-zero, and the job fails.
+      - name: Push through gate (scan + publish)
+        run: docker push "${{ steps.ref.outputs.image }}"
+
+      # Always pull the Grype report so a rejection is explainable from the run
+      # (and a pass leaves an audit artifact). Runs even if the push failed.
+      - name: Fetch scan report
+        if: always()
+        run: |
+          REG=$(curl -s -u "${{ secrets.MERLIN_CLIENT_ID }}:${{ secrets.MERLIN_CLIENT_SECRET }}" \
+            "https://${MERLIN_HOST}/token?service=merlin&scope=repository:${IMAGE_REPO}:pull" \
+            | jq -r .token)
+          curl -s -H "Authorization: Bearer $REG" \
+            "https://${MERLIN_HOST}/reports/${IMAGE_REPO}:${GITHUB_SHA}" \
+            > grype-report.json || echo "[]" > grype-report.json
+          echo "----- Grype findings -----"
+          jq -r '.[] | "\(.Severity)\t\(.CVE)\t\(.Pkg) \(.Version)"' grype-report.json || cat grype-report.json
+
+      - name: Upload scan report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: grype-report
+          path: grype-report.json
