@@ -36,7 +36,7 @@ Merlin has been installed successfully!
 
    Merlin will:
    - Verify your image is based on UBI, Wolfi, or Chainguard
-   - Scan for CRITICAL vulnerabilities using Trivy
+   - Scan for CRITICAL vulnerabilities using Grype
    - Reject images that fail the gate
    - Forward approved images to the per-tenant ACR derived from {{ .Values.merlin.acr.registryTemplate }}
 
@@ -63,7 +63,7 @@ Merlin has been installed successfully!
    The report includes:
    - Gate decision (allow/reject) and reason
    - Base image check results
-   - Trivy scan findings (vulnerabilities)
+   - Grype scan findings (vulnerabilities)
    - Timestamp and duration
 
 5. PROMETHEUS METRICS (cluster-internal):
@@ -80,7 +80,7 @@ Merlin has been installed successfully!
 
 Merlin will REJECT images that:
 - Are NOT based on Red Hat UBI, Wolfi, or Chainguard base images
-- Contain CRITICAL severity vulnerabilities (Trivy scan)
+- Contain CRITICAL severity vulnerabilities (Grype scan)
 
 Approved images are forwarded to the per-tenant ACR derived from {{ .Values.merlin.acr.registryTemplate }}
 (the {prefix} is the tenant subdomain you pushed to)
