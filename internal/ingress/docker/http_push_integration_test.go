@@ -13,8 +13,8 @@ import (
 
 	"github.com/merlin-gate/merlin/internal/acr"
 	"github.com/merlin-gate/merlin/internal/policies/baseimage"
-	"github.com/merlin-gate/merlin/internal/policies/imageage"
 	"github.com/merlin-gate/merlin/internal/policies/grype"
+	"github.com/merlin-gate/merlin/internal/policies/imageage"
 	"github.com/merlin-gate/merlin/internal/policy"
 	"github.com/merlin-gate/merlin/internal/router"
 	"github.com/merlin-gate/merlin/internal/staging"

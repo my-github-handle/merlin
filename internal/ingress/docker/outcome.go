@@ -117,17 +117,17 @@ func (o *Outcome) recordDecision(ctx context.Context, pushID string, req router.
 	}
 
 	decision := audit.Decision{
-		PushID:         pushID,
-		Repo:           req.Image.Repo,
-		Tag:            req.Image.Tag,
-		Digest:         req.Image.Digest,
-		Identity:       req.Identity,
-		Passed:         passed,
-		FailedPolicies: failedPolicies,
-		Reasons:        reasons,
-		BaseImageID:    "", // not directly available; leave empty for now
+		PushID:           pushID,
+		Repo:             req.Image.Repo,
+		Tag:              req.Image.Tag,
+		Digest:           req.Image.Digest,
+		Identity:         req.Identity,
+		Passed:           passed,
+		FailedPolicies:   failedPolicies,
+		Reasons:          reasons,
+		BaseImageID:      "", // not directly available; leave empty for now
 		ScannerDBVersion: res.ScannerDBVersion,
-		DurationMS:     durMS,
+		DurationMS:       durMS,
 	}
 
 	if res.Age != nil && res.Age.Known {

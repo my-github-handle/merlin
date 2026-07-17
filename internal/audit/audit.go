@@ -11,17 +11,17 @@ import (
 
 // Decision is one gate decision row.
 type Decision struct {
-	PushID         string
-	Repo           string
-	Tag            string
-	Digest         string
-	Identity       string
-	Passed         bool
-	FailedPolicies []string
-	Reasons        []string
-	BaseImageID    string
+	PushID           string
+	Repo             string
+	Tag              string
+	Digest           string
+	Identity         string
+	Passed           bool
+	FailedPolicies   []string
+	Reasons          []string
+	BaseImageID      string
 	ScannerDBVersion string
-	DurationMS     uint32
+	DurationMS       uint32
 
 	// Image-age policy result. ImageCreated is zero when age was not determined /
 	// the age policy was disabled. ImageAgeKnown explicitly tracks whether age was

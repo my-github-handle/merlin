@@ -31,8 +31,10 @@ type grypeJSON struct {
 	} `json:"matches"`
 	Descriptor struct {
 		DB struct {
-			SchemaVersion int    `json:"schemaVersion"`
-			Built         string `json:"built"`
+			Status struct {
+				SchemaVersion string `json:"schemaVersion"`
+				Built         string `json:"built"`
+			} `json:"status"`
 		} `json:"db"`
 	} `json:"descriptor"`
 }
@@ -53,7 +55,7 @@ func ParseReport(raw []byte) (Report, error) {
 	if err := json.Unmarshal(raw, &gj); err != nil {
 		return Report{}, fmt.Errorf("parse grype json: %w", err)
 	}
-	rep := Report{DBVersion: fmt.Sprintf("schema %d built %s", gj.Descriptor.DB.SchemaVersion, gj.Descriptor.DB.Built)}
+	rep := Report{DBVersion: fmt.Sprintf("schema %s built %s", gj.Descriptor.DB.Status.SchemaVersion, gj.Descriptor.DB.Status.Built)}
 	for _, m := range gj.Matches {
 		var fixed string
 		if len(m.Vulnerability.Fix.Versions) > 0 {

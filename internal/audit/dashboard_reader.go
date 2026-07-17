@@ -41,18 +41,18 @@ type LabeledCount struct {
 
 // DecisionHeader is the report header (verdict + provenance) for one image.
 type DecisionHeader struct {
-	Found          bool
-	PushID         string
-	Repo           string
-	Tag            string
-	Digest         string
-	Identity       string
-	Passed         bool
-	FailedPolicies []string
-	Reasons        []string
-	BaseImageID    string
+	Found            bool
+	PushID           string
+	Repo             string
+	Tag              string
+	Digest           string
+	Identity         string
+	Passed           bool
+	FailedPolicies   []string
+	Reasons          []string
+	BaseImageID      string
 	ScannerDBVersion string
-	Ts             time.Time
+	Ts               time.Time
 
 	ImageCreated          time.Time
 	ImageAgeDays          uint16

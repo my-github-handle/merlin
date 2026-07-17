@@ -51,7 +51,7 @@ func TestOutcome_RecordsPassDecision(t *testing.T) {
 		Verdicts: map[string]policy.Verdict{
 			"grype": {Passed: true, ScannerDBVersion: "db-v1"},
 		},
-		Findings:       []policy.Finding{{CVE: "CVE-2024-1234", Severity: "LOW"}},
+		Findings:         []policy.Finding{{CVE: "CVE-2024-1234", Severity: "LOW"}},
 		ScannerDBVersion: "db-v1",
 	}
 
@@ -119,7 +119,7 @@ func TestOutcome_RecordsFailDecision(t *testing.T) {
 			"grype": {Passed: false, Reasons: []string{"critical vuln found"}, ScannerDBVersion: "db-v1"},
 			"base":  {Passed: false, Reasons: []string{"base image rejected"}},
 		},
-		Findings:       []policy.Finding{{CVE: "CVE-2024-9999", Severity: "CRITICAL"}},
+		Findings:         []policy.Finding{{CVE: "CVE-2024-9999", Severity: "CRITICAL"}},
 		ScannerDBVersion: "db-v1",
 	}
 

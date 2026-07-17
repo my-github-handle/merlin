@@ -1,6 +1,6 @@
 # Example GitHub Actions workflow: build an image and publish it THROUGH Merlin.
 #
-# Merlin is a Registry V2 gate in front of ACR. `docker push` runs the Trivy +
+# Merlin is a Registry V2 gate in front of ACR. `docker push` runs the Grype +
 # base-image scan in-band: a passing push returns 201 and lands in ACR; a
 # rejected push fails with 400 and is NOT published. So this workflow needs no
 # separate scan stage — the push IS the gate.
@@ -56,7 +56,7 @@ jobs:
       - name: Push through gate (scan + publish)
         run: docker push "${{ steps.ref.outputs.image }}"
 
-      # Always pull the Trivy report so a rejection is explainable from the run
+      # Always pull the Grype report so a rejection is explainable from the run
       # (and a pass leaves an audit artifact). Runs even if the push failed.
       - name: Fetch scan report
         if: always()
@@ -66,13 +66,13 @@ jobs:
             | jq -r .token)
           curl -s -H "Authorization: Bearer $REG" \
             "https://${MERLIN_HOST}/reports/${IMAGE_REPO}:${GITHUB_SHA}" \
-            > trivy-report.json || echo "[]" > trivy-report.json
-          echo "----- Trivy findings -----"
-          jq -r '.[] | "\(.Severity)\t\(.CVE)\t\(.Pkg) \(.Version)"' trivy-report.json || cat trivy-report.json
+            > grype-report.json || echo "[]" > grype-report.json
+          echo "----- Grype findings -----"
+          jq -r '.[] | "\(.Severity)\t\(.CVE)\t\(.Pkg) \(.Version)"' grype-report.json || cat grype-report.json
 
       - name: Upload scan report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: trivy-report
-          path: trivy-report.json
+          name: grype-report
+          path: grype-report.json
