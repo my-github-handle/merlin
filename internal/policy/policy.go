@@ -61,9 +61,9 @@ type Policy interface {
 
 // Result is the aggregate outcome of running all policies.
 type Result struct {
-	Passed         bool
-	Verdicts       map[string]Verdict
-	Findings       []Finding
-	TrivyDBVersion string
-	Age            *AgeInfo // nil when the age policy is disabled/absent
+	Passed           bool
+	Verdicts         map[string]Verdict
+	Findings         []Finding
+	ScannerDBVersion string
+	Age              *AgeInfo // nil when the age policy is disabled/absent
 }

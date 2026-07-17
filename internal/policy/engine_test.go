@@ -87,8 +87,8 @@ func TestEngineCollectsFindingsFromVerdict(t *testing.T) {
 	if res.Findings[0].CVE != "CVE-2023-1234" {
 		t.Errorf("first finding CVE = %q, want CVE-2023-1234", res.Findings[0].CVE)
 	}
-	if res.TrivyDBVersion != "db-2023-12-01" {
-		t.Errorf("TrivyDBVersion = %q, want db-2023-12-01", res.TrivyDBVersion)
+	if res.ScannerDBVersion != "db-2023-12-01" {
+		t.Errorf("ScannerDBVersion = %q, want db-2023-12-01", res.ScannerDBVersion)
 	}
 }
 
@@ -134,8 +134,8 @@ func TestEnginePolicyWithoutFindings(t *testing.T) {
 	if len(res.Findings) != 0 {
 		t.Errorf("findings = %d, want 0 (no verdict carries findings)", len(res.Findings))
 	}
-	if res.TrivyDBVersion != "" {
-		t.Errorf("TrivyDBVersion = %q, want empty string", res.TrivyDBVersion)
+	if res.ScannerDBVersion != "" {
+		t.Errorf("ScannerDBVersion = %q, want empty string", res.ScannerDBVersion)
 	}
 }
 
