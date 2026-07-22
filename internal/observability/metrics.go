@@ -53,6 +53,11 @@ func (m *Metrics) ObservePush(passed bool) {
 	m.pushTotal.WithLabelValues(outcome).Inc()
 }
 
+// ObservePushError counts a push whose gate did NOT complete (scan timeout,
+// assemble/ACR failure, pool saturation) — a third outcome distinct from
+// passed/rejected, so infra failures are visible in merlin_push_decisions_total.
+func (m *Metrics) ObservePushError() { m.pushTotal.WithLabelValues("error").Inc() }
+
 func (m *Metrics) ObserveScanDuration(seconds float64) { m.scanDuration.Observe(seconds) }
 func (m *Metrics) SetScannerDBAgeDays(days float64)    { m.scannerDBAge.Set(days) }
 

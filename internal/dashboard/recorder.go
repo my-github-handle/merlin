@@ -27,6 +27,18 @@ func NewTeeRecorder(inner DecisionRecorder, b *Broadcaster) *TeeRecorder {
 	return &TeeRecorder{inner: inner, b: b}
 }
 
+// RecordTagAlias forwards a tag -> digest alias to the inner recorder when it
+// supports one (audit.Auditor does). Without this pass-through, wrapping the
+// auditor in a TeeRecorder would silently disable tag-alias recording — and
+// with it report-by-tag lookups for buildx pushes.
+func (t *TeeRecorder) RecordTagAlias(ctx context.Context, alias audit.TagAlias) {
+	if r, ok := t.inner.(interface {
+		RecordTagAlias(context.Context, audit.TagAlias)
+	}); ok {
+		r.RecordTagAlias(ctx, alias)
+	}
+}
+
 func (t *TeeRecorder) Record(ctx context.Context, d audit.Decision, findings []policy.Finding) {
 	if t.inner != nil {
 		t.inner.Record(ctx, d, findings)

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/merlin-gate/merlin/internal/audit"
 	"github.com/merlin-gate/merlin/internal/policy"
 	"github.com/merlin-gate/merlin/internal/router"
 	"github.com/merlin-gate/merlin/internal/staging"
@@ -54,8 +55,39 @@ func (h *Handler) forwardManifest(w http.ResponseWriter, ctx context.Context, t 
 		http.Error(w, fmt.Sprintf("manifest not published: %v", err), http.StatusBadRequest)
 		return
 	}
+	// A tag-addressed index is the only place the human tag appears in a buildx
+	// push (the gated image decision is recorded by digest). Record tag -> digest
+	// aliases for every referenced sub-manifest so report lookups by repo:tag can
+	// resolve to the gated image's decision. Best-effort: alias loss only degrades
+	// by-tag report lookup; by-digest still works.
+	if kind == kindIndex && !strings.HasPrefix(ref, "sha256:") {
+		if rec, ok := h.tagAliasRecorder(); ok {
+			for _, sm := range m.Manifests {
+				if sm.Digest == "" {
+					continue
+				}
+				rec.RecordTagAlias(ctx, audit.TagAlias{Repo: repo, Tag: ref, Digest: sm.Digest})
+			}
+		}
+	}
+
 	w.Header().Set("Docker-Content-Digest", digest)
 	w.WriteHeader(http.StatusCreated)
+}
+
+// TagAliasRecorder is optionally implemented by the Outcome's DecisionRecorder
+// (audit.Auditor implements it). Optional-interface so recorder fakes keep compiling.
+type TagAliasRecorder interface {
+	RecordTagAlias(ctx context.Context, alias audit.TagAlias)
+}
+
+// tagAliasRecorder returns the outcome's recorder as a TagAliasRecorder when available.
+func (h *Handler) tagAliasRecorder() (TagAliasRecorder, bool) {
+	if h.outcome == nil || h.outcome.Recorder == nil {
+		return nil, false
+	}
+	rec, ok := h.outcome.Recorder.(TagAliasRecorder)
+	return rec, ok
 }
 
 // seedAttestationBlobs uploads an attestation manifest's referenced blobs (config
@@ -178,7 +210,10 @@ func (h *Handler) handleManifest(w http.ResponseWriter, r *http.Request, t *tena
 		http.Error(w, fmt.Sprintf("create scratch dir: %v", err), http.StatusInternalServerError)
 		return
 	}
-	defer h.store.Cleanup(ctx, mr, scratchDir)
+	// Cleanup must run even when the client disconnected: a canceled request ctx
+	// would fail the Valkey ref-count decrement AND the blob delete, leaking
+	// staged blobs. Detach cancellation but keep values (trace metadata).
+	defer h.store.Cleanup(context.WithoutCancel(ctx), mr, scratchDir)
 
 	img, err := h.store.Assemble(ctx, mr, scratchDir)
 	if err != nil {
@@ -200,29 +235,41 @@ func (h *Handler) handleManifest(w http.ResponseWriter, r *http.Request, t *tena
 
 	// Gate via pool or direct router. The gate returns the result (and any infra
 	// error) request-locally; the handler then builds the Decision via the Outcome.
+	// Slot wait and scan get SEPARATE budgets: a slot that frees late must still
+	// get the full scan window, or queue time silently shrinks scans into timeouts.
 	var (
 		res     policy.Result
 		gateErr error
+		scanDur time.Duration
 	)
-	gateStart := time.Now()
-	if h.pool != nil {
-		timeout := h.gateTimeout
-		if timeout == 0 {
-			timeout = 5 * time.Minute // default
-		}
-		gctx, cancel := context.WithTimeout(ctx, timeout)
-		defer cancel()
-		res, gateErr = h.pool.Gate(gctx, req)
-	} else {
-		res, gateErr = h.router.Gate(ctx, req)
+	timeout := h.gateTimeout
+	if timeout == 0 {
+		timeout = 5 * time.Minute // default
 	}
-	scanDur := time.Since(gateStart)
-
-	// Handle ErrSaturated → 503 (before the Outcome runs)
-	if errors.Is(gateErr, router.ErrSaturated) {
-		w.Header().Set("Retry-After", "5")
-		http.Error(w, "scan pool saturated, retry later", http.StatusServiceUnavailable)
-		return
+	if h.pool != nil {
+		waitCtx, cancelWait := context.WithTimeout(ctx, timeout)
+		release, aerr := h.pool.Acquire(waitCtx)
+		cancelWait()
+		switch {
+		case errors.Is(aerr, router.ErrSaturated):
+			// Fall through to the Outcome with the saturation error so the 503 is
+			// recorded and counted like any other incomplete gate.
+			gateErr = aerr
+		case aerr != nil:
+			// Client disconnected while queued: nothing to scan, no one to answer.
+			return
+		default:
+			gateStart := time.Now()
+			gctx, cancelScan := context.WithTimeout(ctx, timeout)
+			res, gateErr = h.pool.Router().Gate(gctx, req)
+			cancelScan()
+			scanDur = time.Since(gateStart)
+			release()
+		}
+	} else {
+		gateStart := time.Now()
+		res, gateErr = h.router.Gate(ctx, req)
+		scanDur = time.Since(gateStart)
 	}
 
 	// Build the Decision from the gate result. Other infra errors are rendered as
@@ -239,6 +286,9 @@ func (h *Handler) handleManifest(w http.ResponseWriter, r *http.Request, t *tena
 	code := d.StatusCode
 	if code == 0 {
 		code = http.StatusCreated
+	}
+	if code == http.StatusServiceUnavailable {
+		w.Header().Set("Retry-After", "5")
 	}
 	// On success the Docker client requires the canonical manifest digest echoed in
 	// Docker-Content-Digest; without it `docker push` fails the manifest commit with

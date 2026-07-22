@@ -85,6 +85,7 @@ func (s *Service) Report(ctx context.Context, repo, ref, pushID string) (ReportV
 		Found: true, PushID: hdr.PushID, Repo: hdr.Repo, Tag: hdr.Tag, Digest: hdr.Digest,
 		Identity: hdr.Identity, Passed: hdr.Passed, FailedPolicies: hdr.FailedPolicies,
 		Reasons: hdr.Reasons, BaseImageID: hdr.BaseImageID, ScannerDBVersion: hdr.ScannerDBVersion, Ts: hdr.Ts,
+		InfraError: hdr.InfraError, ErrorDetail: hdr.ErrorDetail,
 	}
 	vm.ImageAgeKnown = hdr.ImageAgeKnown
 	if vm.ImageAgeKnown {

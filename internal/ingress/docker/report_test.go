@@ -121,7 +121,7 @@ func TestReportEndpointByImageTag(t *testing.T) {
 }
 
 func TestReportEndpointByImageDigest(t *testing.T) {
-	rs := &fakeReports{}
+	rs := &fakeReports{header: audit.DecisionHeader{Found: true}}
 	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), nil, nil, nil, rs)
 	req := httptest.NewRequest(http.MethodGet, "/reports/e2e/app@sha256:deadbeef", nil)
 	req.Host = testTenantHost
@@ -137,7 +137,7 @@ func TestReportEndpointByImageDigest(t *testing.T) {
 }
 
 func TestReportEndpointByPushIDStillWorks(t *testing.T) {
-	rs := &fakeReports{}
+	rs := &fakeReports{header: audit.DecisionHeader{Found: true}}
 	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), nil, nil, nil, rs)
 	req := httptest.NewRequest(http.MethodGet, "/reports/88824db0a4604bf48aad9ec246144d20", nil)
 	req.Host = testTenantHost
@@ -178,8 +178,10 @@ func TestReportEndpointErrorIs500(t *testing.T) {
 	}
 }
 
+// A recorded decision with zero findings (clean image) is 200 with an empty
+// findings array — [] not null, so jq-style consumers can iterate safely.
 func TestReportEndpointEmptyFindingsOK(t *testing.T) {
-	rs := &fakeReports{findings: nil}
+	rs := &fakeReports{findings: nil, header: audit.DecisionHeader{Found: true}}
 	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), nil, nil, nil, rs)
 	req := httptest.NewRequest(http.MethodGet, "/reports/push-123", nil)
 	req.Host = testTenantHost
@@ -188,6 +190,52 @@ func TestReportEndpointEmptyFindingsOK(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Errorf("empty findings: code = %d, want 200", rec.Code)
+	}
+	var env reportEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode envelope: %v", err)
+	}
+	if env.Findings == nil {
+		t.Error("findings = null, want []")
+	}
+}
+
+// A reference with no recorded gate decision is 404, NOT an empty 200: "we never
+// scanned this" must be distinguishable from "we scanned it and found nothing".
+func TestReportEndpointUnknownRefIs404(t *testing.T) {
+	rs := &fakeReports{} // header zero value: Found=false, no findings
+	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), nil, nil, nil, rs)
+	req := httptest.NewRequest(http.MethodGet, "/reports/app:never-pushed", nil)
+	req.Host = testTenantHost
+	req.Header.Set("Authorization", "Bearer good")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("unknown ref: code = %d, want 404", rec.Code)
+	}
+}
+
+// An infra-error decision surfaces infra_error + error in the envelope so a CI
+// consumer never mistakes "scan did not complete" for "image is clean".
+func TestReportEnvelopeCarriesInfraError(t *testing.T) {
+	rs := &fakeReports{header: audit.DecisionHeader{
+		Found: true, InfraError: true, ErrorDetail: `policy "grype" could not run: run grype: signal: killed`,
+	}}
+	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), nil, nil, nil, rs)
+	req := httptest.NewRequest(http.MethodGet, "/reports/push-123", nil)
+	req.Host = testTenantHost
+	req.Header.Set("Authorization", "Bearer good")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200", rec.Code)
+	}
+	var env reportEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode envelope: %v", err)
+	}
+	if !env.InfraError || env.Error == "" {
+		t.Errorf("envelope infra_error=%v error=%q, want true + non-empty", env.InfraError, env.Error)
 	}
 }
 

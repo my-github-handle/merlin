@@ -118,15 +118,23 @@ The report is a JSON envelope:
 ```json
 {
   "age": { "known": true, "created": "...", "age_days": 45, "threshold_days": 60, "compliant": true },
-  "findings": [ {CVE, Severity, Pkg, Version, FixedVersion}, ... ]
+  "findings": [ {CVE, Severity, Pkg, Version, FixedVersion}, ... ],
+  "infra_error": true,
+  "error": "policy \"grype\" could not run: ..."
 }
 ```
+
+`infra_error`/`error` appear only when the gate did **not** complete for that push
+(scan timeout, assemble or ACR failure) — empty findings then mean "not scanned",
+not "clean". A reference with no recorded gate decision returns `404`; a report
+that exists but cannot be read (audit store outage) returns `500` — retry.
 
 To extract findings: `jq .findings[] < trivy-report.json`. To check age: `jq .age < trivy-report.json`.
 
 Archive `trivy-report.json` as a build artifact so a `400` reject is explainable without
-re-running anything. Use `app@sha256:<digest>` for an exact, unambiguous lookup
-(buildx pushes record by digest, not tag).
+re-running anything. Use `app@sha256:<digest>` for an exact, unambiguous lookup.
+Buildx pushes record the gate decision by digest; the tag on the pushed index is
+recorded as an alias, so `repo:tag` lookups resolve for buildx pushes too.
 
 ## Notes for a clean refactor
 

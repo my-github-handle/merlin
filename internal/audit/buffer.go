@@ -3,13 +3,26 @@ package audit
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/merlin-gate/merlin/internal/policy"
+)
+
+// Per-write robustness. The worker is a single goroutine: without a timeout, one
+// hung ClickHouse connection stalls it forever, the queue fills, and every later
+// decision is silently dropped. Retries smooth transient outages so audit rows
+// (and the report links handed to clients) are not lost to a blip.
+// Vars (not consts) so tests can shrink the backoff.
+var (
+	writeTimeout  = 10 * time.Second
+	writeAttempts = 3
+	retryBackoff  = 500 * time.Millisecond
 )
 
 type job struct {
 	decision Decision
 	findings []policy.Finding
+	alias    *TagAlias     // non-nil only for a tag-alias record
 	flush    chan struct{} // non-nil only for a Flush marker; worker closes it
 }
 
@@ -41,17 +54,47 @@ func (a *Auditor) run() {
 			close(j.flush)
 			continue
 		}
-		ctx := context.Background()
-		if err := a.w.WriteDecision(ctx, j.decision); err != nil {
+		if j.alias != nil {
+			if tw, ok := a.w.(TagAliasWriter); ok {
+				_ = a.withRetry(func(ctx context.Context) error {
+					return tw.WriteTagAlias(ctx, *j.alias)
+				})
+			}
+			continue
+		}
+		if err := a.withRetry(func(ctx context.Context) error {
+			return a.w.WriteDecision(ctx, j.decision)
+		}); err != nil {
 			a.onDrop(j.decision, err)
 			continue
 		}
 		if len(j.findings) > 0 {
-			if err := a.w.WriteFindings(ctx, j.decision, j.findings); err != nil {
+			if err := a.withRetry(func(ctx context.Context) error {
+				return a.w.WriteFindings(ctx, j.decision, j.findings)
+			}); err != nil {
+				// The decision row landed but its findings did not: report as a drop
+				// so the operator knows this push's report will render no findings.
 				a.onDrop(j.decision, err)
 			}
 		}
 	}
+}
+
+// withRetry runs fn with a per-attempt timeout and bounded retries + backoff.
+func (a *Auditor) withRetry(fn func(context.Context) error) error {
+	var err error
+	for attempt := 1; attempt <= writeAttempts; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
+		err = fn(ctx)
+		cancel()
+		if err == nil {
+			return nil
+		}
+		if attempt < writeAttempts {
+			time.Sleep(retryBackoff * time.Duration(attempt))
+		}
+	}
+	return err
 }
 
 // Record enqueues a decision; if the buffer is full it drops (never blocks).
@@ -60,6 +103,18 @@ func (a *Auditor) Record(_ context.Context, d Decision, findings []policy.Findin
 	case a.queue <- job{decision: d, findings: findings}:
 	default:
 		a.onDrop(d, errQueueFull)
+	}
+}
+
+// RecordTagAlias enqueues a tag -> digest alias (never blocks; dropped when the
+// queue is full or the backing Writer does not implement TagAliasWriter).
+func (a *Auditor) RecordTagAlias(_ context.Context, alias TagAlias) {
+	select {
+	case a.queue <- job{alias: &alias}:
+	default:
+		// Best-effort: a lost alias only degrades report-by-tag lookup, and the
+		// by-digest path still works. Reuse onDrop for operator visibility.
+		a.onDrop(Decision{Repo: alias.Repo, Tag: alias.Tag, Digest: alias.Digest}, errQueueFull)
 	}
 }
 

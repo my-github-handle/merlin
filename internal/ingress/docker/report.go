@@ -32,10 +32,15 @@ type ReportAge struct {
 }
 
 // reportEnvelope is the GET /reports/<ref> body: the age result (null when the
-// age policy was disabled / age unknown) plus the Grype findings.
+// age policy was disabled / age unknown) plus the Grype findings. infra_error
+// and error mark a push whose gate did NOT complete (scan timeout, assemble or
+// ACR failure) — the findings may be empty for that reason, not because the
+// image was clean.
 type reportEnvelope struct {
-	Age      *ReportAge       `json:"age"`
-	Findings []policy.Finding `json:"findings"`
+	Age        *ReportAge       `json:"age"`
+	Findings   []policy.Finding `json:"findings"`
+	InfraError bool             `json:"infra_error,omitempty"`
+	Error      string           `json:"error,omitempty"`
 }
 
 func (h *Handler) handleReport(w http.ResponseWriter, r *http.Request) {
@@ -64,22 +69,35 @@ func (h *Handler) handleReport(w http.ResponseWriter, r *http.Request) {
 		hdr      audit.DecisionHeader
 	)
 	if repo, ref, ok := splitImageRef(id); ok {
-		findings, err = h.reports.FindingsByImageRef(r.Context(), repo, ref)
+		hdr, err = h.reports.HeaderByImageRef(r.Context(), repo, ref)
 		if err == nil {
-			hdr, _ = h.reports.HeaderByImageRef(r.Context(), repo, ref)
+			findings, err = h.reports.FindingsByImageRef(r.Context(), repo, ref)
 		}
 	} else {
-		findings, err = h.reports.FindingsByPush(r.Context(), id)
+		hdr, err = h.reports.HeaderByPush(r.Context(), id)
 		if err == nil {
-			hdr, _ = h.reports.HeaderByPush(r.Context(), id)
+			findings, err = h.reports.FindingsByPush(r.Context(), id)
 		}
 	}
 	if err != nil {
+		// Audit store unreachable / query failed: a retryable 500, deliberately
+		// distinct from 404 so an outage is never read as "this image was clean".
 		http.Error(w, "report unavailable", http.StatusInternalServerError)
+		return
+	}
+	if !hdr.Found && len(findings) == 0 {
+		http.Error(w, "no report for that reference", http.StatusNotFound)
 		return
 	}
 
 	env := reportEnvelope{Findings: findings}
+	if env.Findings == nil {
+		env.Findings = []policy.Finding{} // render [], not null (jq-friendly)
+	}
+	if hdr.Found && hdr.InfraError {
+		env.InfraError = true
+		env.Error = hdr.ErrorDetail
+	}
 	if hdr.Found && hdr.ImageAgeKnown {
 		env.Age = &ReportAge{
 			Known:         true,

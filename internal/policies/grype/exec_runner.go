@@ -2,8 +2,10 @@ package grype
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
+	"strings"
 )
 
 type execFunc func(ctx context.Context, name string, args ...string) ([]byte, error)
@@ -31,7 +33,22 @@ func (e *execRunner) Scan(ctx context.Context, ociPath string) (Report, error) {
 	// match the c3securitytools grype import pipeline.
 	out, err := e.run(ctx, e.binary, ociPath, "-o", "json", "-q", "--by-cve")
 	if err != nil {
+		// Surface grype's stderr: "exit status 1" alone is undiagnosable (DB
+		// download failure, bad layout, OOM-kill all look identical without it).
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
+			return Report{}, fmt.Errorf("run grype: %w: %s", err, truncate(string(ee.Stderr), 512))
+		}
 		return Report{}, fmt.Errorf("run grype: %w", err)
 	}
 	return ParseReport(out)
+}
+
+// truncate caps s at n bytes for error messages (audit error_detail, logs).
+func truncate(s string, n int) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }

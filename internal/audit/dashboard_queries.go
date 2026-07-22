@@ -2,6 +2,8 @@ package audit
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"time"
 )
 
@@ -65,36 +67,29 @@ SELECT reason, count() AS c FROM (
 	return s, rrows.Err()
 }
 
+// headerColumns is the shared SELECT list for decision-header lookups.
+const headerColumns = `toString(push_id), image_repo, image_tag, image_digest, identity, passed,
+       failed_policies, reasons, base_image_id, scanner_db_version, ts, image_created, image_age_days, image_age_threshold_days, image_age_known, infra_error, error_detail`
+
 func (r *Reader) DecisionHeaderByPush(ctx context.Context, pushID string) (DecisionHeader, error) {
 	return r.scanHeader(ctx, `
-SELECT toString(push_id), image_repo, image_tag, image_digest, identity, passed,
-       failed_policies, reasons, base_image_id, scanner_db_version, ts, image_created, image_age_days, image_age_threshold_days, image_age_known
+SELECT `+headerColumns+`
 FROM gate_decisions WHERE push_id = ? ORDER BY ts DESC LIMIT 1`, pushID)
 }
 
 func (r *Reader) DecisionHeaderByRef(ctx context.Context, repo, ref string) (DecisionHeader, error) {
-	h, err := r.scanHeader(ctx, `
-SELECT toString(push_id), image_repo, image_tag, image_digest, identity, passed,
-       failed_policies, reasons, base_image_id, scanner_db_version, ts, image_created, image_age_days, image_age_threshold_days, image_age_known
-FROM gate_decisions WHERE image_repo = ? AND (image_tag = ? OR image_digest = ?)
-ORDER BY ts DESC LIMIT 1`, repo, ref, ref)
+	// Resolution mirrors pushIDByRef: exact match, then tag alias (buildx), then —
+	// for a digest ref only — the newest push for the repo. A tag miss means that
+	// tag was never scanned; falling back would serve a different image under the
+	// requested tag, so it returns not-found.
+	pushID, err := r.pushIDByRef(ctx, repo, ref)
 	if err != nil {
 		return DecisionHeader{}, err
 	}
-	if h.Found {
-		return h, nil
-	}
-	// Only a digest ref may fall back to the newest push for the repo (buildx case).
-	// A tag miss means that tag was never scanned; falling back would serve a
-	// different image under the requested tag. Return not-found instead. Mirrors
-	// FindingsByImageRef.
-	if !refAllowsRepoFallback(ref) {
+	if pushID == "" {
 		return DecisionHeader{Found: false}, nil
 	}
-	return r.scanHeader(ctx, `
-SELECT toString(push_id), image_repo, image_tag, image_digest, identity, passed,
-       failed_policies, reasons, base_image_id, scanner_db_version, ts, image_created, image_age_days, image_age_threshold_days, image_age_known
-FROM gate_decisions WHERE image_repo = ? ORDER BY ts DESC LIMIT 1`, repo)
+	return r.DecisionHeaderByPush(ctx, pushID)
 }
 
 // HeaderByPush and HeaderByImageRef alias the DecisionHeader lookups under the
@@ -108,17 +103,21 @@ func (r *Reader) HeaderByImageRef(ctx context.Context, repo, ref string) (Decisi
 }
 
 // scanHeader runs a single-row header query; Found is false when no row matched.
+// Only sql.ErrNoRows means "not found" — any other error (ClickHouse outage,
+// query timeout, type mismatch) is returned so callers can render "report
+// unavailable" instead of silently claiming the report does not exist.
 func (r *Reader) scanHeader(ctx context.Context, q string, args ...any) (DecisionHeader, error) {
 	var h DecisionHeader
 	row := r.conn.QueryRow(ctx, q, args...)
 	err := row.Scan(&h.PushID, &h.Repo, &h.Tag, &h.Digest, &h.Identity, &h.Passed,
 		&h.FailedPolicies, &h.Reasons, &h.BaseImageID, &h.ScannerDBVersion, &h.Ts,
-		&h.ImageCreated, &h.ImageAgeDays, &h.ImageAgeThresholdDays, &h.ImageAgeKnown)
+		&h.ImageCreated, &h.ImageAgeDays, &h.ImageAgeThresholdDays, &h.ImageAgeKnown,
+		&h.InfraError, &h.ErrorDetail)
 	if err != nil {
-		// clickhouse-go returns sql.ErrNoRows-equivalent on no row; treat any scan
-		// error on a single-row lookup as "not found" rather than a hard failure,
-		// so a missing report renders an empty state, not a 500.
-		return DecisionHeader{Found: false}, nil
+		if errors.Is(err, sql.ErrNoRows) {
+			return DecisionHeader{Found: false}, nil
+		}
+		return DecisionHeader{}, err
 	}
 	h.Found = true
 	return h, nil

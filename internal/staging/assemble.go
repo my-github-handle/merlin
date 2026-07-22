@@ -253,8 +253,16 @@ func (s *Store) Cleanup(ctx context.Context, mr ManifestRef, scratchDir string) 
 		// Release this push's reference; delete the bytes only when no other push
 		// still references the digest (content-addressed ref-counting). This avoids
 		// a finished push deleting a blob a concurrent push still needs (TODO I-3).
+		//
+		// On a ref-count ERROR the blob is LEAKED, never deleted: the count is
+		// unknown, and deleting a layer a concurrent push still references fails
+		// that push's Assemble with a spurious 500. A leak is reclaimable
+		// (TTL/GC sweep); a wrongly deleted shared layer is a broken push.
 		remaining, err := s.sessions.DecBlobRef(ctx, dg)
-		if err != nil || remaining <= 0 {
+		if err != nil {
+			continue
+		}
+		if remaining <= 0 {
 			_ = s.blobs.Delete(ctx, blobKey(dg))
 		}
 	}

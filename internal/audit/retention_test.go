@@ -7,15 +7,14 @@ import (
 
 func TestTTLStatements(t *testing.T) {
 	stmts := ttlStatements(30)
-	if len(stmts) != 2 {
-		t.Fatalf("got %d statements, want 2 (one per table)", len(stmts))
+	if len(stmts) != 3 {
+		t.Fatalf("got %d statements, want 3 (one per table)", len(stmts))
 	}
 	joined := strings.Join(stmts, "\n")
-	if !strings.Contains(joined, "gate_decisions") {
-		t.Errorf("missing TTL for gate_decisions:\n%s", joined)
-	}
-	if !strings.Contains(joined, "vulnerability_findings") {
-		t.Errorf("missing TTL for vulnerability_findings:\n%s", joined)
+	for _, tbl := range []string{"gate_decisions", "vulnerability_findings", "tag_aliases"} {
+		if !strings.Contains(joined, tbl) {
+			t.Errorf("missing TTL for %s:\n%s", tbl, joined)
+		}
 	}
 	for _, s := range stmts {
 		if !strings.Contains(s, "MODIFY TTL") {
