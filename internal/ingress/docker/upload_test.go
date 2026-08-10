@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/merlin-gate/merlin/internal/staging"
@@ -255,6 +256,136 @@ func TestBlobUploadFullSequence(t *testing.T) {
 
 	// The blob is now stored and marked complete in staging.
 	// We trust CompleteBlob worked since it returned 201 without error.
+}
+
+// clearSpy wraps a SessionStore and records which uploads were Cleared, so a test
+// can assert the handler retires session state on its failure paths instead of
+// stranding it (each stranded session is a Valkey key with no owner).
+type clearSpy struct {
+	staging.SessionStore
+	mu      sync.Mutex
+	cleared []string
+}
+
+func newClearSpy() *clearSpy {
+	return &clearSpy{SessionStore: staging.NewMemorySessionStore()}
+}
+
+func (c *clearSpy) Clear(ctx context.Context, uploadID string) error {
+	c.mu.Lock()
+	c.cleared = append(c.cleared, uploadID)
+	c.mu.Unlock()
+	return c.SessionStore.Clear(ctx, uploadID)
+}
+
+func (c *clearSpy) clearedUploads() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.cleared...)
+}
+
+// TestUploadFailurePathsAbandonSession pins the handler wiring for the staging leak.
+// A push that cannot proceed must retire its upload session; otherwise the offset key
+// survives with no owner. The digest-mismatch paths are the important ones: the
+// digest is final, so the client can never resume — it must start a fresh upload.
+func TestUploadFailurePathsAbandonSession(t *testing.T) {
+	goodBody := []byte("layer data")
+	sum := sha256.Sum256(goodBody)
+	goodDigest := "sha256:" + hex.EncodeToString(sum[:])
+	badDigest := "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+
+	tests := []struct {
+		name     string
+		uploadID string
+		// do drives the request(s); it returns the upload ID whose session must be gone.
+		do       func(t *testing.T, h *Handler, st *staging.Store) string
+		wantCode int
+	}{
+		{
+			name:     "monolithic POST with wrong digest",
+			uploadID: "u-mono-bad",
+			do: func(t *testing.T, h *Handler, st *staging.Store) string {
+				// The client never learns this upload ID, so nothing can ever clean it up.
+				req := httptest.NewRequest(http.MethodPost, "/v2/app/blobs/uploads/?digest="+badDigest, bytes.NewReader(goodBody))
+				req.Host = testTenantHost
+				req.Header.Set("Authorization", "Bearer good")
+				rec := httptest.NewRecorder()
+				h.ServeHTTP(rec, req)
+				if rec.Code != http.StatusBadRequest {
+					t.Fatalf("status = %d, want 400", rec.Code)
+				}
+				return "u-mono-bad"
+			},
+		},
+		{
+			name:     "PUT with wrong digest",
+			uploadID: "u-put-bad",
+			do: func(t *testing.T, h *Handler, st *staging.Store) string {
+				up, err := st.BeginUpload(context.Background(), "app")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := st.WriteChunk(context.Background(), up, 0, bytes.NewReader(goodBody)); err != nil {
+					t.Fatal(err)
+				}
+				req := httptest.NewRequest(http.MethodPut, "/v2/app/blobs/uploads/"+up+"?digest="+badDigest, nil)
+				req.Host = testTenantHost
+				req.Header.Set("Authorization", "Bearer good")
+				rec := httptest.NewRecorder()
+				h.ServeHTTP(rec, req)
+				if rec.Code != http.StatusBadRequest {
+					t.Fatalf("status = %d, want 400", rec.Code)
+				}
+				return up
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			spy := newClearSpy()
+			st := staging.New(staging.NewMemoryBlobStore(), spy, func() string { return tc.uploadID })
+			h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), st, nil, nil, nil)
+
+			up := tc.do(t, h, st)
+
+			var found bool
+			for _, c := range spy.clearedUploads() {
+				if c == up {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("upload %q session was not cleared (cleared=%v); it would leak a Valkey offset key", up, spy.clearedUploads())
+			}
+		})
+	}
+
+	// Sanity: the happy path must still clear its session too, and must not regress.
+	t.Run("successful PUT clears session", func(t *testing.T) {
+		spy := newClearSpy()
+		st := staging.New(staging.NewMemoryBlobStore(), spy, func() string { return "u-ok" })
+		h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), st, nil, nil, nil)
+
+		up, err := st.BeginUpload(context.Background(), "app")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.WriteChunk(context.Background(), up, 0, bytes.NewReader(goodBody)); err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPut, "/v2/app/blobs/uploads/"+up+"?digest="+goodDigest, nil)
+		req.Host = testTenantHost
+		req.Header.Set("Authorization", "Bearer good")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("status = %d, want 201", rec.Code)
+		}
+		if len(spy.clearedUploads()) == 0 {
+			t.Error("successful PUT left the upload session behind")
+		}
+	})
 }
 
 func TestMonolithicPostUploadPersistsBlob(t *testing.T) {

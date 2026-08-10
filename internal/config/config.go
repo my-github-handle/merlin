@@ -73,6 +73,12 @@ type StagingConfig struct {
 	ValkeyAddr     string `yaml:"valkey_addr"`
 	ScratchDir     string `yaml:"scratch_dir"`
 	ScanPoolSize   int    `yaml:"scan_pool_size"`
+	// SessionTTL bounds how long per-push staging state lives in Valkey. It is the
+	// backstop for state that explicit cleanup cannot reclaim (a SIGKILL skips
+	// defers; an abandoned push never sends its manifest). Must comfortably exceed
+	// the slowest real push: a push still in flight past this window loses its
+	// staging state and fails with a 400, forcing the client to re-push.
+	SessionTTL string `yaml:"session_ttl"`
 }
 
 type AuditConfig struct {
@@ -82,12 +88,20 @@ type AuditConfig struct {
 }
 
 type ServerConfig struct {
-	Addr           string `yaml:"addr"`
-	MetricsAddr    string `yaml:"metrics_addr"`
-	DashboardAddr  string `yaml:"dashboard_addr"` // default ":8080"; set "off" to disable
-	ExternalURL    string `yaml:"external_url"`
-	MaxUploadBytes int64  `yaml:"max_upload_bytes"`
-	GateTimeout    string `yaml:"gate_timeout"`
+	Addr          string `yaml:"addr"`
+	MetricsAddr   string `yaml:"metrics_addr"`
+	DashboardAddr string `yaml:"dashboard_addr"` // default ":8080"; set "off" to disable
+	ExternalURL   string `yaml:"external_url"`
+	// MaxUploadBytes caps a single blob-upload request body. Staging buffers the
+	// chunk AND re-reads the accumulated upload, so resident memory per in-flight
+	// upload is a multiple of this; the effective worst case is roughly this value
+	// times upload_concurrency. Keep the product well under the pod memory limit.
+	MaxUploadBytes int64 `yaml:"max_upload_bytes"`
+	// UploadConcurrency caps how many blob uploads may buffer bytes simultaneously.
+	// Excess uploads queue, then receive 503 + Retry-After. Separate from
+	// staging.scan_pool_size, which bounds Grype CPU, not upload memory.
+	UploadConcurrency int    `yaml:"upload_concurrency"`
+	GateTimeout       string `yaml:"gate_timeout"`
 	// ShutdownTimeout bounds how long the servers drain in-flight requests on
 	// SIGTERM before backends are closed. It should exceed gate_timeout so a push
 	// already in the gate can finish, and stay under the pod terminationGracePeriod
@@ -130,6 +144,9 @@ func (c *Config) applyDefaults() {
 	if c.Staging.ScanPoolSize == 0 {
 		c.Staging.ScanPoolSize = 4
 	}
+	if c.Staging.SessionTTL == "" {
+		c.Staging.SessionTTL = "24h"
+	}
 	if c.Audit.QueueSize == 0 {
 		c.Audit.QueueSize = 1024
 	}
@@ -147,7 +164,13 @@ func (c *Config) applyDefaults() {
 		c.Server.DashboardAddr = ":8080"
 	}
 	if c.Server.MaxUploadBytes == 0 {
-		c.Server.MaxUploadBytes = 1 << 30 // 1 GiB default
+		// 512 MiB. Lowered from 1 GiB: with upload_concurrency below, the worst-case
+		// resident upload memory is a multiple of the product of the two, and 1 GiB
+		// chunks could not be absorbed by the memory limit merlin runs under.
+		c.Server.MaxUploadBytes = 512 << 20
+	}
+	if c.Server.UploadConcurrency == 0 {
+		c.Server.UploadConcurrency = 4
 	}
 	if c.Server.GateTimeout == "" {
 		c.Server.GateTimeout = "5m"
@@ -206,6 +229,14 @@ func (c *Config) validate() error {
 	}
 	if c.ImageAge.ThresholdDays < 0 {
 		return fmt.Errorf("config: image_age.threshold_days must be >= 0")
+	}
+	// Reject rather than clamp: a negative value would disable the upload memory
+	// bound entirely, which is the failure mode the knob exists to prevent.
+	if c.Server.UploadConcurrency < 0 {
+		return fmt.Errorf("config: server.upload_concurrency must be >= 1")
+	}
+	if c.Server.MaxUploadBytes < 0 {
+		return fmt.Errorf("config: server.max_upload_bytes must be >= 0")
 	}
 	for i, t := range c.Tenants {
 		if t.ImageAge != nil && t.ImageAge.ThresholdDays < 0 {

@@ -7,44 +7,48 @@
 ## 1. Package Design
 
 Each package is independently testable with a clear interface. Dependencies flow
-inward toward `policy` and `staging`; external systems (Trivy, ACR, Blob, Valkey,
-ClickHouse, Entra) sit behind interfaces so they are mockable.
+inward toward `policy` and `staging`; external systems (Grype, ACR, Blob, Valkey,
+ClickHouse, Entra) sit behind interfaces so they are mockable. `app` wires
+everything: `Build` returns a hermetic instance for tests (stub auth, no backends);
+`BuildWithBackends` wires live JWKS, Blob, Valkey, ClickHouse, per-tenant ACR
+pushers, and the dashboard.
 
 ### `router`
 
-The extension seam (ports & adapters). Maps an event source to the adapter pair and
-gate profile that handle it, then drives the trigger-agnostic gate core. Adding a CI
-integration is "register an adapter pair," not a core change.
+The trigger-agnostic gate core. The router is outcome-agnostic: it runs the policy
+engine over a normalized, source-agnostic request and returns the result by value
+(request-local, no shared state); the source-specific handler decides how to act.
 
 ```go
-type Ingress interface {
-    // Acquire turns an inbound event into a staged artifact + request context.
-    Acquire(ctx context.Context, event Event) (GateRequest, error)
+// GateRequest is a normalized request to gate an artifact, source-agnostic.
+type GateRequest struct {
+    Source   string             // e.g. "docker"
+    Identity string             // authenticated pusher identity
+    Image    policy.StagedImage // assembled image on scratch
+    Target   string             // destination reference in the tenant's ACR
 }
 
-type Outcome interface {
-    // Apply acts on the verdict in the way appropriate to the source.
-    Apply(ctx context.Context, req GateRequest, result policy.Result) error
-}
-
-type Route struct {
-    Ingress Ingress
-    Outcome Outcome
-    Profile GateProfile // which policies/thresholds apply for this source
-}
-
-// Handle: acquire → gate core (staging → policy.Engine.Run → audit) → outcome.Apply
-func (r *Router) Handle(ctx context.Context, source string, event Event) error
+// Gate runs the policy engine and returns the gate result plus any infra error.
+func (r *Router) Gate(ctx context.Context, req GateRequest) (policy.Result, error)
 ```
 
-v1 registers exactly one route: `docker → {ingress/docker, outcome/docker}`. The
-`github` and `api` adapters are designed-for and deferred (see [specs.md §10–11](./specs.md)).
+`router.Pool` is a semaphore that bounds concurrent scans (`scan_pool_size`).
+Slot wait and scan run on **separate budgets** (`Acquire` + `Router().Gate`): queue
+time never consumes scan time. A wait deadline expiry returns `ErrSaturated`
+(mapped to `503` + `Retry-After` and recorded as an infra-error decision); a
+client disconnect while queued is distinguished from saturation.
+
+v1 has exactly one adapter pair — the Docker ingress (`docker.Handler`) and outcome
+(`docker.Outcome`), both in `ingress/docker`. The `github` and `api` adapters are
+designed-for and deferred (see [specs.md §10–11](./specs.md)); adding one means
+building a new ingress/outcome pair around `Router.Gate`, not changing the core.
 
 ### `ingress/docker` (`registryv2`)
 
-The v1 ingress adapter. Implements the inbound Docker Registry V2 HTTP surface plus a
-report endpoint. Its `Acquire` is the push itself (Docker streams blobs into
-staging); its paired `outcome/docker` blocks the push or forwards to ACR.
+The v1 adapter pair. Implements the inbound Docker Registry V2 HTTP surface plus a
+report endpoint; the paired `Outcome` (same package) blocks the push or forwards to
+ACR. Every request is first resolved to a **tenant** by host (see [`tenant`](#tenant));
+unknown hosts get `404` before auth.
 
 | Endpoint | Purpose |
 |---|---|
@@ -56,10 +60,19 @@ staging); its paired `outcome/docker` blocks the push or forwards to ACR.
 | `HEAD /v2/<repo>/blobs/<digest>` | Blob existence check (dedupe) — `404` (push gate holds no blobs) |
 | `HEAD/GET /v2/<repo>/manifests/<ref>` | Manifest existence check — `404` so the client proceeds with the push |
 | `PUT /v2/<repo>/manifests/<ref>` | **Completion signal** — triggers the gate; echoes `Docker-Content-Digest` on success |
-| `GET /reports/<push_id>` | Retrieve full Trivy JSON report from the audit store |
+| `GET /reports/<push_id \| repo:tag \| repo@digest>` | Retrieve the scan report (findings + age) from the audit store |
+
+Manifest PUTs are **classified** (`classify.go`): plain image manifests are gated;
+image indexes (manifest lists) and buildx attestation manifests (all layers
+`application/vnd.in-toto+json`) are forwarded to ACR verbatim via `PushManifest`
+(attestation blobs seeded first via `PushBlob`). Ordering is enforced by ACR
+itself — an index PUT fails unless its referenced (gated) image manifest already
+exists, so a rejected image cannot be published by reference.
 
 The handler is thin: it translates HTTP to `staging`/`policy`/`acr` calls and maps
-verdicts to v2 error envelopes. No business logic lives here.
+verdicts to v2 error envelopes. No business logic lives here. `Outcome.Apply` maps
+the gate result to the response: pass → ACR push → `201`; policy fail → `400`;
+infra error → `500`; ACR push failure → `502`; scan-pool saturation → `503`.
 
 ### `auth`
 
@@ -75,10 +88,10 @@ type Authenticator interface {
 }
 
 // RegistryTokenIssuer mints + verifies Merlin's own registry tokens (used on /v2/).
-type RegistryTokenIssuer interface {
-    Mint(subject, scope string) (token string, expiresIn int, err error)
-    Verify(token string) (subject, scope string, err error)
-}
+// The minted token carries the tenant prefix as a claim; /v2/ rejects a token
+// whose prefix does not match the request host's tenant.
+func (i *RegistryTokenIssuer) Mint(subject, scope, prefix string) (token string, expiresIn int, err error)
+func (i *RegistryTokenIssuer) Verify(token string) (subject, scope, prefix string, err error)
 ```
 
 - **At `/token`:** the developer's credential is validated against Entra ID — JWT
@@ -90,6 +103,30 @@ type RegistryTokenIssuer interface {
 
 Both the `Authenticator` and the issuer are injected into `registryv2`, so tests use
 a fake authenticator and an in-process issuer.
+
+### `tenant`
+
+Maps an inbound request host to the ACR tenant that serves it — the multi-tenant
+security boundary.
+
+```go
+// Tenant bundles everything that was single-valued in the single-registry design.
+type Tenant struct {
+    Prefix   string             // DNS label, e.g. "c3devops"
+    Registry string             // resolved ACR host from acr.registry_template
+    Pusher   acr.Pusher         // per-tenant workload-identity pusher
+    Authn    auth.Authenticator // per-tenant Entra validation (issuer/audience/JWKS)
+}
+
+// Resolver maps a request host to its tenant.
+type Resolver interface {
+    ForHost(host string) (*Tenant, bool)
+}
+```
+
+The static resolver takes the single leading DNS label before `base_domain` as the
+prefix (`<prefix>.<baseDomain>`); an unknown or malformed host resolves to nothing
+and the handler returns `404` before any authentication runs.
 
 ### `staging`
 
@@ -107,7 +144,9 @@ func (s *Store) Cleanup(ctx context.Context, mr ManifestRef, scratchDir string) 
 ```
 
 - **Blob payloads → Azure Blob Storage**, keyed by upload UUID (in flight) then by
-  content digest (on completion). `CompleteBlob` verifies the digest before storing.
+  content digest (on completion, `blob/<digest>`). `CompleteBlob` verifies the
+  digest before storing. Completed blobs are **content-addressed and ref-counted**
+  in Valkey (`IncBlobRef`/`DecBlobRef`) so concurrent pushes can share layers.
 - **Session state → Valkey**: per-upload blob list, byte offsets, completion flags.
   Chunk ordering enforced with an **atomic compare-and-set on the offset**;
   out-of-order chunks rejected with `416`.
@@ -116,11 +155,14 @@ func (s *Store) Cleanup(ctx context.Context, mr ManifestRef, scratchDir string) 
   referenced blob is complete before producing a `ManifestRef`.
 - `Assemble` reads the staged blobs into **local scratch** and produces two views:
   a valid **OCI image layout** (`oci-layout` + `index.json` + `blobs/sha256/`, with
-  the index descriptor carrying the manifest's real media type) for `trivy image
-  --input`, and an extracted **rootfs** for the base-image os-release check. Layers
-  are gunzipped (real layers are `tar+gzip`) before extraction; the config blob is
-  placed in the layout verbatim, never tar-extracted. Scratch is reclaimed after
-  scanning; a TTL sweep reclaims abandoned uploads.
+  the index descriptor carrying the manifest's real media type) for the Grype scan,
+  and an extracted **rootfs** for the base-image os-release check. Layers are
+  gunzipped (real layers are `tar+gzip`) before extraction; symlinks, hardlinks,
+  and device nodes are skipped as escape-surface reduction; the config blob is
+  placed in the layout verbatim, never tar-extracted. `Assemble` also extracts the
+  image config `created` timestamp for the image-age policy. `Cleanup` reclaims
+  scratch after scanning and deletes staged blobs only when their ref-count
+  reaches zero.
 
 ### `policy`
 
@@ -133,8 +175,11 @@ type Policy interface {
 }
 
 type Verdict struct {
-    Passed  bool
-    Reasons []string
+    Passed           bool
+    Reasons          []string
+    Findings         []Finding // scanner findings (set by the grype policy)
+    ScannerDBVersion string
+    Age              *AgeInfo  // set by the image-age policy; nil for other policies
 }
 
 type Engine struct { policies []Policy }
@@ -145,21 +190,24 @@ type Engine struct { policies []Policy }
 func (e *Engine) Run(ctx context.Context, img StagedImage) (Result, error)
 ```
 
-`Result` carries the aggregate pass/fail, per-policy verdicts, and the structured
-Trivy findings (for the response summary and audit). Adding a future check =
-implement `Policy` and register it; the engine is unchanged.
+`Result` carries the aggregate pass/fail, per-policy verdicts, the structured
+scanner findings, the scanner DB version, and the image-age info (for the response
+summary and audit). Adding a future check = implement `Policy` and register it; the
+engine is unchanged.
 
-### `policies/trivy`
+### `policies/grype`
 
 ```go
 type Runner interface { // injected, mockable
-    Scan(ctx context.Context, imagePath string) (Report, error)
+    Scan(ctx context.Context, ociPath string) (Report, error)
 }
 ```
 
-- Default `Runner` shells out to the `trivy` binary against the local scratch path,
-  parsing JSON output into `Report` (findings + scanned DB version).
-- Fails on any finding at or above the configured threshold (default `CRITICAL`).
+- Default `Runner` shells out to the `grype` binary against the local OCI layout
+  (`grype <ociPath> -o json -q --by-cve`), parsing JSON output into `Report`
+  (findings + scanner DB version).
+- Fails on any finding at or above the configured threshold (default `CRITICAL`);
+  **fails closed** on unrecognized severities.
 - Reasons formatted as `CVE-2024-XXXX (CRITICAL) in openssl 1.1.1`.
 - The full `Report` is returned in the `Verdict`/`Result` for response + audit.
 
@@ -173,63 +221,123 @@ type Runner interface { // injected, mockable
   **RedHat UBI** (`ID=rhel`) or **Chainguard/Wolfi** (`ID=wolfi`/`ID=chainguard`).
 - Otherwise fails with `base image not permitted: detected <id>, allowed: rhel,
   wolfi, chainguard`.
-- The allowed-ID set is config-driven (`baseImage.allowedIDs`) and matched
+- The allowed-ID set is config-driven (`base_image.allowed_ids`) and matched
   case-insensitively.
+
+### `policies/imageage`
+
+```go
+// Rule is the per-tenant age configuration.
+type Rule struct {
+    Enabled       bool
+    ThresholdDays int
+}
+```
+
+- Rejects images whose config `created` timestamp is older than the threshold
+  (default 60 days). A default rule applies to any tenant without an explicit
+  per-tenant override (`tenants[].image_age`).
+- **Fails closed**: a zero/unreadable `created` timestamp is a reject, not a pass.
+- The computed age is returned on the `Verdict` (`AgeInfo`) for response + audit.
 
 ### `acr`
 
 ```go
 type Pusher interface {
+    // Push uploads a gated image from a local OCI layout to target.
     Push(ctx context.Context, ociPath, target string) error
+    // PushManifest uploads a raw manifest (or index) verbatim, preserving its
+    // exact bytes and content digest (indexes, buildx attestations).
+    PushManifest(ctx context.Context, raw []byte, mediaType, target string) error
+    // PushBlob seeds a content blob an attestation manifest references.
+    PushBlob(ctx context.Context, raw []byte, mediaType, repo string) error
 }
 ```
 
 Pushes the assembled OCI layout to ACR using `go-containerregistry`, authenticating
-with Azure Workload Identity (AAD token exchanged for an ACR refresh token). Behind
-an interface so tests use a fake registry (go-containerregistry `httptest`).
+with Azure Workload Identity (AAD token exchanged for an ACR refresh token, cached
+until the refresh token's own expiry). Each tenant gets its own pusher bound to its
+ACR client ID. Behind an interface so tests use a fake registry
+(go-containerregistry `httptest`).
 
 ### `observability`
 
-Sets up OTel metrics + traces, exposes Prometheus `/metrics`, and provides the
-structured logger. Instruments the push lifecycle (auth → stage → scan → policy →
-ACR push). Tracks the Trivy DB age metric from each scan's reported DB version.
+Prometheus metrics (served on the metrics port, default `:9090`) and structured
+logging: `merlin_push_decisions_total`, `merlin_scan_duration_seconds`,
+`merlin_scanner_db_age_days` (from each scan's reported DB version),
+`merlin_acr_push_total`. OTel traces are designed-for but deferred.
 
 ### `audit`
 
 ```go
-type Auditor interface {
-    Record(ctx context.Context, decision Decision, findings []Finding) // async, non-blocking
+// Writer is the storage backend (ClickHouse in production).
+type Writer interface {
+    Write(ctx context.Context, d Decision, findings []policy.Finding) error
 }
+
+// Auditor wraps a Writer in an async bounded queue; Record never blocks.
+func (a *Auditor) Record(ctx context.Context, d Decision, findings []policy.Finding)
 ```
 
-- Writes to ClickHouse: `gate_decisions` (one row per push) and
-  `vulnerability_findings` (one row per CVE/package/scan), on **every** decision.
-- **Async + batched** so ingestion never blocks the push path. A ClickHouse outage
-  buffers writes and raises an alert; it does **not** fail the push.
-- Also serves `GET /reports/<push_id>` by reading findings back from ClickHouse.
+- Writes to ClickHouse: `gate_decisions` (one row per push), `vulnerability_findings`
+  (one row per CVE/package/scan), and `tag_aliases` (tag → digest, recorded when a
+  buildx index is forwarded by tag), on **every** decision. The schema is
+  self-bootstrapped at startup with TTL-based retention (`audit.retention_days`,
+  default 30). A decision carries `infra_error` + `error_detail` when the gate did
+  **not** complete (scan timeout, assemble/ACR failure) — distinct from a policy
+  rejection, so an unfinished scan is explainable from the audit store.
+- **Async + non-blocking** so ingestion never blocks the push path. Writes queue in
+  a bounded buffer (`audit.queue_size`) drained by a worker with a per-write
+  timeout and bounded retries + backoff; on overflow or final write failure the
+  record is dropped and an `onDrop` alert fires — a ClickHouse outage does **not**
+  fail the push.
+- A `Reader` serves `GET /reports/...` (by push ID, `repo:tag`, or digest — tag refs
+  resolve through `tag_aliases` for buildx pushes) and the dashboard queries. Query
+  errors are surfaced as "report unavailable", never masked as "not found".
+
+### `dashboard`
+
+Read-only observability UI served on its own port (default `:8080`, `off` to
+disable). Routes: `/` (overview), `/report`, `/api/dashboard/images`,
+`/api/dashboard/report.json`, `/api/dashboard/stream` (SSE live feed), `/static/`.
+A `TeeRecorder` fans each gate decision into both the `Auditor` and an in-process
+`Broadcaster` so connected dashboards see decisions live; historical views come
+from the ClickHouse `Reader`.
 
 ### `config`
 
-Loads YAML at startup: Trivy threshold, base-image matchers, ACR target, Entra
-issuer/audience/JWKS, Blob/Valkey/ClickHouse connection settings, scan-pool size.
+Loads a single YAML file at startup (path from `MERLIN_CONFIG`): Grype severity
+threshold, base-image allow-list, image-age rules (default + per-tenant), ACR
+`registry_template` (must contain `{prefix}`) + `base_domain`, tenants (prefix,
+ACR client ID, Entra issuer/audience/JWKS/tenant ID), registry-token secret + TTL,
+Blob/Valkey/ClickHouse connection settings, scan-pool size, and server settings
+(addresses, external URL, max upload bytes, gate/shutdown timeouts). `${ENV}`
+references are expanded **strictly** — any unset variable fails startup (used for
+`REGISTRY_TOKEN_SECRET` and `CLICKHOUSE_PASSWORD`). `MERLIN_MODE=production`
+selects `app.BuildWithBackends`; anything else builds the hermetic instance.
 
 ## 2. Data Flow
 
 ```
-auth ──► staging (Blob + Valkey) ──[manifest PUT]──► assemble to scratch
+tenant resolve ──► auth ──► staging (Blob + Valkey) ──[manifest PUT]──► classify
+                                                          │
+                              index / attestation ◄───────┤ image
+                              (forward verbatim)          ▼
+                                                    assemble to scratch
                                                           │
                                                           ▼
-                                                    policy.Engine.Run
-                                                    ├─ trivy.Evaluate
-                                                    └─ baseimage.Evaluate
+                                              scan pool ► policy.Engine.Run
+                                                    ├─ grype.Evaluate
+                                                    ├─ baseimage.Evaluate
+                                                    └─ imageage.Evaluate
                                                           │
                                    pass ◄─────────────────┴──────────────► fail
                                     │                                        │
-                              acr.Push ──► ACR                         reject + cleanup
+                              acr.Push ──► tenant ACR                  reject + cleanup
                                     │                                        │
-                                    └──────────► observability + audit ◄─────┘
-                                                 (both paths; response carries
-                                                  scan summary + report URL)
+                                    └──► observability + audit + dashboard ◄─┘
+                                         (both paths; response carries
+                                          scan summary + report URL)
 ```
 
 ## 3. Key Decisions
@@ -237,10 +345,13 @@ auth ──► staging (Blob + Valkey) ──[manifest PUT]──► assemble to
 | Decision | Choice | Rationale |
 |---|---|---|
 | Gate timing | Buffer-and-hold (synchronous) | Only model that blocks publish until pass |
-| Trivy invocation | Shell out to binary | Simplest; always-current DB; mockable via Runner |
+| Grype invocation | Shell out to binary | Simplest; always-current DB; mockable via Runner |
 | Base detection | os-release inspection | Intrinsic to base; survives registry path / version drift |
-| Staging backend | Azure Blob + Valkey | Stateless replicas; true horizontal scaling |
-| Scan concurrency | Bounded worker pool + backpressure | Trivy is CPU/mem heavy; protects the node |
+| Image freshness | Config `created` timestamp, fail closed | Intrinsic to image; missing timestamp is suspicious |
+| Multi-tenancy | Host prefix → tenant (registry, pusher, auth) | One deployment serves many ACRs; host binding is the security boundary |
+| Index/attestation handling | Forward verbatim, rely on ACR ordering | Preserves digests; rejected images can't be published by reference |
+| Staging backend | Azure Blob + Valkey (ref-counted blobs) | Stateless replicas; true horizontal scaling |
+| Scan concurrency | Bounded worker pool + backpressure | Scanning is CPU/mem heavy; protects the node |
 | Audit store | ClickHouse, append-only | Columnar speed for CVE → image reverse lookups |
 | Audit write failure | Non-blocking (buffer + alert) | Publish availability not coupled to ClickHouse |
 | Scan result delivery | Summary inline + report URL header | Works within what `docker push` renders |

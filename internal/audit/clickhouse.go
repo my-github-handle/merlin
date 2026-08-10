@@ -2,7 +2,9 @@ package audit
 
 import (
 	"context"
+	"database/sql"
 	_ "embed"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -128,11 +130,19 @@ func splitStatements(sql string) []string {
 func (c *clickhouseWriter) WriteDecision(ctx context.Context, d Decision) error {
 	return c.conn.Exec(ctx, `
 INSERT INTO gate_decisions
-(ts, push_id, image_repo, image_tag, image_digest, identity, passed, failed_policies, reasons, base_image_id, scanner_db_version, duration_ms, image_created, image_age_days, image_age_threshold_days, image_age_known)
-VALUES (now64(3), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+(ts, push_id, image_repo, image_tag, image_digest, identity, passed, failed_policies, reasons, base_image_id, scanner_db_version, duration_ms, image_created, image_age_days, image_age_threshold_days, image_age_known, infra_error, error_detail)
+VALUES (now64(3), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		d.PushID, d.Repo, d.Tag, d.Digest, d.Identity, d.Passed,
 		d.FailedPolicies, d.Reasons, d.BaseImageID, d.ScannerDBVersion, d.DurationMS,
-		d.ImageCreated, d.ImageAgeDays, d.ImageAgeThresholdDays, d.ImageAgeKnown)
+		d.ImageCreated, d.ImageAgeDays, d.ImageAgeThresholdDays, d.ImageAgeKnown,
+		d.InfraError, d.ErrorDetail)
+}
+
+// WriteTagAlias records a tag -> digest alias (see TagAliasWriter).
+func (c *clickhouseWriter) WriteTagAlias(ctx context.Context, a TagAlias) error {
+	return c.conn.Exec(ctx, `
+INSERT INTO tag_aliases (ts, image_repo, image_tag, image_digest)
+VALUES (now64(3), ?, ?, ?)`, a.Repo, a.Tag, a.Digest)
 }
 
 func (c *clickhouseWriter) WriteFindings(ctx context.Context, d Decision, findings []policy.Finding) error {
@@ -246,34 +256,81 @@ func (r *Reader) queryDecisions(ctx context.Context, q, arg string) ([]Decision,
 // returns that push's findings. ref matches either image_tag (a tag, or the
 // manifest digest when the client pushed by digest, e.g. buildx) or image_digest.
 func (r *Reader) FindingsByImageRef(ctx context.Context, repo, ref string) ([]policy.Finding, error) {
-	// Prefer an exact tag/digest match for the repo.
+	pushID, err := r.pushIDByRef(ctx, repo, ref)
+	if err != nil {
+		return nil, err
+	}
+	if pushID == "" {
+		return nil, nil
+	}
+	return r.FindingsByPush(ctx, pushID)
+}
+
+// pushIDByRef resolves an image reference to the push_id of its most recent gate
+// decision. Resolution order:
+//  1. exact tag/digest match on gate_decisions;
+//  2. tag_aliases (buildx: the tag was recorded on the forwarded index, the
+//     decision on the image digest it references);
+//  3. for a DIGEST ref only, the most recent push for the repo (the common "one
+//     image in flight per repo" case; use repo@sha256:... to disambiguate).
+//
+// A TAG miss after (2) means that tag was never scanned; falling back would serve
+// a different image's findings mislabeled as the requested tag, so it resolves to
+// "" (no match). Query errors are returned, NOT masked as a miss — a ClickHouse
+// outage must render "report unavailable", never "no findings".
+func (r *Reader) pushIDByRef(ctx context.Context, repo, ref string) (string, error) {
 	var pushID string
 	row := r.conn.QueryRow(ctx,
 		`SELECT toString(push_id) FROM gate_decisions
 		 WHERE image_repo = ? AND (image_tag = ? OR image_digest = ?)
 		 ORDER BY ts DESC LIMIT 1`, repo, ref, ref)
-	if err := row.Scan(&pushID); err != nil {
-		// No exact match. A buildx/attested push records the image manifest by
-		// DIGEST (the tag lives only on the index, which is never scanned), so a
-		// by-digest ref won't match and falls back to the most recent push for the
-		// repo — the common "one image in flight per repo" case. (Caveat: concurrent
-		// pushes of different images to the same repo may return a sibling push's
-		// report; use the by-digest form repo@sha256:... to disambiguate.)
-		//
-		// A TAG miss, by contrast, means that tag was never scanned; falling back
-		// would serve a different image's findings mislabeled as the requested tag,
-		// so return "no findings" instead.
-		if !refAllowsRepoFallback(ref) {
-			return nil, nil
-		}
-		row2 := r.conn.QueryRow(ctx,
-			`SELECT toString(push_id) FROM gate_decisions
-			 WHERE image_repo = ? ORDER BY ts DESC LIMIT 1`, repo)
-		if err2 := row2.Scan(&pushID); err2 != nil {
-			return nil, nil
+	err := row.Scan(&pushID)
+	if err == nil {
+		return pushID, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return "", err
+	}
+
+	// Tag alias: resolve tag -> digest recorded when the index was forwarded.
+	if !strings.HasPrefix(ref, "sha256:") {
+		var digest string
+		arow := r.conn.QueryRow(ctx,
+			`SELECT image_digest FROM tag_aliases
+			 WHERE image_repo = ? AND image_tag = ?
+			 ORDER BY ts DESC LIMIT 1`, repo, ref)
+		aerr := arow.Scan(&digest)
+		if aerr == nil {
+			drow := r.conn.QueryRow(ctx,
+				`SELECT toString(push_id) FROM gate_decisions
+				 WHERE image_repo = ? AND image_digest = ?
+				 ORDER BY ts DESC LIMIT 1`, repo, digest)
+			derr := drow.Scan(&pushID)
+			if derr == nil {
+				return pushID, nil
+			}
+			if !errors.Is(derr, sql.ErrNoRows) {
+				return "", derr
+			}
+		} else if !errors.Is(aerr, sql.ErrNoRows) {
+			return "", aerr
 		}
 	}
-	return r.FindingsByPush(ctx, pushID)
+
+	if !refAllowsRepoFallback(ref) {
+		return "", nil
+	}
+	row2 := r.conn.QueryRow(ctx,
+		`SELECT toString(push_id) FROM gate_decisions
+		 WHERE image_repo = ? ORDER BY ts DESC LIMIT 1`, repo)
+	err2 := row2.Scan(&pushID)
+	if err2 == nil {
+		return pushID, nil
+	}
+	if !errors.Is(err2, sql.ErrNoRows) {
+		return "", err2
+	}
+	return "", nil
 }
 
 // FindingsByPush serves the scan-report endpoint.

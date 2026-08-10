@@ -66,9 +66,13 @@ jobs:
             | jq -r .token)
           curl -s -H "Authorization: Bearer $REG" \
             "https://${MERLIN_HOST}/reports/${IMAGE_REPO}:${GITHUB_SHA}" \
-            > grype-report.json || echo "[]" > grype-report.json
+            > grype-report.json || echo '{"findings":[]}' > grype-report.json
+          # The report is an envelope: {age, findings, infra_error?, error?}.
+          if [ "$(jq -r '.infra_error // false' grype-report.json)" = "true" ]; then
+            echo "::warning::scan did not complete: $(jq -r '.error // "unknown"' grype-report.json)"
+          fi
           echo "----- Grype findings -----"
-          jq -r '.[] | "\(.Severity)\t\(.CVE)\t\(.Pkg) \(.Version)"' grype-report.json || cat grype-report.json
+          jq -r '.findings[]? | "\(.Severity)\t\(.CVE)\t\(.Pkg) \(.Version)"' grype-report.json || cat grype-report.json
 
       - name: Upload scan report
         if: always()

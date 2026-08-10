@@ -51,6 +51,7 @@ data:
       valkey_addr: {{ include "merlin.valkeyAddr" . | quote }}
       scratch_dir: {{ .Values.merlin.staging.scratchDir | quote }}
       scan_pool_size: {{ .Values.merlin.staging.scanPoolSize }}
+      session_ttl: {{ .Values.merlin.staging.sessionTTL | default "24h" | quote }}
     audit:
       # NOTE: The clickhouse_dsn contains ${CLICKHOUSE_PASSWORD}, a literal placeholder (NOT expanded by Helm).
       # At runtime, Merlin's config loader (internal/config/config.go) expands environment variables using
@@ -63,7 +64,10 @@ data:
       addr: {{ .Values.merlin.server.addr | quote }}
       metrics_addr: {{ .Values.merlin.server.metricsAddr | quote }}
       dashboard_addr: {{ .Values.merlin.server.dashboardAddr | quote }}
-      max_upload_bytes: {{ .Values.merlin.server.maxUploadBytes }}
+      # int64: Helm renders large plain numbers in scientific notation (5.36e+08),
+      # which yaml.v3 still parses correctly but is unreadable in the ConfigMap.
+      max_upload_bytes: {{ .Values.merlin.server.maxUploadBytes | int64 }}
+      upload_concurrency: {{ .Values.merlin.server.uploadConcurrency | default 4 }}
       gate_timeout: {{ .Values.merlin.server.gateTimeout | quote }}
       shutdown_timeout: {{ .Values.merlin.server.shutdownTimeout | quote }}
       external_url: {{ .Values.merlin.server.externalURL | quote }}

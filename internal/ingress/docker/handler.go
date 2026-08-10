@@ -22,6 +22,8 @@ type Handler struct {
 	reports        ReportSource
 	mux            *http.ServeMux
 	maxUploadBytes int64
+	uploadSlots    chan struct{}
+	uploadWait     time.Duration
 	pool           *router.Pool
 	gateTimeout    time.Duration
 	scratchBaseDir string
@@ -73,16 +75,83 @@ func queryForLog(raw string) string {
 	return "?" + raw
 }
 
-// SetMaxUploadBytes configures the maximum upload chunk size (default 2 GiB).
+// SetMaxUploadBytes configures the maximum upload chunk size (default 512 MiB).
 func (h *Handler) SetMaxUploadBytes(n int64) {
 	h.maxUploadBytes = n
 }
 
+// defaultMaxUploadBytes bounds a single upload request body when the operator has
+// not configured a limit. Deliberately far below the pod memory limit: staging
+// buffers the whole chunk AND the accumulated upload in memory, so the resident
+// cost is a multiple of this number, times the number of concurrent uploads (see
+// SetUploadConcurrency). The former 2 GiB default could not be absorbed by any
+// limit merlin runs under.
+const defaultMaxUploadBytes = 512 << 20 // 512 MiB
+
 func (h *Handler) getMaxUploadBytes() int64 {
 	if h.maxUploadBytes == 0 {
-		return 2 << 30 // 2 GiB default
+		return defaultMaxUploadBytes
 	}
 	return h.maxUploadBytes
+}
+
+// SetUploadConcurrency caps how many blob-upload requests may buffer bytes at once.
+//
+// This is a MEMORY bound, not a fairness one: staging.WriteChunk and CompleteBlob
+// read the accumulated upload back, append, and re-Put it, so an in-flight upload
+// holds several times the chunk size resident. Nothing else bounded that — only the
+// manifest gate acquires the scan pool — so N concurrent pushes cost N x that, which
+// is how the pods reached their memory limit and were OOMKilled. The scan pool is
+// deliberately NOT reused: it is sized for Grype CPU, and sharing it would make
+// uploads and scans starve each other.
+//
+// n < 1 disables the limit (the zero value, so callers that never configure it are
+// unaffected). Safe to call only before the handler starts serving.
+func (h *Handler) SetUploadConcurrency(n int) {
+	if n < 1 {
+		h.uploadSlots = nil
+		return
+	}
+	h.uploadSlots = make(chan struct{}, n)
+}
+
+// SetUploadWait bounds how long an upload queues for a slot before it is answered
+// with 503 + Retry-After. Zero uses defaultUploadWait.
+func (h *Handler) SetUploadWait(d time.Duration) {
+	h.uploadWait = d
+}
+
+// defaultUploadWait keeps a queued upload waiting long enough that a normal push
+// burst is absorbed rather than rejected, while still failing fast enough that a
+// docker client retries instead of hanging on a stalled connection.
+const defaultUploadWait = 30 * time.Second
+
+// acquireUploadSlot blocks until an upload slot is free, the wait budget expires, or
+// the client disconnects. The returned release func is nil when no limit is set.
+// ok=false means the caller has already answered the request and must return.
+func (h *Handler) acquireUploadSlot(w http.ResponseWriter, r *http.Request) (release func(), ok bool) {
+	if h.uploadSlots == nil {
+		return func() {}, true
+	}
+	wait := h.uploadWait
+	if wait == 0 {
+		wait = defaultUploadWait
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case h.uploadSlots <- struct{}{}:
+		return func() { <-h.uploadSlots }, true
+	case <-timer.C:
+		// Saturated: shed load with a retryable status rather than admitting the
+		// upload and risking an OOMKill that fails every concurrent push.
+		w.Header().Set("Retry-After", "5")
+		http.Error(w, "upload capacity saturated", http.StatusServiceUnavailable)
+		return nil, false
+	case <-r.Context().Done():
+		// Client gave up while queued; there is no one left to answer.
+		return nil, false
+	}
 }
 
 // SetPool configures the gate pool for concurrent scan limiting.

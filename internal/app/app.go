@@ -192,7 +192,11 @@ func BuildWithBackends(ctx context.Context, cfg config.Config) (*http.Server, *h
 	if err != nil {
 		return fail(fmt.Errorf("create blob store: %w", err))
 	}
-	sessionStore, err := staging.NewValkeySessionStore(cfg.Staging.ValkeyAddr)
+	sessionTTL, err := time.ParseDuration(cfg.Staging.SessionTTL)
+	if err != nil {
+		return fail(fmt.Errorf("parse staging.session_ttl: %w", err))
+	}
+	sessionStore, err := staging.NewValkeySessionStoreWithTTL(cfg.Staging.ValkeyAddr, sessionTTL)
 	if err != nil {
 		return fail(fmt.Errorf("create session store: %w", err))
 	}
@@ -247,8 +251,23 @@ func BuildWithBackends(ctx context.Context, cfg config.Config) (*http.Server, *h
 	handler.SetPool(pool)
 	handler.SetGateTimeout(gateTimeout)
 	handler.SetMaxUploadBytes(cfg.Server.MaxUploadBytes)
+	// Bound concurrent upload memory. Separate from the scan pool above: that one is
+	// sized for Grype CPU, while this caps how many pushes may buffer blob bytes at
+	// once (staging re-reads the accumulated upload on every chunk, so the resident
+	// cost is a multiple of max_upload_bytes per in-flight upload).
+	handler.SetUploadConcurrency(cfg.Server.UploadConcurrency)
 	if cfg.Staging.ScratchDir != "" {
 		handler.SetScratchBaseDir(cfg.Staging.ScratchDir)
+		// Reclaim scratch dirs stranded by a previous crash. Assembly cleanup is
+		// deferred, and a SIGKILL (OOMKill) runs no defers, so those dirs are
+		// unreferenced and would otherwise accumulate until the volume fills — 15.7G
+		// had built up this way. Startup is the safe moment: no assembly is in flight
+		// yet. Non-fatal — a sweep failure must not stop the gate from serving.
+		if n, err := staging.SweepScratch(cfg.Staging.ScratchDir, staging.DefaultScratchMaxAge); err != nil {
+			log.Printf("scratch sweep failed for %s: %v", cfg.Staging.ScratchDir, err)
+		} else if n > 0 {
+			log.Printf("scratch sweep: reclaimed %d abandoned scratch dir(s) under %s", n, cfg.Staging.ScratchDir)
+		}
 	}
 
 	// Wire Docker registry auth: token endpoint + challenge

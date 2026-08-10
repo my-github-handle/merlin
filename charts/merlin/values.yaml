@@ -86,12 +86,23 @@ merlin:
     valkeyAddr: ""                      # defaulted from operator-CR service in helpers if empty
     scratchDir: /tmp/merlin
     scanPoolSize: 4
+    # Expiry for per-push staging keys in Valkey. Backstop only: explicit cleanup
+    # reclaims them first, but a SIGKILL (OOMKill) skips it and an abandoned push
+    # never completes. Must exceed the slowest real push, or an in-flight push
+    # loses its staging state and must be re-pushed.
+    sessionTTL: "24h"
   audit: { clickhouseDSN: "", queueSize: 1024 }   # DSN defaulted from operator-CR service if empty
   server:
     addr: ":5000"
     metricsAddr: ":9090"
     dashboardAddr: ":8080"   # dashboard on by default; set "off" to disable
-    maxUploadBytes: 2147483648
+    # Upload memory bound. Staging buffers each chunk AND re-reads the accumulated
+    # upload on every write, so worst-case resident memory scales with
+    # maxUploadBytes x uploadConcurrency. Keep that product well under
+    # resources.limits.memory below — 512Mi x 4 was chosen against a 2Gi limit.
+    # Raising either knob without raising the limit reintroduces the OOMKill.
+    maxUploadBytes: 536870912   # 512 MiB (was 2 GiB)
+    uploadConcurrency: 4        # excess uploads queue, then 503 + Retry-After
     gateTimeout: 5m
     # Drain window for in-flight pushes on SIGTERM/rolling restart. Keep it above
     # gateTimeout (so a push in the gate can finish) and at or below

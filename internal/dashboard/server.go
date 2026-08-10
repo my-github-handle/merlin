@@ -76,17 +76,26 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 }
 
 // reportVM resolves a report from ?push_id= or ?ref=repo:tag|repo@sha256.
+// A query error (audit store unreachable, timeout) renders as Errored — a
+// retryable "report unavailable" state, deliberately distinct from "no report
+// exists" so an outage is never mistaken for a missing scan.
 func (s *Server) reportVM(ctx context.Context, r *http.Request) ReportVM {
 	q := r.URL.Query()
 	if pid := q.Get("push_id"); pid != "" {
-		vm, _ := s.svc.Report(ctx, "", "", pid)
+		vm, err := s.svc.Report(ctx, "", "", pid)
+		if err != nil {
+			return ReportVM{Errored: true}
+		}
 		return vm
 	}
 	repo, ref, ok := splitImageRef(q.Get("ref"))
 	if !ok {
 		return ReportVM{Found: false}
 	}
-	vm, _ := s.svc.Report(ctx, repo, ref, "")
+	vm, err := s.svc.Report(ctx, repo, ref, "")
+	if err != nil {
+		return ReportVM{Errored: true}
+	}
 	return vm
 }
 

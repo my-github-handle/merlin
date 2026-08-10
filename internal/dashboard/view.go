@@ -50,8 +50,11 @@ type SeverityVM struct{ Critical, High, Medium, Low, Unknown uint64 }
 
 type ReportVM struct {
 	Found                               bool
+	Errored                             bool // audit store could not be queried (retryable) — NOT "no report"
 	PushID, Repo, Tag, Digest, Identity string
 	Passed                              bool
+	InfraError                          bool   // gate did not complete for this push (not a policy rejection)
+	ErrorDetail                         string // operator-facing cause when InfraError
 	FailedPolicies, Reasons             []string
 	BaseImageID, ScannerDBVersion       string
 	Ts                                  time.Time

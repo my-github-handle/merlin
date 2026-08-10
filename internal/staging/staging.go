@@ -122,6 +122,24 @@ func (s *Store) CompleteBlob(ctx context.Context, uploadID, digest string, r io.
 		return fmt.Errorf("inc blob ref: %w", err)
 	}
 	_ = s.blobs.Delete(ctx, uploadKey(uploadID))
+	// 7. Retire the upload session. The blob is now addressed by digest, so the
+	// per-upload offset is dead state; leaving it behind leaks one key per push
+	// (the Valkey offset keys carry no TTL). Best-effort: the blob is already
+	// durable and marked complete, so a failure here must not fail the push.
+	_ = s.sessions.Clear(ctx, uploadID)
+	return nil
+}
+
+// AbandonUpload discards an in-flight upload: it drops the partially staged bytes
+// and the session offset. Callers use it when a push cannot proceed (out-of-order
+// chunk, oversized body, client disconnect) so an abandoned upload does not strand
+// state forever — the common case in production, where clients upload every blob
+// and then never send the manifest.
+func (s *Store) AbandonUpload(ctx context.Context, uploadID string) error {
+	_ = s.blobs.Delete(ctx, uploadKey(uploadID))
+	if err := s.sessions.Clear(ctx, uploadID); err != nil {
+		return fmt.Errorf("clear upload session: %w", err)
+	}
 	return nil
 }
 

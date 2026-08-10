@@ -1,16 +1,21 @@
 {{define "content"}}
-{{if not .VM.Found}}
-  <section class="panel"><p class="empty">No report found for that image. Reports exist only for images Merlin has gated, and are retained for a limited window.</p></section>
+{{if .VM.Errored}}
+  <section class="panel"><p class="empty">Report temporarily unavailable — the audit store could not be queried. This is not a verdict on the image; retry in a moment.</p></section>
+{{else if not .VM.Found}}
+  <section class="panel"><p class="empty">No report found for that image. Reports exist only for images Merlin has gated, and are retained for a limited window. If the push completed just now, the audit record may still be in flight — refresh in a few seconds.</p></section>
 {{else}}
 <section class="rep-head">
   <div><div class="img">{{.VM.Repo}}{{if .VM.Tag}}:{{.VM.Tag}}{{end}}</div>
   <div class="dig">{{.VM.Digest}} · {{.VM.Identity}} · {{.VM.Ts.Format "2006-01-02 15:04:05"}} · base {{.VM.BaseImageID}} · scanner {{.VM.ScannerDBVersion}}</div>
+  {{if .VM.InfraError}}
+  <div class="dig bad">Scan did not complete: {{.VM.ErrorDetail}}</div>
+  {{end}}
   {{if .VM.ImageAgeKnown}}
   <div class="dig {{if .VM.AgeCompliant}}ok{{else}}bad{{end}}">Image age: {{.VM.ImageAgeDays}}d (threshold {{.VM.AgeThreshold}}d) — created {{.VM.ImageCreated.Format "2006-01-02 15:04"}}</div>
   {{else}}
   <div class="dig unknown">Image age: unknown</div>
   {{end}}</div>
-  <div class="verdict {{if .VM.Passed}}ok{{else}}bad{{end}}">{{if .VM.Passed}}PASSED{{else}}REJECTED{{end}}</div>
+  <div class="verdict {{if .VM.InfraError}}bad{{else if .VM.Passed}}ok{{else}}bad{{end}}">{{if .VM.InfraError}}INCOMPLETE{{else if .VM.Passed}}PASSED{{else}}REJECTED{{end}}</div>
 </section>
 <section class="chips">
   <span class="chip bad">{{.VM.Counts.Critical}} Critical</span>

@@ -58,6 +58,11 @@ type DecisionHeader struct {
 	ImageAgeDays          uint16
 	ImageAgeThresholdDays uint16
 	ImageAgeKnown         bool
+
+	// InfraError / ErrorDetail: the gate did not complete for this push (scan
+	// timeout, assemble failure, ACR push failure) — see audit.Decision.
+	InfraError  bool
+	ErrorDetail string
 }
 
 // ImageRow is one gated image (one push) with its severity tallies.

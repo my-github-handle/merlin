@@ -1,8 +1,10 @@
 package docker
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -31,10 +33,24 @@ func (h *Handler) handleUpload(w http.ResponseWriter, r *http.Request) {
 		// containerd clients). Without this the blob is silently never stored and the
 		// later manifest PUT fails to assemble.
 		if digest := r.URL.Query().Get("digest"); digest != "" {
+			// Bytes are about to be buffered: take a slot. Only this branch of POST
+			// needs one — a bodiless POST just mints an ID and costs no memory.
+			release, ok := h.acquireUploadSlot(w, r)
+			if !ok {
+				// Shed or disconnected. The ID was minted inside this request, so no
+				// client will ever resume it; retire the session instead of stranding it.
+				h.abandonUpload(ctx, uploadID)
+				return
+			}
+			defer release()
 			body := http.MaxBytesReader(w, r.Body, h.getMaxUploadBytes())
 			defer body.Close()
 			if err := h.store.CompleteBlob(ctx, uploadID, digest, body); err != nil {
-				// Digest mismatch / bad body is a client error.
+				// Digest mismatch / bad body is a client error. This upload is dead:
+				// the client never learned its ID (it was minted inside this request),
+				// so nothing will ever resume or complete it. Retire it now or its
+				// session state is stranded with no owner.
+				h.abandonUpload(ctx, uploadID)
 				http.Error(w, fmt.Sprintf("complete blob: %v", err), http.StatusBadRequest)
 				return
 			}
@@ -67,6 +83,15 @@ func (h *Handler) handleUpload(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+
+		// A chunk write buffers the chunk AND re-reads the accumulated upload, so it
+		// must hold a slot. Do NOT abandon the upload on shed/disconnect: the client
+		// owns this ID and may legitimately re-PATCH the same offset after a 503.
+		release, ok := h.acquireUploadSlot(w, r)
+		if !ok {
+			return
+		}
+		defer release()
 
 		// Wrap body with MaxBytesReader
 		body := http.MaxBytesReader(w, r.Body, h.getMaxUploadBytes())
@@ -102,13 +127,25 @@ func (h *Handler) handleUpload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// Completion re-reads the whole accumulated upload to verify its digest — the
+		// single largest allocation on the push path — so it must hold a slot too. As
+		// with PATCH, a shed PUT is retryable by the client: leave the staged bytes.
+		release, ok := h.acquireUploadSlot(w, r)
+		if !ok {
+			return
+		}
+		defer release()
+
 		// Wrap body with MaxBytesReader (optional final chunk)
 		body := http.MaxBytesReader(w, r.Body, h.getMaxUploadBytes())
 		defer body.Close()
 
 		err := h.store.CompleteBlob(ctx, uuid, digest, body)
 		if err != nil {
-			// Assume digest mismatch errors are user errors (400)
+			// Assume digest mismatch errors are user errors (400). The upload cannot be
+			// salvaged — the digest is committed in the URL, so a retry is a NEW upload —
+			// so discard the staged bytes and session rather than leaving them stranded.
+			h.abandonUpload(ctx, uuid)
 			http.Error(w, fmt.Sprintf("complete blob: %v", err), http.StatusBadRequest)
 			return
 		}
@@ -120,6 +157,20 @@ func (h *Handler) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+// abandonUpload discards a dead upload's staged bytes and session state.
+//
+// Cancellation is detached: an oversized body or a client disconnect fails
+// CompleteBlob with the request ctx ALREADY canceled, which is precisely when the
+// cleanup matters most — a canceled ctx would fail both the blob delete and the
+// Valkey session delete, leaving exactly the state this call exists to reclaim.
+// Best-effort by design: the response is a 400 either way, and a failure here only
+// defers reclamation to the key TTL (see staging.DefaultSessionTTL).
+func (h *Handler) abandonUpload(ctx context.Context, uploadID string) {
+	if err := h.store.AbandonUpload(context.WithoutCancel(ctx), uploadID); err != nil {
+		log.Printf("abandon upload %s: %v", uploadID, err)
 	}
 }
 

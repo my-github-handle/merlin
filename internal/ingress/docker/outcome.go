@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"time"
 
@@ -74,7 +75,15 @@ func (o *Outcome) Apply(ctx context.Context, pusher acr.Pusher, req router.GateR
 	}
 
 	if gateErr != nil {
-		o.recordDecision(ctx, pushID, req, res, false, durMS)
+		// Infra failures must be countable and explainable: without the metric the
+		// error rate is invisible in merlin_push_decisions_total, and without the
+		// recorded detail the audit row is an unexplainable empty rejection.
+		o.observePushError()
+		if errors.Is(gateErr, router.ErrSaturated) {
+			o.recordDecision(ctx, pushID, req, res, false, durMS, gateErr)
+			return Decision{StatusCode: 503, Summary: "scan pool saturated, retry later", ReportURL: reportURL, InfraError: true}, nil
+		}
+		o.recordDecision(ctx, pushID, req, res, false, durMS, gateErr)
 		return Decision{StatusCode: 500, Summary: "scan could not complete", ReportURL: reportURL, InfraError: true}, nil
 	}
 	if o.Metrics != nil {
@@ -82,26 +91,40 @@ func (o *Outcome) Apply(ctx context.Context, pusher acr.Pusher, req router.GateR
 	}
 	summary := router.SummarizeResult(res)
 	if !res.Passed {
-		o.recordDecision(ctx, pushID, req, res, false, durMS)
+		o.recordDecision(ctx, pushID, req, res, false, durMS, nil)
 		return Decision{StatusCode: 400, Summary: summary, ReportURL: reportURL}, nil
 	}
 	if err := pusher.Push(ctx, req.Image.OCIPath, req.Target); err != nil {
 		if o.Metrics != nil {
 			o.Metrics.ObserveACRPush(false)
 		}
-		o.recordDecision(ctx, pushID, req, res, false, durMS)
+		// The scan PASSED; record the push as an infra failure (not a policy
+		// rejection) with the ACR error so the report page can say so.
+		o.recordDecision(ctx, pushID, req, res, false, durMS, fmt.Errorf("acr push: %w", err))
 		return Decision{StatusCode: 502, Summary: "passed but ACR push failed", ReportURL: reportURL, InfraError: true}, fmt.Errorf("acr push: %w", err)
 	}
 	if o.Metrics != nil {
 		o.Metrics.ObserveACRPush(true)
 	}
-	o.recordDecision(ctx, pushID, req, res, true, durMS)
+	o.recordDecision(ctx, pushID, req, res, true, durMS, nil)
 	return Decision{StatusCode: 201, Summary: summary, ReportURL: reportURL}, nil
 }
 
+// observePushError bumps the push-decision counter with an "error" outcome when
+// the metrics sink supports it. Optional-interface so existing MetricsObserver
+// fakes keep compiling.
+func (o *Outcome) observePushError() {
+	if m, ok := o.Metrics.(interface{ ObservePushError() }); ok {
+		m.ObservePushError()
+	}
+}
+
 // recordDecision records the gate decision to the audit store if Recorder is
-// configured, under the given pushID (shared with the report URL).
-func (o *Outcome) recordDecision(ctx context.Context, pushID string, req router.GateRequest, res policy.Result, passed bool, durMS uint32) {
+// configured, under the given pushID (shared with the report URL). infraErr,
+// when non-nil, marks the row as an incomplete gate (NOT a policy rejection)
+// and persists the cause — otherwise a timed-out or crashed scan is
+// indistinguishable from a reject in the audit store and on the dashboard.
+func (o *Outcome) recordDecision(ctx context.Context, pushID string, req router.GateRequest, res policy.Result, passed bool, durMS uint32, infraErr error) {
 	if o.Recorder == nil {
 		return
 	}
@@ -137,15 +160,22 @@ func (o *Outcome) recordDecision(ctx context.Context, pushID string, req router.
 		decision.ImageAgeKnown = true
 	}
 
+	if infraErr != nil {
+		decision.InfraError = true
+		decision.ErrorDetail = infraErr.Error()
+	}
+
 	o.Recorder.Record(ctx, decision, res.Findings)
 }
 
-// generatePushID generates a unique push ID using crypto/rand.
+// generatePushID generates a unique push ID using crypto/rand. The value must be
+// unique AND parseable into the audit store's UUID column (32 hex chars), so the
+// fallback derives from the wall clock rather than a constant.
 func generatePushID() string {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
-		// Fallback to a deterministic but unique-enough value
-		return fmt.Sprintf("push-%d", len(b))
+		// crypto/rand failure: still unique per call and UUID-parseable.
+		return fmt.Sprintf("%032x", uint64(time.Now().UnixNano()))
 	}
 	return hex.EncodeToString(b)
 }

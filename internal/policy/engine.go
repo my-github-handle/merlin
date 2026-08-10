@@ -2,6 +2,7 @@ package policy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 )
 
@@ -21,11 +22,13 @@ func NewEngine(policies ...Policy) *Engine {
 // Result with Passed=false.
 func (e *Engine) Run(ctx context.Context, img StagedImage) (Result, error) {
 	res := Result{Passed: true, Verdicts: make(map[string]Verdict)}
-	var infraErr error
+	var infraErrs []error
 	for _, p := range e.policies {
 		v, err := p.Evaluate(ctx, img)
 		if err != nil {
-			infraErr = fmt.Errorf("policy %q could not run: %w", p.Name(), err)
+			// Collect EVERY policy error (errors.Join below): overwriting would
+			// hide all but the last failure from logs and the audit error detail.
+			infraErrs = append(infraErrs, fmt.Errorf("policy %q could not run: %w", p.Name(), err))
 			res.Passed = false
 			continue
 		}
@@ -42,9 +45,9 @@ func (e *Engine) Run(ctx context.Context, img StagedImage) (Result, error) {
 			res.Age = v.Age
 		}
 	}
-	if infraErr != nil {
+	if len(infraErrs) > 0 {
 		res.Passed = false
-		return res, infraErr
+		return res, errors.Join(infraErrs...)
 	}
 	return res, nil
 }
