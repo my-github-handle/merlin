@@ -120,15 +120,20 @@ func (m *memSessionStore) IncBlobRef(_ context.Context, digest string) (int64, e
 	return m.refs[digest], nil
 }
 
+// DecBlobRef mirrors the Valkey store: a missing counter is an error (unknown
+// count), not zero, so Cleanup leaks the blob instead of deleting bytes a concurrent
+// push may still reference.
 func (m *memSessionStore) DecBlobRef(_ context.Context, digest string) (int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.refs[digest] > 0 {
-		m.refs[digest]--
+	if _, ok := m.refs[digest]; !ok {
+		return 0, fmt.Errorf("reference count for %s missing (expired or never set)", digest)
 	}
+	m.refs[digest]--
 	n := m.refs[digest]
-	if n == 0 {
+	if n <= 0 {
 		delete(m.refs, digest)
+		return 0, nil
 	}
 	return n, nil
 }

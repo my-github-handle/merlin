@@ -152,6 +152,126 @@ base_image:
 	}
 }
 
+// TestLoadAppliesSessionTTLDefault guards the staging-leak backstop against an older
+// ConfigMap that predates session_ttl: an empty value must default, not silently
+// become a zero TTL (which is how the Valkey key space grew unbounded).
+func TestLoadAppliesSessionTTLDefault(t *testing.T) {
+	p := writeTemp(t, `
+acr:
+  registry_template: "{prefix}acr.azurecr.io"
+  base_domain: c3ci.cloud
+tenants:
+  - { prefix: c3dev, acr_client_id: cid, auth: { issuer: i, audience: a, jwks_url: j, tenant_id: t } }
+auth: { registry_token_secret: shh }
+base_image:
+  allowed_ids: [rhel]
+`)
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Staging.SessionTTL != "24h" {
+		t.Errorf("default staging.session_ttl = %q, want 24h", cfg.Staging.SessionTTL)
+	}
+}
+
+func TestLoadKeepsExplicitSessionTTL(t *testing.T) {
+	p := writeTemp(t, `
+acr:
+  registry_template: "{prefix}acr.azurecr.io"
+  base_domain: c3ci.cloud
+tenants:
+  - { prefix: c3dev, acr_client_id: cid, auth: { issuer: i, audience: a, jwks_url: j, tenant_id: t } }
+auth: { registry_token_secret: shh }
+base_image:
+  allowed_ids: [rhel]
+staging:
+  session_ttl: 72h
+`)
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Staging.SessionTTL != "72h" {
+		t.Errorf("staging.session_ttl = %q, want 72h", cfg.Staging.SessionTTL)
+	}
+}
+
+// TestLoadAppliesUploadMemoryDefaults pins the two knobs that bound upload memory.
+// Their PRODUCT is what matters: staging re-reads the accumulated upload on every
+// chunk, so N concurrent uploads of max_upload_bytes each cost a multiple of
+// N x max_upload_bytes resident. The old 1 GiB x unbounded default is what let
+// concurrent pushes reach the pod memory limit and get OOMKilled.
+func TestLoadAppliesUploadMemoryDefaults(t *testing.T) {
+	p := writeTemp(t, `
+acr:
+  registry_template: "{prefix}acr.azurecr.io"
+  base_domain: c3ci.cloud
+tenants:
+  - { prefix: c3dev, acr_client_id: cid, auth: { issuer: i, audience: a, jwks_url: j, tenant_id: t } }
+auth: { registry_token_secret: shh }
+base_image:
+  allowed_ids: [rhel]
+`)
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Server.MaxUploadBytes != 512<<20 {
+		t.Errorf("default max_upload_bytes = %d, want %d (512 MiB)", cfg.Server.MaxUploadBytes, 512<<20)
+	}
+	if cfg.Server.UploadConcurrency != 4 {
+		t.Errorf("default upload_concurrency = %d, want 4", cfg.Server.UploadConcurrency)
+	}
+}
+
+func TestLoadKeepsExplicitUploadConcurrency(t *testing.T) {
+	p := writeTemp(t, `
+acr:
+  registry_template: "{prefix}acr.azurecr.io"
+  base_domain: c3ci.cloud
+tenants:
+  - { prefix: c3dev, acr_client_id: cid, auth: { issuer: i, audience: a, jwks_url: j, tenant_id: t } }
+auth: { registry_token_secret: shh }
+base_image:
+  allowed_ids: [rhel]
+server:
+  upload_concurrency: 8
+  max_upload_bytes: 268435456
+`)
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Server.UploadConcurrency != 8 {
+		t.Errorf("upload_concurrency = %d, want 8", cfg.Server.UploadConcurrency)
+	}
+	if cfg.Server.MaxUploadBytes != 268435456 {
+		t.Errorf("max_upload_bytes = %d, want 268435456", cfg.Server.MaxUploadBytes)
+	}
+}
+
+// TestLoadRejectsNegativeUploadConcurrency guards against a values typo silently
+// disabling the memory bound: -1 would fall through as "no limit", which is exactly
+// the unbounded behaviour this knob exists to prevent.
+func TestLoadRejectsNegativeUploadConcurrency(t *testing.T) {
+	p := writeTemp(t, `
+acr:
+  registry_template: "{prefix}acr.azurecr.io"
+  base_domain: c3ci.cloud
+tenants:
+  - { prefix: c3dev, acr_client_id: cid, auth: { issuer: i, audience: a, jwks_url: j, tenant_id: t } }
+auth: { registry_token_secret: shh }
+base_image:
+  allowed_ids: [rhel]
+server:
+  upload_concurrency: -1
+`)
+	if _, err := Load(p); err == nil || !strings.Contains(err.Error(), "upload_concurrency") {
+		t.Fatalf("expected upload_concurrency error, got %v", err)
+	}
+}
+
 func TestLoadKeepsExplicitShutdownTimeout(t *testing.T) {
 	p := writeTemp(t, `
 acr:
