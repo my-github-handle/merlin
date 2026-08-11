@@ -133,6 +133,17 @@ func (q *valkeyQueue) Ack(ctx context.Context, pushID string) error {
 	return nil
 }
 
+// Depth is the length of the pending list. The claimed hash is deliberately not
+// counted: those jobs are draining, and the caller uses this to decide whether to
+// admit more work.
+func (q *valkeyQueue) Depth(ctx context.Context) (int, error) {
+	n, err := q.rdb.LLen(ctx, q.pendingKey()).Result()
+	if err != nil {
+		return 0, fmt.Errorf("promote queue depth: %w", err)
+	}
+	return int(n), nil
+}
+
 // requeueScript moves one claimed job back to the head of pending and clears its
 // claim, atomically. A stamp with no payload is cleared too, so a half-written
 // claim cannot make Recover loop on it forever.

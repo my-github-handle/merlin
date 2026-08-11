@@ -54,6 +54,37 @@ func TestEnqueueClaimAckRoundTrip(t *testing.T) {
 	}
 }
 
+// TestDepthCountsOnlyPendingWork backs the admission bound on the request path.
+// Every pending job holds an OCI layout on a per-pod emptyDir, so the handler needs
+// to know the backlog to shed load before the disk fills. Claimed jobs are excluded
+// deliberately: they are actively draining, and counting them would make the gate
+// reject pushes for work that is already on its way out.
+func TestDepthCountsOnlyPendingWork(t *testing.T) {
+	for _, impl := range queueImpls {
+		t.Run(impl.name, func(t *testing.T) {
+			q := impl.new(t)
+			ctx := context.Background()
+			if n, err := q.Depth(ctx); err != nil || n != 0 {
+				t.Fatalf("Depth on empty queue = %d, %v; want 0, nil", n, err)
+			}
+			for i := 0; i < 3; i++ {
+				if err := q.Enqueue(ctx, Job{PushID: fmt.Sprintf("p%d", i)}); err != nil {
+					t.Fatalf("Enqueue: %v", err)
+				}
+			}
+			if n, err := q.Depth(ctx); err != nil || n != 3 {
+				t.Fatalf("Depth = %d, %v; want 3, nil", n, err)
+			}
+			if _, ok, err := q.Claim(ctx); err != nil || !ok {
+				t.Fatalf("Claim: ok=%v err=%v", ok, err)
+			}
+			if n, err := q.Depth(ctx); err != nil || n != 2 {
+				t.Errorf("Depth after a claim = %d, %v; want 2, nil (a draining job is not backlog)", n, err)
+			}
+		})
+	}
+}
+
 // TestRecoverRequeuesAbandonedClaim is the test that justifies the whole queue: it
 // encodes the OOMKill case. A worker that dies mid-promotion leaves a claim with no
 // one to Ack it; without Recover the image is never published and the audit row

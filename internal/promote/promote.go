@@ -16,6 +16,16 @@ type Promoter interface {
 	Promote(ctx context.Context, j Job) error // enqueue only; returns fast
 }
 
+// PendingCounter is optionally implemented by a Promoter to expose its backlog.
+// QueuePromoter implements it.
+//
+// It is a separate optional interface rather than a second method on Promoter so
+// that every existing Promoter fake keeps compiling and a Promoter with no
+// measurable backlog stays valid.
+type PendingCounter interface {
+	Pending(ctx context.Context) (int, error)
+}
+
 // DecisionFinalizer records the terminal outcome of a deferred promotion against
 // the decision the handler already wrote.
 //
@@ -34,6 +44,12 @@ type QueuePromoter struct{ Queue Queue }
 // Promote enqueues the job for the worker to pick up.
 func (p QueuePromoter) Promote(ctx context.Context, j Job) error {
 	return p.Queue.Enqueue(ctx, j)
+}
+
+// Pending reports the promotion backlog, so the request path can shed load before
+// the pending layouts fill the scratch volume.
+func (p QueuePromoter) Pending(ctx context.Context) (int, error) {
+	return p.Queue.Depth(ctx)
 }
 
 // DecisionRecorder is the append-only audit sink. audit.Auditor satisfies it; it is

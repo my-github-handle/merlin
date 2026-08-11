@@ -12,9 +12,12 @@ import (
 // scratchPrefixes are the directory-name prefixes Merlin's image assembly creates
 // under the scratch base. "merlin-assemble-*" is ours directly (os.MkdirTemp);
 // "stereoscope-*" and "getter*" are created by Syft/Grype beneath it and are left
-// behind by the same crashes. Anything not matching one of these is somebody else's
-// data and is never touched.
-var scratchPrefixes = []string{"merlin-assemble-", "stereoscope-", "getter"}
+// behind by the same crashes. "merlin-promote-*" is a layout rebuilt by the promotion
+// worker when a sibling replica assembled the image (scratch is a per-pod emptyDir),
+// which also strands the ORIGIN pod's merlin-assemble-* dir — no running code can
+// reach it, because its owner is on the other pod. Anything not matching one of these
+// is somebody else's data and is never touched.
+var scratchPrefixes = []string{"merlin-assemble-", "merlin-promote-", "stereoscope-", "getter"}
 
 // DefaultScratchMaxAge is the age past which a scratch directory is presumed
 // abandoned. It must exceed the longest possible gate (scan timeout defaults to 5
@@ -72,6 +75,51 @@ func SweepScratch(base string, maxAge time.Duration) (int, error) {
 		removed++
 	}
 	return removed, nil
+}
+
+// ScratchBytes totals the bytes Merlin's own scratch directories hold under base.
+//
+// Deferred promotion made this an operational question with no answer: a pending job
+// keeps its OCI layout AND its extracted rootfs on the scratch volume long after the
+// client got its 201, so the volume's occupancy no longer tracks in-flight requests.
+// It is the number the pending-promotion bound is derived from, which is why only
+// Merlin's own prefixes count — including another tenant of the mount would misreport
+// Merlin's footprint.
+//
+// An empty or missing base is zero, not an error: scratch_dir is optional, the mount
+// may not exist yet, and a metric must never fail a scrape. Per-entry walk errors are
+// skipped for the same reason — a dir being removed underneath the walk (by the sweep,
+// or by a finishing push) is normal, not a fault.
+func ScratchBytes(base string) (int64, error) {
+	if base == "" {
+		return 0, nil
+	}
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("read scratch dir %s: %w", base, err)
+	}
+
+	var total int64
+	for _, e := range entries {
+		if !e.IsDir() || !hasScratchPrefix(e.Name()) {
+			continue
+		}
+		filepath.WalkDir(filepath.Join(base, e.Name()), func(_ string, d os.DirEntry, werr error) error {
+			if werr != nil || d.IsDir() {
+				return nil //nolint:nilerr // a vanishing entry is normal; keep walking
+			}
+			info, ierr := d.Info()
+			if ierr != nil {
+				return nil
+			}
+			total += info.Size()
+			return nil
+		})
+	}
+	return total, nil
 }
 
 func hasScratchPrefix(name string) bool {

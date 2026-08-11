@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -29,6 +30,22 @@ import (
 	"github.com/merlin-gate/merlin/internal/router"
 	"github.com/merlin-gate/merlin/internal/staging"
 	"github.com/merlin-gate/merlin/internal/tenant"
+)
+
+const (
+	// promoteSampleInterval is how often the pending-promotion depth and the scratch
+	// footprint are sampled into their gauges. Both are levels held between events, so
+	// nothing updates them on the request path; 15s is below a typical scrape interval,
+	// which keeps a backlog that stops draining visible in the scrape that matters.
+	promoteSampleInterval = 15 * time.Second
+
+	// scratchSweepInterval is how often abandoned scratch dirs are reclaimed while the
+	// process runs. The startup-only sweep was sufficient when a leak required a crash;
+	// cross-pod promotion strands the origin pod's layout during normal operation, so
+	// the sweep has to keep running. The cadence is coarse because SweepScratch only
+	// removes dirs older than DefaultScratchMaxAge (24h) — sweeping faster reclaims
+	// nothing extra, it just walks the volume more often.
+	scratchSweepInterval = time.Hour
 )
 
 // Build wires config into the V2 server and the metrics server.
@@ -330,6 +347,30 @@ func BuildWithBackends(ctx context.Context, cfg config.Config) (*http.Server, *h
 			return t.Pusher, nil
 		},
 		Recorder: promote.AuditFinalizer{Recorder: outcome.Recorder},
+		// Rebuild the OCI layout when this pod is not the one that assembled it. The
+		// chart mounts scratch as an emptyDir (per pod) while the queue is one shared
+		// Valkey list and replicaCount is 2, so roughly half of all jobs are claimed by
+		// the wrong pod. The blobs are still reachable — they live in the shared blob
+		// store and their ref-counts are released by Cleanup, which has not run yet —
+		// so re-assembling locally is all that is needed.
+		Localize: func(ctx context.Context, j promote.Job) (string, string, error) {
+			dir, err := os.MkdirTemp(cfg.Staging.ScratchDir, "merlin-promote-*")
+			if err != nil {
+				return "", "", fmt.Errorf("create promote scratch dir: %w", err)
+			}
+			img, err := store.Assemble(ctx, staging.ManifestRef{
+				Repo: j.Repo, Ref: j.Ref, Manifest: j.Manifest,
+				ConfigDigest: j.ConfigDig, LayerDigests: j.Layers,
+			}, dir)
+			if err != nil {
+				// Remove the half-built layout: the retry calls Localize again and would
+				// otherwise leave one of these per attempt.
+				os.RemoveAll(dir)
+				return "", "", fmt.Errorf("re-assemble %s: %w", j.Target, err)
+			}
+			log.Printf("promote %s: rebuilt OCI layout locally (assembled on another replica)", j.PushID)
+			return img.OCIPath, dir, nil
+		},
 		Cleanup: func(ctx context.Context, j promote.Job) error {
 			return store.Cleanup(ctx, staging.ManifestRef{
 				Repo: j.Repo, Ref: j.Ref, ConfigDigest: j.ConfigDig, LayerDigests: j.Layers,
@@ -338,7 +379,45 @@ func BuildWithBackends(ctx context.Context, cfg config.Config) (*http.Server, *h
 		Metrics: metrics,
 	}
 	go worker.Run(bctx)
-	handler.SetPromoter(promote.QueuePromoter{Queue: promQueue})
+	promoter := promote.QueuePromoter{Queue: promQueue}
+	handler.SetPromoter(promoter)
+	// Bound the backlog. The 201 now goes out while the job is still queued, so
+	// nothing but the worker's drain rate limits how much scratch the pending layouts
+	// hold — and scratch is a per-pod emptyDir.
+	handler.SetMaxPendingPromotions(dockeringress.DefaultMaxPendingPromotions)
+
+	// Sample the two levels deferred promotion made load-bearing, and keep sweeping.
+	//
+	// The startup-only sweep above is no longer sufficient: a cross-pod promotion
+	// rebuilds the layout locally and the ORIGIN pod's merlin-assemble-* dir becomes
+	// unreachable by any running code (its owner is on the other replica), so scratch
+	// now leaks during NORMAL operation rather than only after a crash.
+	go func() {
+		t := time.NewTicker(promoteSampleInterval)
+		defer t.Stop()
+		sweepAt := time.Now().Add(scratchSweepInterval)
+		for {
+			if depth, derr := promQueue.Depth(bctx); derr == nil {
+				metrics.SetPendingPromotions(depth)
+			}
+			if bytes, berr := staging.ScratchBytes(cfg.Staging.ScratchDir); berr == nil {
+				metrics.SetScratchBytes(bytes)
+			}
+			if !time.Now().Before(sweepAt) {
+				sweepAt = time.Now().Add(scratchSweepInterval)
+				if n, serr := staging.SweepScratch(cfg.Staging.ScratchDir, staging.DefaultScratchMaxAge); serr != nil {
+					log.Printf("scratch sweep failed for %s: %v", cfg.Staging.ScratchDir, serr)
+				} else if n > 0 {
+					log.Printf("scratch sweep: reclaimed %d abandoned scratch dir(s) under %s", n, cfg.Staging.ScratchDir)
+				}
+			}
+			select {
+			case <-t.C:
+			case <-bctx.Done():
+				return
+			}
+		}
+	}()
 
 	// Build cleanup function: cancel JWKS context + close all resources (reverse order)
 	cleanup := func() {

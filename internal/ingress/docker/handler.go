@@ -33,12 +33,61 @@ type Handler struct {
 	service        string
 	tokenHandler   *TokenHandler
 	promoter       promote.Promoter // nil = publish to ACR synchronously
+	maxPending     int              // 0 = no admission bound on the promotion backlog
 }
 
 // SetPromoter defers ACR publication to a durable queue, so the manifest PUT is not
 // held across the push. Nil keeps the synchronous push (hermetic tests,
 // single-binary dev).
 func (h *Handler) SetPromoter(p promote.Promoter) { h.promoter = p }
+
+// SetMaxPendingPromotions bounds how many promotions may be waiting for the worker
+// before a push is shed with 503 + Retry-After.
+//
+// This is a DISK bound. Deferring publication means the 201 goes out while the job
+// is still queued, so each pending job pins an OCI layout plus an extracted rootfs
+// on the scratch volume — a per-pod emptyDir — and the only thing limiting total
+// scratch is the worker's drain rate. Under a slow ACR that is unbounded. Shedding a
+// push is recoverable (docker retries); filling the volume fails every concurrent
+// push at assemble time.
+//
+// n < 1 disables the check (the zero value, so callers that never configure it are
+// unaffected). Safe to call only before the handler starts serving.
+func (h *Handler) SetMaxPendingPromotions(n int) {
+	if n < 1 {
+		h.maxPending = 0
+		return
+	}
+	h.maxPending = n
+}
+
+// DefaultMaxPendingPromotions bounds the promotion backlog when the operator has
+// not configured one. Deliberately small: each pending job holds roughly twice the
+// image size on the scratch emptyDir (the OCI layout keeps the compressed blobs, the
+// rootfs holds them extracted), so a few dozen multi-GB images is already more than
+// the volume holds.
+const DefaultMaxPendingPromotions = 16
+
+// promotionBacklogFull reports whether the promotion queue is at its bound.
+//
+// Fail-OPEN on an unreadable depth: the bound is a disk safeguard, and treating a
+// Valkey blip as saturation would reject scanned, passing images — turning one flaky
+// read into an outage of the gate itself.
+func (h *Handler) promotionBacklogFull(r *http.Request) bool {
+	if h.maxPending < 1 || h.promoter == nil {
+		return false
+	}
+	counter, ok := h.promoter.(promote.PendingCounter)
+	if !ok {
+		return false
+	}
+	depth, err := counter.Pending(r.Context())
+	if err != nil {
+		log.Printf("promotion backlog unreadable, admitting push: %v", err)
+		return false
+	}
+	return depth >= h.maxPending
+}
 
 // pushID generates the ID shared by the report URL, the audit row, and any
 // promotion job. It reuses the Outcome's generator rather than adding a second

@@ -126,6 +126,53 @@ func TestBlockedWindowPhasesAreObservableAtRealDurations(t *testing.T) {
 	}
 }
 
+// TestDeferredPromotionResourcesAreObservable covers the two numbers deferred
+// promotion made load-bearing and left unmeasured. The 201 goes out while the job is
+// still queued, so the pending backlog and the scratch bytes it pins are the only
+// signals that the worker is falling behind — and the pending bound is tuned from
+// them. Both are gauges: they are levels, not events.
+func TestDeferredPromotionResourcesAreObservable(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		set    func(*Metrics, float64)
+		metric string
+		want   float64
+	}{
+		{"pending promotions", func(m *Metrics, v float64) { m.SetPendingPromotions(int(v)) },
+			"merlin_promote_pending", 7},
+		{"scratch bytes", func(m *Metrics, v float64) { m.SetScratchBytes(int64(v)) },
+			"merlin_scratch_bytes", 1 << 30},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := prometheus.NewRegistry()
+			m := NewMetrics(reg)
+			tc.set(m, tc.want)
+			if got := gaugeValue(t, reg, tc.metric); got != tc.want {
+				t.Errorf("%s = %v, want %v", tc.metric, got, tc.want)
+			}
+		})
+	}
+}
+
+func gaugeValue(t *testing.T, reg *prometheus.Registry, name string) float64 {
+	t.Helper()
+	for _, mf := range mustGather(t, reg) {
+		if mf.GetName() != name {
+			continue
+		}
+		if len(mf.GetMetric()) == 0 {
+			t.Fatalf("%s: family present but has no metric", name)
+		}
+		g := mf.GetMetric()[0].GetGauge()
+		if g == nil {
+			t.Fatalf("%s: metric is not a gauge", name)
+		}
+		return g.GetValue()
+	}
+	t.Fatalf("%s: not registered", name)
+	return 0
+}
+
 func TestSetScannerDBAge(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := NewMetrics(reg)

@@ -18,6 +18,8 @@ type Metrics struct {
 	queueWait        prometheus.Histogram
 	promoteDuration  prometheus.Histogram
 	scannerDBAge     prometheus.Gauge
+	pendingPromotes  prometheus.Gauge
+	scratchBytes     prometheus.Gauge
 	acrPush          *prometheus.CounterVec
 }
 
@@ -64,13 +66,25 @@ func NewMetrics(reg *prometheus.Registry) *Metrics {
 			Name: "merlin_scanner_db_age_days",
 			Help: "Age of the scanner vulnerability DB in days.",
 		}),
+		// The two levels deferred promotion made load-bearing. Publication now outlives
+		// the manifest PUT, so a pending job pins an OCI layout plus an extracted rootfs
+		// on the scratch volume long after its client saw 201 — volume occupancy no
+		// longer tracks in-flight requests, and the pending bound is tuned from these.
+		pendingPromotes: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "merlin_promote_pending",
+			Help: "Promotions waiting for the worker (queue depth).",
+		}),
+		scratchBytes: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "merlin_scratch_bytes",
+			Help: "Bytes held by Merlin's scratch directories on the local volume.",
+		}),
 		acrPush: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "merlin_acr_push_total",
 			Help: "ACR push attempts by result.",
 		}, []string{"result"}),
 	}
 	reg.MustRegister(m.pushTotal, m.scanDuration, m.assembleDuration, m.queueWait,
-		m.promoteDuration, m.scannerDBAge, m.acrPush)
+		m.promoteDuration, m.scannerDBAge, m.pendingPromotes, m.scratchBytes, m.acrPush)
 	return m
 }
 
@@ -97,6 +111,12 @@ func (m *Metrics) SetScannerDBAgeDays(days float64)    { m.scannerDBAge.Set(days
 func (m *Metrics) ObserveAssembleDuration(seconds float64) { m.assembleDuration.Observe(seconds) }
 func (m *Metrics) ObserveQueueWait(seconds float64)        { m.queueWait.Observe(seconds) }
 func (m *Metrics) ObservePromoteDuration(seconds float64)  { m.promoteDuration.Observe(seconds) }
+
+// SetPendingPromotions and SetScratchBytes are sampled on a timer rather than at an
+// event, because both are levels held between events: a backlog that stops draining
+// changes neither until the next push arrives, which is exactly when it matters.
+func (m *Metrics) SetPendingPromotions(n int)  { m.pendingPromotes.Set(float64(n)) }
+func (m *Metrics) SetScratchBytes(bytes int64) { m.scratchBytes.Set(float64(bytes)) }
 
 func (m *Metrics) ObserveACRPush(ok bool) {
 	result := "error"

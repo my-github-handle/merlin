@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"time"
 
 	"github.com/merlin-gate/merlin/internal/acr"
@@ -24,6 +25,23 @@ type Worker struct {
 	// publish to the wrong registry.
 	Pushers  func(tenantPrefix string) (acr.Pusher, error)
 	Recorder DecisionFinalizer
+	// Localize rebuilds the job's OCI layout on THIS pod and returns the new
+	// (ociPath, scratchDir). It is called only when Job.OCIPath is absent from the
+	// local filesystem.
+	//
+	// It exists because scratch is an emptyDir — per POD — while the queue is one
+	// shared Valkey list and the chart runs replicaCount: 2. Claim is an unscoped
+	// LPOP, so roughly half of all jobs land on the pod that did NOT assemble the
+	// image. Without a rebuild those jobs spend their whole attempt budget pushing a
+	// directory that was never on this filesystem and are retired, after the client
+	// was already told 201 — an approved image that is silently never published.
+	//
+	// The rebuild is possible because the staged blobs live in the SHARED blob store
+	// and their ref-counts are released by Cleanup, which has not run yet.
+	//
+	// Nil skips the check entirely (hermetic tests, single-replica dev), so the
+	// stat cost and the fake paths in unit tests are both avoided.
+	Localize func(ctx context.Context, j Job) (ociPath, scratchDir string, err error)
 	// Cleanup releases the job's scratch dir and staged blob ref-counts. It runs
 	// only when no retry will follow — see handle.
 	Cleanup func(ctx context.Context, j Job) error
@@ -154,6 +172,15 @@ func (w *Worker) handle(ctx context.Context, j Job) {
 	}
 	j.Attempts++
 
+	// Make the layout local before pushing. A failure here is weather, not
+	// configuration — the blobs may still be mid-upload or the store briefly
+	// unreachable — so it takes the normal retry path.
+	if lj, ok := w.localize(ctx, j); ok {
+		j = lj
+	} else {
+		return
+	}
+
 	start := time.Now()
 	err = pusher.Push(ctx, j.OCIPath, j.Target)
 	if w.Metrics != nil {
@@ -175,6 +202,29 @@ func (w *Worker) handle(ctx context.Context, j Job) {
 		log.Printf("promote %s: published but ack failed (may be re-pushed): %v", j.PushID, aerr)
 	}
 	w.cleanup(ctx, j)
+}
+
+// localize returns the job with its OCI layout guaranteed present on this pod. It
+// reports false when the job has already been failed/retired and handle must stop.
+//
+// The rebuilt paths REPLACE the job's own: the origin pod's ScratchDir does not
+// exist here, so cleaning it up would be a no-op that leaks the layout this pod
+// just built. (The origin pod's copy is reclaimed by the scratch sweep instead —
+// nothing else can reach it.)
+func (w *Worker) localize(ctx context.Context, j Job) (Job, bool) {
+	if w.Localize == nil {
+		return j, true
+	}
+	if _, err := os.Stat(j.OCIPath); err == nil {
+		return j, true // assembled by this pod; nothing to do
+	}
+	ociPath, scratchDir, err := w.Localize(ctx, j)
+	if err != nil {
+		w.fail(ctx, j, fmt.Errorf("rebuild oci layout for %s: %w", j.Target, err))
+		return j, false
+	}
+	j.OCIPath, j.ScratchDir = ociPath, scratchDir
+	return j, true
 }
 
 // fail decides between retry and retirement. A job that has spent its budget is

@@ -3,6 +3,8 @@ package promote
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -15,6 +17,7 @@ import (
 type fakePusher struct {
 	mu    sync.Mutex
 	n     int
+	paths []string // OCI layout path of each push, in order
 	err   error
 	block chan struct{} // when non-nil, Push waits on it before returning
 }
@@ -22,6 +25,7 @@ type fakePusher struct {
 func (p *fakePusher) Push(ctx context.Context, ociPath, target string) error {
 	p.mu.Lock()
 	p.n++
+	p.paths = append(p.paths, ociPath)
 	block, err := p.block, p.err
 	p.mu.Unlock()
 	if block != nil {
@@ -41,6 +45,12 @@ func (p *fakePusher) calls() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.n
+}
+
+func (p *fakePusher) pushedPaths() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.paths...)
 }
 
 // fakeFinalizer records what the worker reported about each promotion.
@@ -355,6 +365,179 @@ func TestWorkerRecoversAbandonedClaimsOnStart(t *testing.T) {
 	go w.Run(runCtx)
 
 	waitFor(t, func() bool { return pusher.calls() >= 1 })
+}
+
+// TestWorkerRebuildsLayoutAssembledOnAnotherPod is the cross-replica guard.
+//
+// scratch is an emptyDir — per POD — while the promotion queue is a single shared
+// Valkey list and the chart runs replicaCount: 2. Claim is a bare LPOP with no
+// owner scoping, so roughly half of all jobs are claimed by the pod that did NOT
+// assemble the image. That pod finds no OCI layout, burns the whole attempt budget
+// against a path that was never on its filesystem, and retires the job — while the
+// client is already holding its 201. "Approved but silently never published."
+func TestWorkerRebuildsLayoutAssembledOnAnotherPod(t *testing.T) {
+	q := NewMemoryQueue()
+	pusher := &fakePusher{}
+
+	// What THIS pod can rebuild, from blobs still present in the shared staging
+	// store (Cleanup has not run, so the ref-counts are still held).
+	localScratch := t.TempDir()
+	localOCI := filepath.Join(localScratch, "oci")
+	if err := os.MkdirAll(localOCI, 0o755); err != nil {
+		t.Fatalf("setup local layout: %v", err)
+	}
+
+	var mu sync.Mutex
+	var localizeCalls int
+	var cleanedWith string
+	w := testWorker(&Worker{
+		Queue:    q,
+		Pushers:  func(string) (acr.Pusher, error) { return pusher, nil },
+		Recorder: &fakeFinalizer{},
+		Localize: func(context.Context, Job) (string, string, error) {
+			mu.Lock()
+			localizeCalls++
+			mu.Unlock()
+			return localOCI, localScratch, nil
+		},
+		Cleanup: func(_ context.Context, j Job) error {
+			mu.Lock()
+			defer mu.Unlock()
+			cleanedWith = j.ScratchDir
+			return nil
+		},
+	})
+
+	// The ORIGIN pod's paths. Neither exists here; that is the whole scenario.
+	if err := q.Enqueue(context.Background(), Job{
+		PushID: "p1", Target: "acr.io/app:v1",
+		OCIPath:    filepath.Join(t.TempDir(), "gone", "oci"),
+		ScratchDir: filepath.Join(t.TempDir(), "gone"),
+	}); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go w.Run(ctx)
+	waitFor(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return pusher.calls() == 1 && cleanedWith != ""
+	})
+
+	if got := pusher.pushedPaths(); got[0] != localOCI {
+		t.Errorf("pushed OCI path = %q, want the rebuilt local layout %q", got[0], localOCI)
+	}
+	// Cleanup must target what THIS pod created. Removing the origin pod's path is a
+	// no-op on this filesystem and leaks the layout that was just rebuilt.
+	mu.Lock()
+	defer mu.Unlock()
+	if cleanedWith != localScratch {
+		t.Errorf("cleaned scratch dir = %q, want the rebuilt %q", cleanedWith, localScratch)
+	}
+	if localizeCalls != 1 {
+		t.Errorf("localize calls = %d, want 1", localizeCalls)
+	}
+}
+
+// TestWorkerDoesNotRebuildLayoutItAlreadyHas keeps the common case cheap: when the
+// claiming pod IS the pod that assembled the image, re-fetching every blob from
+// Azure Blob and re-extracting the layers would double the cost of every promotion.
+func TestWorkerDoesNotRebuildLayoutItAlreadyHas(t *testing.T) {
+	q := NewMemoryQueue()
+	pusher := &fakePusher{}
+	scratch := t.TempDir()
+	ociPath := filepath.Join(scratch, "oci")
+	if err := os.MkdirAll(ociPath, 0o755); err != nil {
+		t.Fatalf("setup local layout: %v", err)
+	}
+
+	var mu sync.Mutex
+	var localizeCalls int
+	var done bool
+	w := testWorker(&Worker{
+		Queue:    q,
+		Pushers:  func(string) (acr.Pusher, error) { return pusher, nil },
+		Recorder: &fakeFinalizer{},
+		Localize: func(context.Context, Job) (string, string, error) {
+			mu.Lock()
+			localizeCalls++
+			mu.Unlock()
+			return "", "", errors.New("must not be called")
+		},
+		Cleanup: func(context.Context, Job) error {
+			mu.Lock()
+			defer mu.Unlock()
+			done = true
+			return nil
+		},
+	})
+	if err := q.Enqueue(context.Background(), Job{
+		PushID: "p1", Target: "acr.io/app:v1", OCIPath: ociPath, ScratchDir: scratch,
+	}); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go w.Run(ctx)
+	waitFor(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return done
+	})
+
+	mu.Lock()
+	defer mu.Unlock()
+	if localizeCalls != 0 {
+		t.Errorf("localize calls = %d, want 0; the layout was already on this pod", localizeCalls)
+	}
+}
+
+// TestWorkerRetiresWhenLayoutCannotBeRebuilt pins that an unrebuildable layout is
+// RECORDED, not silently dropped. The staged blobs expire or a sibling's Cleanup
+// released them, so there is nothing left to assemble — and the client already has a
+// 201 saying the image passed. The contradicting audit row is the only way an
+// operator ever learns the image is not in ACR.
+func TestWorkerRetiresWhenLayoutCannotBeRebuilt(t *testing.T) {
+	q := NewMemoryQueue()
+	pusher := &fakePusher{}
+	fin := &fakeFinalizer{}
+	w := testWorker(&Worker{
+		Queue:    q,
+		Pushers:  func(string) (acr.Pusher, error) { return pusher, nil },
+		Recorder: fin,
+		Localize: func(context.Context, Job) (string, string, error) {
+			return "", "", errors.New("staged blob 404: already released")
+		},
+		Cleanup:     func(context.Context, Job) error { return nil },
+		MaxAttempts: 2,
+	})
+	if err := q.Enqueue(context.Background(), Job{
+		PushID: "p1", Target: "acr.io/app:v1", OCIPath: filepath.Join(t.TempDir(), "gone", "oci"),
+	}); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go w.Run(ctx)
+
+	detail := ""
+	waitFor(t, func() bool {
+		d, ok := fin.failed("p1")
+		detail = d
+		return ok
+	})
+	if detail == "" {
+		t.Error("terminal failure recorded with no cause; the audit row is unexplainable")
+	}
+	// Never push a layout we know is absent: go-containerregistry would fail on an
+	// empty/missing directory, and a "success" there would be far worse.
+	if n := pusher.calls(); n != 0 {
+		t.Errorf("pushes = %d, want 0; a missing layout must not reach ACR", n)
+	}
 }
 
 // TestWorkerDoesNotStealLiveClaims is the multi-replica guard. The chart runs

@@ -40,8 +40,14 @@ type Job struct {
 	ScratchDir string   `json:"scratch_dir"` // parent dir to remove after promotion
 	Layers     []string `json:"layers"`      // staged layer digests, for ref-count release
 	ConfigDig  string   `json:"config_dig"`
-	Identity   string   `json:"identity"`
-	Attempts   uint8    `json:"attempts"`
+	// Manifest is the exact bytes the client PUT. It is carried because OCIPath is
+	// only valid on the pod that assembled the image — scratch is a per-pod emptyDir
+	// while this queue is shared — so a sibling replica that claims the job must be
+	// able to re-Assemble the layout from the shared blob store, and Assemble needs
+	// the manifest to write index.json. See Worker.Localize.
+	Manifest []byte `json:"manifest"`
+	Identity string `json:"identity"`
+	Attempts uint8  `json:"attempts"`
 }
 
 // Queue is the durable hand-off between the request path and the promotion worker.
@@ -70,4 +76,12 @@ type Queue interface {
 	// older image. Digest targets (what buildx pushes) cannot suffer this. Bounding
 	// the retry window (worker recovery interval) is what keeps it narrow.
 	Recover(ctx context.Context, olderThan time.Duration) ([]Job, error)
+	// Depth is the number of jobs waiting to be claimed. Claimed jobs are excluded:
+	// they are already draining, and the caller uses this to decide whether to admit
+	// MORE work.
+	//
+	// It exists because every pending job pins an OCI layout on a per-pod emptyDir
+	// while its client has already been told 201. Without a readable backlog the only
+	// thing bounding local disk is the worker's drain rate.
+	Depth(ctx context.Context) (int, error)
 }

@@ -184,6 +184,17 @@ func (h *Handler) handleManifest(w http.ResponseWriter, r *http.Request, t *tena
 		return
 	}
 
+	// Shed the push if the promotion backlog is already at its bound. This must come
+	// BEFORE PutManifest/Assemble: the whole point is to not spend scratch disk (or a
+	// scan slot) on an image whose layout would then sit in a queue that is not
+	// draining. Only image manifests reach here — index/attestation forwards above
+	// hold nothing on disk.
+	if h.promotionBacklogFull(r) {
+		w.Header().Set("Retry-After", "5")
+		http.Error(w, "promotion queue saturated", http.StatusServiceUnavailable)
+		return
+	}
+
 	// Separate the config blob (JSON image config) from the filesystem layers.
 	// Only layers are tar+gzip archives to be extracted; the config goes into the
 	// OCI layout verbatim. Lumping them together caused Assemble to tar-extract
@@ -331,7 +342,12 @@ func (h *Handler) handleManifest(w http.ResponseWriter, r *http.Request, t *tena
 			ScratchDir: scratchDir,
 			Layers:     mr.LayerDigests,
 			ConfigDig:  mr.ConfigDigest,
-			Identity:   identity.Subject,
+			// OCIPath is only meaningful on THIS pod (scratch is a per-pod emptyDir),
+			// so the manifest travels with the job: a sibling replica that claims it
+			// re-assembles the layout from the shared blob store, and Assemble needs
+			// these exact bytes to write index.json.
+			Manifest: manifestBytes,
+			Identity: identity.Subject,
 		}
 		publish = func(pctx context.Context) error {
 			if err := h.promoter.Promote(pctx, job); err != nil {

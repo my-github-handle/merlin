@@ -55,6 +55,12 @@ func (q *memoryQueue) Ack(_ context.Context, pushID string) error {
 	return nil
 }
 
+func (q *memoryQueue) Depth(_ context.Context) (int, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return len(q.pending), nil
+}
+
 func (q *memoryQueue) Recover(_ context.Context, olderThan time.Duration) ([]Job, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()

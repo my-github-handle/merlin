@@ -68,6 +68,71 @@ func TestSweepScratchRemovesStaleDirs(t *testing.T) {
 	}
 }
 
+// TestSweepScratchReclaimsPromoteRebuilds covers the dir the deferred-promotion path
+// creates. When a sibling replica claims a job it re-assembles the layout into a
+// merlin-promote-* dir; and because scratch is a per-pod emptyDir, the ORIGIN pod's
+// merlin-assemble-* dir is then unreachable by any running code — its owner (the
+// worker) is on the other pod and cleans up only what it created. Both must be
+// sweepable or every cross-pod promotion leaks a layout permanently.
+func TestSweepScratchReclaimsPromoteRebuilds(t *testing.T) {
+	base := t.TempDir()
+	mkAged(t, base, "merlin-promote-987654", 48*time.Hour)
+	live := mkAged(t, base, "merlin-promote-live", time.Minute)
+
+	n, err := SweepScratch(base, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("SweepScratch: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("removed = %d, want 1", n)
+	}
+	// A young rebuild may belong to a promotion pushing right now; removing it would
+	// fail that push and burn an attempt.
+	if _, err := os.Stat(live); err != nil {
+		t.Errorf("fresh promote rebuild was removed — would break a live promotion: %v", err)
+	}
+}
+
+// TestScratchBytesMeasuresOnlyOurOwnDirs backs the disk gauge. Deferred promotion
+// means scratch is held past the response, so "how full is the volume" became an
+// operational question with no answer — the metric is what makes the pending bound
+// tunable instead of guessed.
+func TestScratchBytesMeasuresOnlyOurOwnDirs(t *testing.T) {
+	base := t.TempDir()
+	mkAged(t, base, "merlin-assemble-1", time.Minute) // 1 byte of payload
+	mkAged(t, base, "merlin-promote-2", time.Minute)  // 1 byte of payload
+	// Not ours. Counting other tenants of the mount would misreport Merlin's own
+	// footprint, which is the number the pending bound is derived from.
+	foreign := filepath.Join(base, "someone-elses-data")
+	if err := os.MkdirAll(foreign, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(foreign, "big"), make([]byte, 4096), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ScratchBytes(base)
+	if err != nil {
+		t.Fatalf("ScratchBytes: %v", err)
+	}
+	// Exactly the two payload bytes: file sizes only, so the result does not depend on
+	// the filesystem's directory-entry overhead.
+	if got != 2 {
+		t.Errorf("ScratchBytes = %d, want 2 (one byte per scratch dir, foreign data excluded)", got)
+	}
+}
+
+// TestScratchBytesMissingBaseIsZero keeps the metric from failing startup or the
+// scrape when scratch_dir is unset or the mount does not exist yet.
+func TestScratchBytesMissingBaseIsZero(t *testing.T) {
+	for _, base := range []string{"", filepath.Join(t.TempDir(), "nope")} {
+		got, err := ScratchBytes(base)
+		if err != nil || got != 0 {
+			t.Errorf("ScratchBytes(%q) = (%d, %v), want (0, nil)", base, got, err)
+		}
+	}
+}
+
 // TestSweepScratchEmptyBaseIsNoop guards the default config: scratch_dir may be
 // unset, in which case there is no directory to sweep and startup must not fail.
 func TestSweepScratchEmptyBaseIsNoop(t *testing.T) {

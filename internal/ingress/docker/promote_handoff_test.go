@@ -193,6 +193,12 @@ func TestPromotionJobCarriesEverythingTheWorkerNeeds(t *testing.T) {
 	if job.Digest == "" {
 		t.Error("Digest empty; a failed promotion could not be recorded against the image")
 	}
+	// The exact manifest bytes are the only thing that lets a SIBLING replica rebuild
+	// the OCI layout: scratch is a per-pod emptyDir, so the pod that claims the job is
+	// often not the pod that assembled it. Without them that job is unpromotable.
+	if len(job.Manifest) == 0 {
+		t.Error("Manifest empty; a sibling replica could not rebuild the OCI layout")
+	}
 	// The report URL handed to the client must name the same push the audit row and
 	// any later promotion-failure row use, or the report 404s.
 	if job.PushID == "" {
@@ -239,6 +245,82 @@ func TestFailedEnqueueCleansUpAndReports502(t *testing.T) {
 	}
 	if after := scratchDirCount(t, h); after != before {
 		t.Errorf("scratch dirs = %d, want %d; nothing owns this layout, so the handler must remove it", after, before)
+	}
+}
+
+// countingPromoter reports a fixed backlog. It implements PendingCounter as well as
+// Promoter, which is how the handler learns the queue depth without the Promoter
+// interface growing a second method that every fake would have to implement.
+type countingPromoter struct {
+	fakePromoter
+	depth int
+	err   error
+}
+
+func (c *countingPromoter) Pending(context.Context) (int, error) { return c.depth, c.err }
+
+// TestSaturatedPromotionQueueShedsLoad is the disk bound on deferred promotion.
+// Answering 201 while the job is still queued means the only thing limiting local
+// scratch is the worker's drain rate, and scratch is a per-pod emptyDir: a burst of
+// large pushes fills the volume and every concurrent push fails on assemble. A
+// retryable 503 puts the backpressure back on the client instead.
+func TestSaturatedPromotionQueueShedsLoad(t *testing.T) {
+	prom := &countingPromoter{depth: 4}
+	h, fp := buildIntegrationHandler(t, grype.Report{}, 2)
+	h.SetPromoter(prom)
+	h.SetMaxPendingPromotions(4)
+
+	before := scratchDirCount(t, h)
+	rec := pushManifest(t, h, "app", "v1", "rhel")
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 when the promotion backlog is at its bound", rec.Code)
+	}
+	// Retry-After is what makes this a load-shed rather than a failed build: without
+	// it a docker client treats the 503 as terminal.
+	if rec.Header().Get("Retry-After") == "" {
+		t.Error("no Retry-After on a saturated 503; the client cannot know to retry")
+	}
+	if prom.jobs() != 0 {
+		t.Error("job was enqueued despite the queue being at its bound")
+	}
+	if len(fp.Pushed) != 0 {
+		t.Error("image reached ACR on a shed push")
+	}
+	// The whole point is to not consume disk: the reject must land BEFORE assembly.
+	if after := scratchDirCount(t, h); after != before {
+		t.Errorf("scratch dirs = %d, want %d; a shed push must not assemble an image", after, before)
+	}
+}
+
+// TestPromotionQueueDepthFailureDoesNotBlockPushes pins the fail-open direction. A
+// Valkey blip that makes LLEN fail must not reject a scanned, passing image: the
+// bound is a disk safeguard, and treating an unknown depth as saturated would turn
+// one flaky read into a full outage of the gate.
+func TestPromotionQueueDepthFailureDoesNotBlockPushes(t *testing.T) {
+	prom := &countingPromoter{err: errors.New("valkey timeout")}
+	h, _ := buildIntegrationHandler(t, grype.Report{}, 2)
+	h.SetPromoter(prom)
+	h.SetMaxPendingPromotions(1)
+
+	if code := pushManifest(t, h, "app", "v1", "rhel").Code; code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; an unreadable queue depth must not fail a passing push", code)
+	}
+	if prom.jobs() != 1 {
+		t.Errorf("enqueued jobs = %d, want 1", prom.jobs())
+	}
+}
+
+// TestUnboundedPromotionQueueAdmitsEverything keeps the default behaviour: no
+// configured bound means no admission check, so hermetic tests and single-binary dev
+// are unaffected.
+func TestUnboundedPromotionQueueAdmitsEverything(t *testing.T) {
+	prom := &countingPromoter{depth: 10_000}
+	h, _ := buildIntegrationHandler(t, grype.Report{}, 2)
+	h.SetPromoter(prom) // no SetMaxPendingPromotions
+
+	if code := pushManifest(t, h, "app", "v1", "rhel").Code; code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 with no bound configured", code)
 	}
 }
 
