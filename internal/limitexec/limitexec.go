@@ -27,6 +27,7 @@ package limitexec
 
 import (
 	"fmt"
+	"os/exec"
 	"strconv"
 	"strings"
 )
@@ -69,7 +70,24 @@ func parseRequest(args []string) (request, error) {
 	if args[1] == "" {
 		return request{}, fmt.Errorf("empty binary path")
 	}
-	return request{bytes: n, binary: args[1], argv: args[1:]}, nil
+	// Resolve the binary here, because the trampoline reaches the child through
+	// syscall.Exec, which does NO PATH lookup — a bare name fails with ENOENT.
+	// Callers hand this package the same name they would hand os/exec ("grype"), and
+	// the unbounded path DOES resolve it (exec.Command calls LookPath internally), so
+	// without this the bound silently changes which binaries are reachable. LookPath
+	// also covers the explicit-path case: it returns the input when it is executable
+	// and errors when it is not, which turns a deployment fault into a named error
+	// instead of an opaque exec failure per scan.
+	binary, err := exec.LookPath(args[1])
+	if err != nil {
+		return request{}, fmt.Errorf("locate %q: %w", args[1], err)
+	}
+	// argv[0] is the resolved path, matching what the process actually is. The child's
+	// own flags start at argv[1], so the shift here must mirror args[1:] exactly.
+	argv := make([]string, 0, len(args)-1)
+	argv = append(argv, binary)
+	argv = append(argv, args[2:]...)
+	return request{bytes: n, binary: binary, argv: argv}, nil
 }
 
 // addressSpaceFactor scales the memory budget into an RLIMIT_AS ceiling. A Go

@@ -42,8 +42,8 @@ func newIntegrationQueue(t *testing.T) Queue {
 	prefix := fmt.Sprintf("merlin:promote:it:%d", integrationRun)
 	t.Cleanup(func() {
 		ctx := context.Background()
-		for _, suffix := range []string{":pending", ":claimed", ":stamps", ":dead"} {
-			rdb.Del(ctx, prefix+suffix)
+		for _, role := range []string{"pending", "claimed", "stamps", "dead"} {
+			rdb.Del(ctx, queueKey(prefix, role))
 		}
 		rdb.Close()
 	})
@@ -62,13 +62,13 @@ func TestValkeyClaimParksCorruptPayload(t *testing.T) {
 	ctx := context.Background()
 	prefix := "merlin:promote:it:corrupt"
 	t.Cleanup(func() {
-		for _, suffix := range []string{":pending", ":claimed", ":stamps", ":dead"} {
-			rdb.Del(ctx, prefix+suffix)
+		for _, role := range []string{"pending", "claimed", "stamps", "dead"} {
+			rdb.Del(ctx, queueKey(prefix, role))
 		}
 		rdb.Close()
 	})
 	// Valid JSON (so the Lua's cjson.decode succeeds) but not a job object.
-	if err := rdb.RPush(ctx, prefix+":pending", `{"push_id":"x","layers":"not-a-list"}`).Err(); err != nil {
+	if err := rdb.RPush(ctx, queueKey(prefix, "pending"), `{"push_id":"x","layers":"not-a-list"}`).Err(); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -76,14 +76,14 @@ func TestValkeyClaimParksCorruptPayload(t *testing.T) {
 	if _, ok, err := q.Claim(ctx); ok || err == nil {
 		t.Fatalf("Claim = ok:%v err:%v, want (false, error) for a corrupt payload", ok, err)
 	}
-	n, err := rdb.LLen(ctx, prefix+":dead").Result()
+	n, err := rdb.LLen(ctx, queueKey(prefix, "dead")).Result()
 	if err != nil {
 		t.Fatalf("LLEN dead: %v", err)
 	}
 	if n != 1 {
 		t.Errorf("dead list length = %d, want 1 (corrupt payload was lost)", n)
 	}
-	if left, _ := rdb.LLen(ctx, prefix+":pending").Result(); left != 0 {
+	if left, _ := rdb.LLen(ctx, queueKey(prefix, "pending")).Result(); left != 0 {
 		t.Errorf("pending length = %d, want 0 (corrupt payload still poisons the loop)", left)
 	}
 }

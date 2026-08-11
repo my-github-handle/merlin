@@ -365,6 +365,14 @@ func (h *Handler) handleManifest(w http.ResponseWriter, r *http.Request, t *tena
 	d, applyErr := h.outcome.Apply(ctx, pushID, publish, req, res, gateErr, scanDur)
 	if applyErr != nil {
 		log.Printf("manifest %s gate outcome infra error: %v", target, applyErr)
+	} else if gateErr != nil {
+		// A gate that could not run is rendered as a 500/503 with a NIL applyErr, so
+		// the branch above never saw it and the cause reached the audit store only.
+		// That made a total scan outage look like unexplained 500s in the log: every
+		// push failed, and the reason ("exec grype: no such file or directory") was
+		// invisible without querying ClickHouse. The client gets a terse summary by
+		// design; the operator needs the cause where they are already looking.
+		log.Printf("manifest %s gate did not complete (%d): %v", target, d.StatusCode, gateErr)
 	}
 	if d.ReportURL != "" {
 		w.Header().Set("X-Merlin-Scan-Report-URL", d.ReportURL)

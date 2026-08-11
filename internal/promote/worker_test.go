@@ -20,6 +20,11 @@ type fakePusher struct {
 	paths []string // OCI layout path of each push, in order
 	err   error
 	block chan struct{} // when non-nil, Push waits on it before returning
+	// blockFrom, when > 0, restricts blocking to the blockFrom'th call onward, so a
+	// test can let the first few pushes fail fast and then park the worker mid-push
+	// at a known attempt. Without it the only choices are "never block" and "block
+	// immediately", neither of which can hold the worker at a chosen attempt.
+	blockFrom int
 }
 
 func (p *fakePusher) Push(ctx context.Context, ociPath, target string) error {
@@ -27,6 +32,9 @@ func (p *fakePusher) Push(ctx context.Context, ociPath, target string) error {
 	p.n++
 	p.paths = append(p.paths, ociPath)
 	block, err := p.block, p.err
+	if p.blockFrom > 0 && p.n < p.blockFrom {
+		block = nil
+	}
 	p.mu.Unlock()
 	if block != nil {
 		select {
@@ -165,7 +173,15 @@ func TestWorkerPushesAndCleansUp(t *testing.T) {
 // nothing to push, so the job is doomed for the rest of its attempt budget.
 func TestWorkerKeepsScratchForRetry(t *testing.T) {
 	q := NewMemoryQueue()
-	pusher := &fakePusher{err: errors.New("acr 503")}
+	// Fail the first three pushes fast, then park inside the fourth. The parked call
+	// is what makes this deterministic: at assertion time the worker is provably
+	// mid-push at attempt 4, so it cannot have reached the terminal branch, and any
+	// Cleanup must have come from a RETRYABLE failure. Bounding attempts alone does
+	// not achieve that — retries here have no backoff, so the worker burns the whole
+	// budget in microseconds and legitimately retires the job (calling Cleanup)
+	// before a polling assertion ever runs. That made this test pass only under
+	// -race, which slowed it enough to hide the real ordering.
+	pusher := &fakePusher{err: errors.New("acr 503"), block: make(chan struct{}), blockFrom: 4}
 	var mu sync.Mutex
 	var cleaned bool
 	w := testWorker(&Worker{
@@ -178,10 +194,9 @@ func TestWorkerKeepsScratchForRetry(t *testing.T) {
 			cleaned = true
 			return nil
 		},
-		// A budget far larger than the number of retries this test observes, so the
-		// terminal branch is unreachable here and `cleaned` can only be set by a
-		// retryable failure. A tight budget would let the worker legitimately retire
-		// the job mid-test and the assertion would pass for the wrong reason.
+		// A budget far above the attempts this test allows to complete. Combined with
+		// the parked fourth push above, the terminal branch is unreachable, so
+		// `cleaned` can only be set by a retryable failure.
 		MaxAttempts: 200,
 	})
 	if err := q.Enqueue(context.Background(), Job{PushID: "p1", Target: "acr.io/app:v1"}); err != nil {
@@ -189,9 +204,12 @@ func TestWorkerKeepsScratchForRetry(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	go w.Run(ctx)
-	waitFor(t, func() bool { return pusher.calls() >= 3 }) // several retries observed
-	cancel()
+	// Three retryable failures observed, and the worker now blocked inside the fourth
+	// push. Assert BEFORE cancelling: once the worker is unblocked it may legitimately
+	// clean up, and asserting after cancel would race that shutdown.
+	waitFor(t, func() bool { return pusher.calls() >= 4 })
 
 	mu.Lock()
 	defer mu.Unlock()

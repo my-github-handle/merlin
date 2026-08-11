@@ -14,12 +14,13 @@ import (
 // internal/staging also uses.
 const DefaultKeyPrefix = "merlin:promote"
 
-// valkeyQueue is the durable Queue. Its state is three keys:
+// valkeyQueue is the durable Queue. Its state is four keys, all sharing one hash
+// tag so a clustered Valkey routes them to the same slot (see queueKey):
 //
-//	<prefix>:pending  LIST  of job JSON, oldest first
-//	<prefix>:claimed  HASH  push_id -> job JSON (the exact enqueued bytes)
-//	<prefix>:stamps   HASH  push_id -> RFC3339Nano claim time
-//	<prefix>:dead     LIST  of payloads that could not be parsed
+//	{<prefix>}:pending  LIST  of job JSON, oldest first
+//	{<prefix>}:claimed  HASH  push_id -> job JSON (the exact enqueued bytes)
+//	{<prefix>}:stamps   HASH  push_id -> RFC3339Nano claim time
+//	{<prefix>}:dead     LIST  of payloads that could not be parsed
 //
 // Claim keeps the job bytes verbatim rather than re-encoding them in Lua: a
 // cjson round trip is not byte-stable (an empty Layers slice comes back as {}
@@ -56,10 +57,26 @@ func NewValkeyQueueAtAddr(addr, prefix string) (Queue, error) {
 	return NewValkeyQueue(rdb, prefix), nil
 }
 
-func (q *valkeyQueue) pendingKey() string { return q.prefix + ":pending" }
-func (q *valkeyQueue) claimedKey() string { return q.prefix + ":claimed" }
-func (q *valkeyQueue) stampKey() string   { return q.prefix + ":stamps" }
-func (q *valkeyQueue) deadKey() string    { return q.prefix + ":dead" }
+// queueKey names one of the queue's keys, wrapping the prefix in a Redis Cluster
+// hash tag so all of them land in a single slot.
+//
+// The tag is not cosmetic. claimScript and requeueScript are multi-key EVALs over
+// pending + claimed + stamps, and a cluster-enabled Valkey rejects any multi-key
+// command whose keys hash to different slots. Untagged, Claim failed with CROSSSLOT
+// on every call, so the worker could never drain a queue whose clients had already
+// been answered 201 — the gate accepted images that were then never published, with
+// nothing but a worker log line to say so.
+//
+// Cluster mode is not something Merlin gets to assume away: a single-node Valkey
+// with cluster_enabled:1 enforces the rule exactly like a sharded one, so this must
+// hold regardless of topology. Tagging on the prefix (not a constant) keeps each
+// queue's keys together without forcing two different prefixes into the same slot.
+func queueKey(prefix, role string) string { return "{" + prefix + "}:" + role }
+
+func (q *valkeyQueue) pendingKey() string { return queueKey(q.prefix, "pending") }
+func (q *valkeyQueue) claimedKey() string { return queueKey(q.prefix, "claimed") }
+func (q *valkeyQueue) stampKey() string   { return queueKey(q.prefix, "stamps") }
+func (q *valkeyQueue) deadKey() string    { return queueKey(q.prefix, "dead") }
 
 // Enqueue appends the job to the pending list. Jobs are JSON so a schema change
 // is backward-readable; an unparseable job is parked on the dead list by Claim
