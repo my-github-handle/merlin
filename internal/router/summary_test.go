@@ -63,3 +63,40 @@ func TestSummarizePass(t *testing.T) {
 		t.Errorf("summary = %q", got)
 	}
 }
+
+func TestSummarizeUnenforcedPassIsNotCalledClean(t *testing.T) {
+	// The gate passed the image only because enforcement is off. Reporting
+	// "scan clean" here would tell CI the opposite of the truth.
+	res := policy.Result{
+		Passed:     true,
+		Unenforced: []string{"not enforced: CVE-1 (CRITICAL) in openssl 1.1.1"},
+		Verdicts: map[string]policy.Verdict{
+			"grype": {Passed: true, Reasons: []string{"not enforced: CVE-1 (CRITICAL) in openssl 1.1.1"}},
+		},
+		Findings: []policy.Finding{
+			{CVE: "CVE-1", Severity: "CRITICAL", Pkg: "openssl"},
+			{CVE: "CVE-2", Severity: "HIGH", Pkg: "glibc"},
+		},
+	}
+	got := SummarizeResult(res)
+	if strings.Contains(got, "clean") {
+		t.Errorf("summary must not say clean when findings went unenforced, got %q", got)
+	}
+	if !strings.Contains(got, "1 CRITICAL") || !strings.Contains(got, "1 HIGH") {
+		t.Errorf("summary must keep the severity counts, got %q", got)
+	}
+	if !strings.Contains(got, "CVE-1") {
+		t.Errorf("summary must name what went unenforced, got %q", got)
+	}
+}
+
+func TestSummarizeCleanPassUnchanged(t *testing.T) {
+	res := policy.Result{
+		Passed:   true,
+		Findings: []policy.Finding{{CVE: "CVE-2", Severity: "HIGH", Pkg: "glibc"}},
+	}
+	got := SummarizeResult(res)
+	if got != "scan clean: 0 CRITICAL, 1 HIGH" {
+		t.Errorf("clean-pass wording must not change, got %q", got)
+	}
+}

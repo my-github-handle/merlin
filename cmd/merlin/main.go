@@ -12,9 +12,18 @@ import (
 
 	"github.com/merlin-gate/merlin/internal/app"
 	"github.com/merlin-gate/merlin/internal/config"
+	"github.com/merlin-gate/merlin/internal/limitexec"
 )
 
 func main() {
+	// Memory-bounding trampoline for child processes (grype). Handled before
+	// anything else: this process exists only to set a resource limit and exec
+	// the child, so it must not load config or open backends.
+	if len(os.Args) > 1 && os.Args[1] == limitexec.Flag {
+		// Only reached on failure — a successful Exec replaces this process.
+		log.Fatalf("limited-exec: %v", limitexec.Main(os.Args[2:]))
+	}
+
 	path := os.Getenv("MERLIN_CONFIG")
 	if path == "" {
 		path = "config.yaml"

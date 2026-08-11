@@ -55,7 +55,21 @@ externalSecrets:
   data: []             # e.g. [{secretKey: clickhouse-password, remoteKey: merlin-ch-pass}]
 merlin:
   # rendered into /etc/merlin/config.yaml
-  grype: { severityThreshold: CRITICAL }
+  grype:
+    severityThreshold: CRITICAL
+    # Per-scan memory bound (GOMEMLIMIT on the grype child, plus a derived
+    # RLIMIT_AS backstop). Unset here on purpose: this chart's default
+    # resources.limits.memory (2Gi) is already fully committed by the upload
+    # budget below (maxUploadBytes x uploadConcurrency = 512Mi x 4), so there is
+    # no room left to budget scans against, and a bound that is too tight fails
+    # scans instead of preventing OOMKills.
+    #
+    # To set one, the arithmetic that must close is:
+    #   maxUploadBytes x uploadConcurrency          (upload budget)
+    # + memoryLimit    x staging.scanPoolSize       (scan budget)
+    # < resources.limits.memory                     (with headroom for merlin itself)
+    # See values.opsadmin.multiacr.yaml for a worked example on a 10Gi limit.
+    # memoryLimit: 2Gi
   baseImage: { allowedIDs: [rhel, wolfi, chainguard] }
   # Image-age gate: rejects images whose OCI config `created` is older than
   # thresholdDays. Omit this block to use the built-in defaults (enabled, 60 days).

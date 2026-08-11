@@ -35,6 +35,12 @@ func (e *Engine) Run(ctx context.Context, img StagedImage) (Result, error) {
 		res.Verdicts[p.Name()] = v
 		if !v.Passed {
 			res.Passed = false
+		} else if len(v.Reasons) > 0 {
+			// A verdict that passed but still has reasons came from a policy in
+			// observe mode. Surface it separately so downstream can distinguish
+			// "clean" from "published despite findings"; reasons on a FAILING
+			// verdict are rejections and are read from the verdict itself.
+			res.Unenforced = append(res.Unenforced, v.Reasons...)
 		}
 		// Collect findings carried back on the verdict (request-local, no shared state).
 		res.Findings = append(res.Findings, v.Findings...)

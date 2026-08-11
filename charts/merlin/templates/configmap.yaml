@@ -8,6 +8,14 @@ data:
     # Merlin configuration (snake_case keys match internal/config/config.go yaml tags)
     grype:
       severity_threshold: {{ .Values.merlin.grype.severityThreshold }}
+      {{- /* hasKey, not `with`: `with` treats false as empty and would silently
+             drop enforce: false, rendering a config that still gates. */}}
+      {{- if hasKey .Values.merlin.grype "enforce" }}
+      enforce: {{ .Values.merlin.grype.enforce }}
+      {{- end }}
+      {{- with .Values.merlin.grype.memoryLimit }}
+      memory_limit: {{ . | quote }}
+      {{- end }}
     base_image:
       allowed_ids: {{ toJson .Values.merlin.baseImage.allowedIDs }}
     {{- with .Values.merlin.imageAge }}

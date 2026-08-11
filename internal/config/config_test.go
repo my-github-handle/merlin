@@ -575,3 +575,27 @@ image_age:
 		t.Errorf("expected threshold_days in error, got: %v", err)
 	}
 }
+
+func TestGrypeEnforceDefaultsToTrue(t *testing.T) {
+	// An absent grype.enforce must gate. A missing key that silently disables the
+	// vulnerability gate would be the worst possible default.
+	var c Config
+	c.applyDefaults()
+	if c.Grype.Enforce == nil {
+		t.Fatal("applyDefaults must set Grype.Enforce so the value is never ambiguous")
+	}
+	if !*c.Grype.Enforce {
+		t.Error("grype.enforce must default to true")
+	}
+}
+
+func TestGrypeEnforceFalseIsPreserved(t *testing.T) {
+	// Explicit false must survive applyDefaults — the *bool exists precisely so
+	// "set to false" is distinguishable from "not set".
+	off := false
+	c := Config{Grype: GrypeConfig{Enforce: &off}}
+	c.applyDefaults()
+	if c.Grype.Enforce == nil || *c.Grype.Enforce {
+		t.Error("an explicit grype.enforce: false must not be overwritten by defaults")
+	}
+}

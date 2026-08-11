@@ -185,6 +185,12 @@ func (o *Outcome) recordDecision(ctx context.Context, pushID string, req router.
 			reasons = append(reasons, verdict.Reasons...)
 		}
 	}
+	// Findings a non-enforcing policy reported but did not block on go into Reasons
+	// too — the audit row is the durable record of why a vulnerable image was
+	// allowed through, and without them it reads as a clean scan. They are NOT
+	// added to FailedPolicies: the policy passed, and the reject-reason dashboard
+	// query filters on `NOT passed`, so a passing row cannot skew it.
+	reasons = append(reasons, res.Unenforced...)
 
 	decision := audit.Decision{
 		PushID:           pushID,

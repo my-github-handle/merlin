@@ -74,14 +74,20 @@ reject, which `set -e` turns into a failed job.
 
 The gate blocks on any of these conditions:
 
-- **Trivy** — any `CRITICAL` CVE (LOW/MEDIUM/HIGH are reported but don't block).
+- **Grype** — any `CRITICAL` CVE (LOW/MEDIUM/HIGH are reported but don't block).
+  **Currently not enforcing on `c3devops`** (`grype.enforce: false`): CVEs at or above
+  the threshold are scanned, audited and reported, but the image is published anyway
+  and the push succeeds. Such a push returns `201` with a body starting
+  `published, gate not enforcing:` instead of `scan clean:` — treat that prefix as a
+  warning you should surface, not as a pass. The base-image and age policies below
+  still block.
 - **Base-image policy** — image must derive from an allowed base (RHEL UBI /
   Chainguard / Wolfi).
 - **Image age** — image must not exceed the configured age threshold (default 60 days).
 
 | Status on manifest PUT   | Meaning                                                            | CI action                          |
 |--------------------------|-------------------------------------------------------------------|------------------------------------|
-| `201 Created`            | Passed, published to ACR                                          | Proceed                            |
+| `201 Created`            | Passed, published to ACR (body says `scan clean:` or `published, gate not enforcing:`) | Proceed; surface the body if it says "not enforcing" |
 | `400 Bad Request`        | **Rejected** — reason in body (`rejected: CVE-… (CRITICAL) …`)     | Fail the build; surface the reason |
 | `401 Unauthorized`       | Bad/expired cred, or a token minted for another prefix used here  | Fix creds; re-`docker login`       |
 | `404 Not Found`          | Unknown host prefix (no tenant configured)                        | Fix the registry host              |

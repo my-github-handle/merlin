@@ -124,3 +124,37 @@ func TestApplyRecordsImageAge(t *testing.T) {
 			got.ImageCreated, created, got.ImageAgeDays, got.ImageAgeThresholdDays)
 	}
 }
+
+func TestApplyRecordsUnenforcedReasonsOnPass(t *testing.T) {
+	// The image published because the gate is not enforcing. The audit row is the
+	// only durable record of WHY it was allowed through, so the reasons must land
+	// there even though the decision passed. Without this, the row is
+	// indistinguishable from a genuinely clean scan.
+	spy := &spyRecorder{}
+	o := &Outcome{ReportBaseURL: "/reports", Recorder: spy, IDGen: func() string { return "pid" }}
+	res := policy.Result{
+		Passed:     true,
+		Unenforced: []string{"not enforced: CVE-1 (Critical) in openssl 1.1.1"},
+		Verdicts: map[string]policy.Verdict{
+			"grype": {Passed: true, Reasons: []string{"not enforced: CVE-1 (Critical) in openssl 1.1.1"}},
+		},
+		Findings: []policy.Finding{{CVE: "CVE-1", Severity: "CRITICAL", Pkg: "openssl"}},
+	}
+	req := router.GateRequest{Target: "r/app:v1", Image: policy.StagedImage{Repo: "app", Tag: "v1", OCIPath: "/oci"}}
+
+	_, _ = o.Apply(context.Background(), "", SyncPublish(&acr.FakePusher{}, req), req, res, nil, 0)
+
+	if len(spy.calls) != 1 {
+		t.Fatalf("expected 1 recorded call, got %d", len(spy.calls))
+	}
+	got := spy.calls[0].decision
+	if !got.Passed {
+		t.Error("decision must be recorded as passed: the image was published")
+	}
+	if len(got.Reasons) != 1 || got.Reasons[0] != "not enforced: CVE-1 (Critical) in openssl 1.1.1" {
+		t.Errorf("Reasons = %v, want the unenforced reason recorded", got.Reasons)
+	}
+	if len(got.FailedPolicies) != 0 {
+		t.Errorf("FailedPolicies = %v, want empty: grype passed, so listing it as failed would corrupt reject stats", got.FailedPolicies)
+	}
+}

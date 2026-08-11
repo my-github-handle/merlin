@@ -34,5 +34,14 @@ func SummarizeResult(res policy.Result) string {
 		}
 		return "rejected: image failed policy gate"
 	}
+	if len(res.Unenforced) > 0 {
+		// The image passed only because a policy is in observe mode. Calling this
+		// "clean" would report the opposite of the truth to whoever is reading the
+		// push output, so name the counts and what went unenforced.
+		reasons := append([]string(nil), res.Unenforced...)
+		sort.Strings(reasons)
+		return fmt.Sprintf("published, gate not enforcing: %d CRITICAL, %d HIGH; %s",
+			crit, high, strings.Join(reasons, "; "))
+	}
 	return fmt.Sprintf("scan clean: %d CRITICAL, %d HIGH", crit, high)
 }

@@ -48,6 +48,17 @@ const (
 	scratchSweepInterval = time.Hour
 )
 
+// grypeRunner builds the grype Runner with the configured per-scan memory bound
+// applied. The limit string is validated at config load, so an error here means
+// the config was constructed in-process rather than loaded from disk.
+func grypeRunner(cfg config.Config) (grype.Runner, error) {
+	limit, err := cfg.Grype.MemoryLimitBytes()
+	if err != nil {
+		return nil, err
+	}
+	return grype.NewExecRunner("grype", grype.WithMemoryLimit(limit)), nil
+}
+
 // Build wires config into the V2 server and the metrics server.
 //
 // TODO(production / BuildWithBackends): Build is intentionally HERMETIC — it wires
@@ -65,7 +76,11 @@ const (
 //     (see TODO(phase5) in manifest.go/upload.go) with a deadline-bearing context.
 func Build(cfg config.Config) (*http.Server, *http.Server, error) {
 	// Policies + engine.
-	grypePolicy := grype.New(grype.NewExecRunner("grype"), cfg.Grype.SeverityThreshold)
+	runner, err := grypeRunner(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	grypePolicy := grype.New(runner, cfg.Grype.SeverityThreshold, grypeOptions(cfg)...)
 	basePolicy := baseimage.New(cfg.BaseImage.AllowedIDs)
 	def, per := imageAgeRules(cfg)
 	agePolicy := imageage.New(def, per)
@@ -248,7 +263,11 @@ func BuildWithBackends(ctx context.Context, cfg config.Config) (*http.Server, *h
 	closers = append(closers, func() { reportsReader.Close() })
 
 	// Policies + engine
-	grypePolicy := grype.New(grype.NewExecRunner("grype"), cfg.Grype.SeverityThreshold)
+	runner, err := grypeRunner(cfg)
+	if err != nil {
+		return fail(err)
+	}
+	grypePolicy := grype.New(runner, cfg.Grype.SeverityThreshold, grypeOptions(cfg)...)
 	basePolicy := baseimage.New(cfg.BaseImage.AllowedIDs)
 	def, per := imageAgeRules(cfg)
 	agePolicy := imageage.New(def, per)
@@ -437,6 +456,21 @@ func generatePushID() string {
 		panic(fmt.Sprintf("crypto/rand failed: %v", err))
 	}
 	return hex.EncodeToString(b)
+}
+
+// grypeOptions derives the Grype policy options from config. A nil Enforce means
+// the config was built in code rather than parsed (applyDefaults sets it), so it
+// is treated as enforcing — the fail-safe direction.
+//
+// Non-enforcement is logged loudly at every startup on purpose: it publishes
+// images with Critical CVEs, so it needs to be visible in the pod logs of every
+// restart rather than discoverable only by reading values.yaml.
+func grypeOptions(cfg config.Config) []grype.Option {
+	if cfg.Grype.Enforce == nil || *cfg.Grype.Enforce {
+		return nil
+	}
+	log.Printf("WARNING: grype.enforce=false — vulnerability findings at/above %s are recorded but DO NOT block publication. Images with Critical CVEs will reach ACR.", cfg.Grype.SeverityThreshold)
+	return []grype.Option{grype.Observe()}
 }
 
 // imageAgeRules derives the default age rule and the per-tenant overrides from

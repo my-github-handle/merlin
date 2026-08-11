@@ -23,6 +23,23 @@ type Config struct {
 
 type GrypeConfig struct {
 	SeverityThreshold string `yaml:"severity_threshold"`
+	// Enforce decides whether findings at/above SeverityThreshold BLOCK the push
+	// or are merely recorded. Pointer so an omitted key is distinguishable from an
+	// explicit false, and defaulted to true: a config typo must never silently turn
+	// the vulnerability gate off. Setting it false publishes images with Critical
+	// CVEs — the findings are still scanned, audited, and shown on the report, and
+	// the push summary says "gate not enforcing", but nothing is stopped.
+	Enforce *bool `yaml:"enforce"`
+	// MemoryLimit bounds a single grype scan's memory ("2Gi", or a plain byte
+	// count). Empty means unbounded, because config cannot know the pod's memory
+	// limit and a wrong default breaks working deployments; the chart sets an
+	// explicit budget instead. Scans run concurrently, so the worst case is
+	// roughly this value times staging.scan_pool_size, and that product must fit
+	// under resources.limits.memory alongside the upload budget
+	// (server.max_upload_bytes x server.upload_concurrency). Enforced via
+	// RLIMIT_AS plus GOMEMLIMIT on the child — see internal/limitexec for why the
+	// value needs headroom over the expected peak rather than tracking it.
+	MemoryLimit string `yaml:"memory_limit"`
 }
 
 type BaseImageConfig struct {
@@ -134,6 +151,10 @@ func (c *Config) applyDefaults() {
 	if c.Grype.SeverityThreshold == "" {
 		c.Grype.SeverityThreshold = "CRITICAL"
 	}
+	if c.Grype.Enforce == nil {
+		enforce := true
+		c.Grype.Enforce = &enforce
+	}
 	if c.ImageAge.ThresholdDays == 0 {
 		c.ImageAge.ThresholdDays = 60
 	}
@@ -226,6 +247,11 @@ func (c *Config) validate() error {
 	}
 	if !validSeverities[c.Grype.SeverityThreshold] {
 		return fmt.Errorf("config: grype.severity_threshold %q is not a valid severity (NEGLIGIBLE, UNKNOWN, LOW, MEDIUM, HIGH, CRITICAL)", c.Grype.SeverityThreshold)
+	}
+	// Reject at startup: an unparseable limit would otherwise surface as a failed
+	// scan, and a failed scan is a fail-closed push rejection.
+	if _, err := c.Grype.MemoryLimitBytes(); err != nil {
+		return fmt.Errorf("config: %w", err)
 	}
 	if c.ImageAge.ThresholdDays < 0 {
 		return fmt.Errorf("config: image_age.threshold_days must be >= 0")

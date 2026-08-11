@@ -19,7 +19,25 @@ type Runner interface {
 type Policy struct {
 	runner    Runner
 	threshold string
+	observe   bool
 }
+
+// Option configures a Policy.
+type Option func(*Policy)
+
+// unenforcedPrefix marks a reason that was recorded but did NOT block the push.
+// The engine keys Result.Unenforced off any reason on a passing verdict, and the
+// push summary refuses to say "clean" when one is present, so this prefix is the
+// difference between "no critical findings" and "critical findings, published
+// anyway" everywhere downstream.
+const unenforcedPrefix = "not enforced: "
+
+// Observe makes the scan report without gating: findings at or above the
+// threshold are recorded on the Verdict and in the audit store, but the verdict
+// passes and the image is published. Intended as a temporary posture while the
+// push path is being fixed — not a steady state, since it lets a Critical CVE
+// reach the registry. Enforcement is the default; this must be asked for.
+func Observe() Option { return func(p *Policy) { p.observe = true } }
 
 // severityRank orders Grype severities so we can compare against a threshold.
 // Grype casing is title-case (e.g. "Critical"); the threshold arrives upper-case
@@ -28,9 +46,14 @@ var severityRank = map[string]int{
 	"UNKNOWN": 0, "NEGLIGIBLE": 1, "LOW": 2, "MEDIUM": 3, "HIGH": 4, "CRITICAL": 5,
 }
 
-// New builds a Grype policy that fails on findings at/above threshold.
-func New(runner Runner, threshold string) *Policy {
-	return &Policy{runner: runner, threshold: threshold}
+// New builds a Grype policy that fails on findings at/above threshold. Pass
+// Observe() to report those findings without failing the push.
+func New(runner Runner, threshold string, opts ...Option) *Policy {
+	p := &Policy{runner: runner, threshold: threshold}
+	for _, opt := range opts {
+		opt(p)
+	}
+	return p
 }
 
 func (p *Policy) Name() string { return "grype" }
@@ -55,6 +78,22 @@ func (p *Policy) Evaluate(ctx context.Context, img policy.StagedImage) (policy.V
 		if rank >= min {
 			reasons = append(reasons, fmt.Sprintf("%s (%s) in %s %s", f.CVE, f.Severity, f.Pkg, f.Version))
 		}
+	}
+	if p.observe {
+		// Report, never gate. This covers the unrecognized-severity path above too:
+		// a mode that still rejects a subset of images is not observe mode. Reasons
+		// are kept (prefixed) so the audit row and push summary can still say what
+		// would have blocked — dropping them here would publish the image AND erase
+		// the evidence.
+		for i := range reasons {
+			reasons[i] = unenforcedPrefix + reasons[i]
+		}
+		return policy.Verdict{
+			Passed:           true,
+			Reasons:          reasons,
+			Findings:         rep.Findings,
+			ScannerDBVersion: rep.DBVersion,
+		}, nil
 	}
 	return policy.Verdict{
 		Passed:           len(reasons) == 0,

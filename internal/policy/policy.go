@@ -66,4 +66,9 @@ type Result struct {
 	Findings         []Finding
 	ScannerDBVersion string
 	Age              *AgeInfo // nil when the age policy is disabled/absent
+	// Unenforced holds reasons from policies that passed while still having
+	// something to report — i.e. a policy running in observe mode. Non-empty means
+	// "published despite findings", which is NOT the same as a clean scan, and the
+	// push summary and audit row both depend on being able to tell them apart.
+	Unenforced []string
 }

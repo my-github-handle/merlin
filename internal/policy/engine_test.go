@@ -157,3 +157,40 @@ func TestEngineForwardsAge(t *testing.T) {
 		t.Fatalf("Result.Age not forwarded: %+v", res.Age)
 	}
 }
+
+func TestEngineCollectsUnenforcedReasonsFromPassingVerdicts(t *testing.T) {
+	// A policy running in observe mode passes while carrying reasons. The engine
+	// must surface those separately: without Unenforced, a push that published
+	// despite critical findings is indistinguishable from a clean one.
+	e := NewEngine(
+		staticPolicy{name: "grype", verdict: Verdict{Passed: true, Reasons: []string{"not enforced: CVE-1 (Critical) in openssl 1.1.1"}}},
+		staticPolicy{name: "baseimage", verdict: Verdict{Passed: true}},
+	)
+	res, err := e.Run(context.Background(), StagedImage{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !res.Passed {
+		t.Error("a passing verdict with reasons must still pass")
+	}
+	if len(res.Unenforced) != 1 || res.Unenforced[0] != "not enforced: CVE-1 (Critical) in openssl 1.1.1" {
+		t.Errorf("Unenforced = %v, want the passing verdict's reason", res.Unenforced)
+	}
+}
+
+func TestEngineLeavesUnenforcedEmptyWhenAllClean(t *testing.T) {
+	e := NewEngine(staticPolicy{name: "a", verdict: Verdict{Passed: true}})
+	res, _ := e.Run(context.Background(), StagedImage{})
+	if len(res.Unenforced) != 0 {
+		t.Errorf("Unenforced = %v, want empty for a genuinely clean scan", res.Unenforced)
+	}
+}
+
+func TestEngineDoesNotTreatFailureReasonsAsUnenforced(t *testing.T) {
+	// Reasons on a FAILING verdict are rejections, not unenforced findings.
+	e := NewEngine(staticPolicy{name: "a", verdict: Verdict{Passed: false, Reasons: []string{"r-a"}}})
+	res, _ := e.Run(context.Background(), StagedImage{})
+	if len(res.Unenforced) != 0 {
+		t.Errorf("Unenforced = %v, want empty: a rejection is not an unenforced finding", res.Unenforced)
+	}
+}
