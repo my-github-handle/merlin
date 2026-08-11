@@ -23,6 +23,14 @@ import (
 // buildIntegrationHandler assembles a handler with in-memory staging, pool, and fake ACR.
 func buildIntegrationHandler(t *testing.T, gryReport grype.Report, poolSize int) (*Handler, *acr.FakePusher) {
 	t.Helper()
+	fp := &acr.FakePusher{}
+	return buildIntegrationHandlerWithPusher(t, gryReport, poolSize, fp), fp
+}
+
+// buildIntegrationHandlerWithPusher is buildIntegrationHandler with the ACR pusher
+// supplied by the caller, for tests that need a pusher that blocks or fails.
+func buildIntegrationHandlerWithPusher(t *testing.T, gryReport grype.Report, poolSize int, pusher acr.Pusher) *Handler {
+	t.Helper()
 	n := 0
 	st := staging.New(staging.NewMemoryBlobStore(), staging.NewMemorySessionStore(), func() string {
 		n++
@@ -32,12 +40,14 @@ func buildIntegrationHandler(t *testing.T, gryReport grype.Report, poolSize int)
 	bp := baseimage.New([]string{"rhel", "wolfi", "chainguard"})
 	rt := router.New(policy.NewEngine(tp, bp))
 	pool := router.NewPool(rt, poolSize)
-	fp := &acr.FakePusher{}
 	o := &Outcome{ReportBaseURL: "/reports"}
-	h := NewHandler(testResolver("myreg.azurecr.io", fp, fakeAuth{ok: true}), st, rt, o, nil)
+	h := NewHandler(testResolver("myreg.azurecr.io", pusher, fakeAuth{ok: true}), st, rt, o, nil)
 	h.SetPool(pool)
 	h.SetGateTimeout(5 * time.Second)
-	return h, fp
+	// Per-test scratch base rather than the shared system temp dir, so a test can
+	// count assemble scratch dirs to detect a leak without seeing other tests'.
+	h.SetScratchBaseDir(t.TempDir())
+	return h
 }
 
 // uploadLayer uploads a blob layer through the handler's upload path.
@@ -206,8 +216,13 @@ func TestQueueWaitObservedWhenClientDisconnects(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPut, "/v2/app/manifests/v1", bytes.NewReader(manifestBytes)).WithContext(ctx)
 	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
+	// The clock starts here, but the handler does not reach Acquire until it has
+	// authenticated, read the body, staged the manifest and assembled the image. That
+	// preamble is subtracted from the observed queue wait, so the cancel delay must
+	// exceed the asserted floor by more than the preamble costs — otherwise the test
+	// fails on a correct implementation.
 	go func() {
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(200 * time.Millisecond)
 		cancel()
 	}()
 	h.ServeHTTP(httptest.NewRecorder(), req)

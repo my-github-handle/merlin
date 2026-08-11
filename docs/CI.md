@@ -143,10 +143,14 @@ recorded as an alias, so `repo:tag` lookups resolve for buildx pushes too.
 - **buildx / multi-arch works** — Merlin forwards the image index and SLSA
   attestation verbatim; the index only commits once its gated image is in ACR,
   so a rejected image can't sneak through by reference.
-- **Large layers:** the manifest PUT waits on the scan (tens of seconds to
-  minutes). Set your CI job / registry client timeout generously (Merlin's
-  default gate timeout is 5 min). The deployment buffers blobs in memory, so
-  very large layers (multi-GB) need pod memory headroom — a known limitation.
+- **Push clients cap the wait at 30 seconds.** Both `docker push` and
+  `docker buildx build --push` hardcode a 30s `ResponseHeaderTimeout` that no flag
+  or environment variable can raise, so Merlin must answer the manifest PUT within
+  it. Merlin scans synchronously and publishes to ACR asynchronously to stay inside
+  that budget; `gate_timeout` bounds the scan, not your client's patience. A scan
+  that exceeds the budget fails the push as an infra error and is not published.
+- **Large layers:** the deployment buffers blobs in memory, so very large layers
+  (multi-GB) need pod memory headroom — a known limitation.
 - **Per-environment routing:** point dev CI at `c3dev.c3ci.cloud`,
   prod-promotion CI at `c3prod.c3ci.cloud` — each maps to its own ACR with its
   own service principal. No code change, just the host and creds.

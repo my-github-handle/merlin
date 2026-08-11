@@ -50,20 +50,38 @@ type Outcome struct {
 	Metrics       MetricsObserver  // optional: nil skips metric observation (for hermetic tests)
 }
 
+// PublishFunc publishes the passed image. In the synchronous configuration it
+// pushes to ACR inline; with a promotion worker it enqueues durable work and
+// returns immediately. Apply treats both identically: an error means the image is
+// NOT published and must not be reported as a pass.
+type PublishFunc func(ctx context.Context) error
+
+// SyncPublish is the inline publication action: push the assembled OCI layout to
+// the target registry and wait for it. This is what Apply did before publication
+// became injectable, and it remains the behaviour when no promotion queue is wired.
+func SyncPublish(pusher acr.Pusher, req router.GateRequest) PublishFunc {
+	return func(ctx context.Context) error {
+		return pusher.Push(ctx, req.Image.OCIPath, req.Target)
+	}
+}
+
 // Apply turns a gate result (and any infra error) into the Decision the HTTP
-// handler renders, performing the ACR push as a side effect on pass and recording
+// handler renders, publishing the image as a side effect on pass and recording
 // the decision (and findings) to the audit store if a Recorder is configured. The
 // Decision is returned to the caller, not stored on the Outcome.
-func (o *Outcome) Apply(ctx context.Context, pusher acr.Pusher, req router.GateRequest, res policy.Result, gateErr error, scanDur time.Duration) (Decision, error) {
+//
+// pushID may be empty, in which case Apply generates one from IDGen. A caller that
+// needs the ID before publication finishes — the handler does, because it answers
+// 201 with a report URL while promotion is still queued — passes its own. Both
+// routes end up at IDGen, so a test that stubs IDGen still controls the ID.
+func (o *Outcome) Apply(ctx context.Context, pushID string, publish PublishFunc, req router.GateRequest, res policy.Result, gateErr error, scanDur time.Duration) (Decision, error) {
 	// The report is served by GET /reports/<push_id> from the audit store (findings
 	// are keyed by push_id), so the report URL MUST use the same push_id that the
-	// decision is recorded under — not the image digest. Generate it once here and
-	// thread it through both the URL and the audit record.
-	idGen := o.IDGen
-	if idGen == nil {
-		idGen = generatePushID
+	// decision is recorded under — not the image digest. One ID threads through both
+	// the URL and the audit record.
+	if pushID == "" {
+		pushID = o.newPushID()
 	}
-	pushID := idGen()
 	reportURL := fmt.Sprintf("%s/%s", o.ReportBaseURL, pushID)
 
 	// Observe the scan duration once per decision (it is the same regardless of the
@@ -95,24 +113,36 @@ func (o *Outcome) Apply(ctx context.Context, pusher acr.Pusher, req router.GateR
 		return Decision{StatusCode: 400, Summary: summary, ReportURL: reportURL}, nil
 	}
 	promoteStart := time.Now()
-	err := pusher.Push(ctx, req.Image.OCIPath, req.Target)
+	err := publish(ctx)
 	// Observed on failure too: a slow push that ends in an error still consumed the
 	// client's window, and excluding those observations would understate the phase.
+	// When publication is deferred this measures the enqueue, which is the whole
+	// point — the phase should collapse to near zero.
 	o.observePromote(time.Since(promoteStart))
 	if err != nil {
 		if o.Metrics != nil {
 			o.Metrics.ObserveACRPush(false)
 		}
-		// The scan PASSED; record the push as an infra failure (not a policy
-		// rejection) with the ACR error so the report page can say so.
-		o.recordDecision(ctx, pushID, req, res, false, durMS, fmt.Errorf("acr push: %w", err))
-		return Decision{StatusCode: 502, Summary: "passed but ACR push failed", ReportURL: reportURL, InfraError: true}, fmt.Errorf("acr push: %w", err)
+		// The scan PASSED but the image is not published. Record as an infra failure
+		// (not a policy rejection) with the cause so the report page can say so.
+		o.recordDecision(ctx, pushID, req, res, false, durMS, fmt.Errorf("publish: %w", err))
+		return Decision{StatusCode: 502, Summary: "passed but publication failed", ReportURL: reportURL, InfraError: true}, fmt.Errorf("publish: %w", err)
 	}
 	if o.Metrics != nil {
 		o.Metrics.ObserveACRPush(true)
 	}
 	o.recordDecision(ctx, pushID, req, res, true, durMS, nil)
 	return Decision{StatusCode: 201, Summary: summary, ReportURL: reportURL}, nil
+}
+
+// newPushID returns a fresh push ID from the configured generator. It is the ONLY
+// place IDs originate, so a test that stubs IDGen controls every ID the request
+// produces — the report URL, the audit row, and any promotion job.
+func (o *Outcome) newPushID() string {
+	if o.IDGen != nil {
+		return o.IDGen()
+	}
+	return generatePushID()
 }
 
 // observePushError bumps the push-decision counter with an "error" outcome when

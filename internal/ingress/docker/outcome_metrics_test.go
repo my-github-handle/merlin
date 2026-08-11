@@ -42,7 +42,7 @@ func TestOutcome_ObservesPassPushAndACR(t *testing.T) {
 	o := &Outcome{ReportBaseURL: "https://merlin/reports", Metrics: sm}
 	req := router.GateRequest{Target: "myreg.azurecr.io/app:v1", Image: policy.StagedImage{OCIPath: "/oci"}}
 
-	if _, err := o.Apply(context.Background(), fp, req, policy.Result{Passed: true}, nil, 0); err != nil {
+	if _, err := o.Apply(context.Background(), "", SyncPublish(fp, req), req, policy.Result{Passed: true}, nil, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -60,7 +60,7 @@ func TestOutcome_ObservesRejectNoACRPush(t *testing.T) {
 	o := &Outcome{ReportBaseURL: "https://merlin/reports", Metrics: sm}
 	req := router.GateRequest{Target: "t", Image: policy.StagedImage{}}
 
-	if _, err := o.Apply(context.Background(), fp, req, policy.Result{Passed: false}, nil, 0); err != nil {
+	if _, err := o.Apply(context.Background(), "", SyncPublish(fp, req), req, policy.Result{Passed: false}, nil, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -79,7 +79,7 @@ func TestOutcome_ObservesACRPushFailure(t *testing.T) {
 	o := &Outcome{ReportBaseURL: "https://merlin/reports", Metrics: sm}
 	req := router.GateRequest{Target: "myreg.azurecr.io/app:v1", Image: policy.StagedImage{OCIPath: "/oci"}}
 
-	if _, err := o.Apply(context.Background(), fp, req, policy.Result{Passed: true}, nil, 0); err == nil {
+	if _, err := o.Apply(context.Background(), "", SyncPublish(fp, req), req, policy.Result{Passed: true}, nil, 0); err == nil {
 		t.Fatal("expected ACR push error")
 	}
 
@@ -95,7 +95,7 @@ func TestOutcome_RecordsScanDurationInAuditAndMetric(t *testing.T) {
 	o := &Outcome{ReportBaseURL: "https://merlin/reports", Recorder: spy, Metrics: sm}
 	req := router.GateRequest{Target: "myreg.azurecr.io/app:v1", Image: policy.StagedImage{OCIPath: "/oci"}}
 
-	if _, err := o.Apply(context.Background(), fp, req, policy.Result{Passed: true}, nil, 250*time.Millisecond); err != nil {
+	if _, err := o.Apply(context.Background(), "", SyncPublish(fp, req), req, policy.Result{Passed: true}, nil, 250*time.Millisecond); err != nil {
 		t.Fatal(err)
 	}
 
@@ -119,7 +119,7 @@ func TestOutcome_InfraErrorObservesDurationNotPush(t *testing.T) {
 	o := &Outcome{ReportBaseURL: "https://merlin/reports", Metrics: sm}
 	req := router.GateRequest{Target: "t", Image: policy.StagedImage{}}
 
-	if _, err := o.Apply(context.Background(), &acr.FakePusher{}, req, policy.Result{}, errFake, 100*time.Millisecond); err != nil {
+	if _, err := o.Apply(context.Background(), "", SyncPublish(&acr.FakePusher{}, req), req, policy.Result{}, errFake, 100*time.Millisecond); err != nil {
 		t.Fatal(err)
 	}
 
@@ -138,7 +138,7 @@ func TestOutcome_NilMetricsIsSafe(t *testing.T) {
 	fp := &acr.FakePusher{}
 	o := &Outcome{ReportBaseURL: "https://merlin/reports"} // Metrics nil
 	req := router.GateRequest{Target: "myreg.azurecr.io/app:v1", Image: policy.StagedImage{OCIPath: "/oci"}}
-	if _, err := o.Apply(context.Background(), fp, req, policy.Result{Passed: true}, nil, 0); err != nil {
+	if _, err := o.Apply(context.Background(), "", SyncPublish(fp, req), req, policy.Result{Passed: true}, nil, 0); err != nil {
 		t.Fatalf("nil Metrics must be safe: %v", err)
 	}
 }

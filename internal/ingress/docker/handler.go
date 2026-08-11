@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/merlin-gate/merlin/internal/auth"
+	"github.com/merlin-gate/merlin/internal/promote"
 	"github.com/merlin-gate/merlin/internal/router"
 	"github.com/merlin-gate/merlin/internal/staging"
 	"github.com/merlin-gate/merlin/internal/tenant"
@@ -31,6 +32,22 @@ type Handler struct {
 	tokenRealm     string
 	service        string
 	tokenHandler   *TokenHandler
+	promoter       promote.Promoter // nil = publish to ACR synchronously
+}
+
+// SetPromoter defers ACR publication to a durable queue, so the manifest PUT is not
+// held across the push. Nil keeps the synchronous push (hermetic tests,
+// single-binary dev).
+func (h *Handler) SetPromoter(p promote.Promoter) { h.promoter = p }
+
+// pushID generates the ID shared by the report URL, the audit row, and any
+// promotion job. It reuses the Outcome's generator rather than adding a second
+// source, so a test that stubs IDGen still controls all three.
+func (h *Handler) pushID() string {
+	if h.outcome != nil {
+		return h.outcome.newPushID()
+	}
+	return generatePushID()
 }
 
 // NewHandler builds the V2 handler. reports backs GET /reports/<push_id>.

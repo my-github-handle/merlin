@@ -25,6 +25,7 @@ import (
 	"github.com/merlin-gate/merlin/internal/policies/grype"
 	"github.com/merlin-gate/merlin/internal/policies/imageage"
 	"github.com/merlin-gate/merlin/internal/policy"
+	"github.com/merlin-gate/merlin/internal/promote"
 	"github.com/merlin-gate/merlin/internal/router"
 	"github.com/merlin-gate/merlin/internal/staging"
 	"github.com/merlin-gate/merlin/internal/tenant"
@@ -302,6 +303,42 @@ func BuildWithBackends(ctx context.Context, cfg config.Config) (*http.Server, *h
 			}
 		}
 	}
+
+	// Deferred ACR promotion. Both push clients hardcode a 30s ResponseHeaderTimeout
+	// that no flag can raise, so the manifest PUT cannot be held across the ACR push.
+	// The scan stays synchronous (the verdict must remain in the push exit code);
+	// only publication moves to a durable queue.
+	//
+	// Wired AFTER the dashboard block on purpose: outcome.Recorder is whatever is
+	// actually recording by now (the tee recorder when the dashboard is on, the bare
+	// auditor otherwise). Reusing it means an abandoned promotion appears on exactly
+	// the same surfaces as a synchronous failure, rather than skipping the live feed.
+	promQueue, err := promote.NewValkeyQueueAtAddr(cfg.Staging.ValkeyAddr, promote.DefaultKeyPrefix)
+	if err != nil {
+		return fail(fmt.Errorf("create promote queue: %w", err))
+	}
+	worker := &promote.Worker{
+		Queue: promQueue,
+		// Resolve by tenant PREFIX, from the same map that built the resolver. A repo
+		// name does not identify a tenant: two tenants may host the same repo against
+		// different registries, so keying on repo could publish to the wrong ACR.
+		Pushers: func(prefix string) (acr.Pusher, error) {
+			t, ok := tenants[prefix]
+			if !ok {
+				return nil, fmt.Errorf("unknown tenant prefix %q", prefix)
+			}
+			return t.Pusher, nil
+		},
+		Recorder: promote.AuditFinalizer{Recorder: outcome.Recorder},
+		Cleanup: func(ctx context.Context, j promote.Job) error {
+			return store.Cleanup(ctx, staging.ManifestRef{
+				Repo: j.Repo, Ref: j.Ref, ConfigDigest: j.ConfigDig, LayerDigests: j.Layers,
+			}, j.ScratchDir)
+		},
+		Metrics: metrics,
+	}
+	go worker.Run(bctx)
+	handler.SetPromoter(promote.QueuePromoter{Queue: promQueue})
 
 	// Build cleanup function: cancel JWKS context + close all resources (reverse order)
 	cleanup := func() {

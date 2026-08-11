@@ -15,6 +15,7 @@ import (
 
 	"github.com/merlin-gate/merlin/internal/audit"
 	"github.com/merlin-gate/merlin/internal/policy"
+	"github.com/merlin-gate/merlin/internal/promote"
 	"github.com/merlin-gate/merlin/internal/router"
 	"github.com/merlin-gate/merlin/internal/staging"
 	"github.com/merlin-gate/merlin/internal/tenant"
@@ -26,8 +27,7 @@ import (
 // attestation) or by tag (the index). On success it echoes Docker-Content-Digest so
 // the docker client accepts the response.
 func (h *Handler) forwardManifest(w http.ResponseWriter, ctx context.Context, t *tenant.Tenant, repo, ref string, raw []byte, m parsedManifest, kind manifestKind) {
-	sum := sha256.Sum256(raw)
-	digest := "sha256:" + hex.EncodeToString(sum[:])
+	digest := manifestDigest(raw)
 
 	// Address the manifest in ACR exactly as the client addressed it here: a
 	// digest ref (sha256:...) pushes by digest; anything else is a tag.
@@ -210,10 +210,23 @@ func (h *Handler) handleManifest(w http.ResponseWriter, r *http.Request, t *tena
 		http.Error(w, fmt.Sprintf("create scratch dir: %v", err), http.StatusInternalServerError)
 		return
 	}
+	// Cleanup ownership follows the OCI layout. When promotion is deferred the worker
+	// owns the scratch dir and the staged blob refs and will release them after it
+	// publishes; deleting them here would delete the layout out from under it and
+	// make every promotion fail on a missing directory. `promoted` is set ONLY by the
+	// publish closure below, and only after Promote returned nil — an enqueue that
+	// failed leaves no owner, so the handler must still clean up.
+	//
 	// Cleanup must run even when the client disconnected: a canceled request ctx
 	// would fail the Valkey ref-count decrement AND the blob delete, leaking
 	// staged blobs. Detach cancellation but keep values (trace metadata).
-	defer h.store.Cleanup(context.WithoutCancel(ctx), mr, scratchDir)
+	var promoted bool
+	defer func() {
+		if promoted {
+			return
+		}
+		h.store.Cleanup(context.WithoutCancel(ctx), mr, scratchDir)
+	}()
 
 	assembleStart := time.Now()
 	img, err := h.store.Assemble(ctx, mr, scratchDir)
@@ -226,7 +239,13 @@ func (h *Handler) handleManifest(w http.ResponseWriter, r *http.Request, t *tena
 	// Build gate request. The target must address ACR the same way the client
 	// addressed Merlin: by digest (buildx pushes the image manifest by digest) or
 	// by tag. A digest ref needs "@", not ":", or the reference is unparseable.
+	//
+	// Assemble cannot fill in Digest — it sees the ManifestRef, not the exact bytes
+	// the client sent — so the handler sets it from the canonical manifest digest.
+	// Without it every audit row records an empty digest, which is both the audit
+	// table's sort key and how the dashboard identifies an image.
 	img.Prefix = t.Prefix
+	img.Digest = manifestDigest(manifestBytes)
 	target := targetRef(t.Registry, repo, ref)
 	req := router.GateRequest{
 		Source:   "docker",
@@ -234,6 +253,11 @@ func (h *Handler) handleManifest(w http.ResponseWriter, r *http.Request, t *tena
 		Image:    img,
 		Target:   target,
 	}
+
+	// Generate the push ID before the gate: the promotion job, the report URL, and
+	// the audit row must all name the same push, and under deferred promotion the
+	// report URL goes out in the 201 while the promotion is still queued.
+	pushID := h.pushID()
 
 	// Gate via pool or direct router. The gate returns the result (and any infra
 	// error) request-locally; the handler then builds the Decision via the Outcome.
@@ -280,11 +304,49 @@ func (h *Handler) handleManifest(w http.ResponseWriter, r *http.Request, t *tena
 		scanDur = time.Since(gateStart)
 	}
 
+	// Decide what "publish" means for this push. Apply does not need to know whether
+	// publication is synchronous or queued — it renders the same pass/reject/infra
+	// outcomes either way — but only this scope holds the resolved tenant, the
+	// scratch dir, and the staged blob digests the worker will need.
+	publish := SyncPublish(t.Pusher, req)
+	if h.promoter != nil {
+		// Every field the worker's Cleanup needs must be carried on the Job: it
+		// releases blob ref-counts by ConfigDig + Layers and removes ScratchDir.
+		// Omitting any of them leaks the staged blobs and the OCI layout on every push.
+		//
+		// Ref is how the CLIENT addressed the manifest (tag or sha256:...), not
+		// Image.Tag — buildx addresses the image manifest by digest, and targetRef
+		// already depends on that distinction. Tag and Digest are carried separately
+		// because a promotion that is abandoned is recorded as an audit row, which
+		// needs both.
+		job := promote.Job{
+			PushID:     pushID,
+			Tenant:     t.Prefix,
+			Repo:       repo,
+			Tag:        img.Tag,
+			Digest:     img.Digest,
+			Ref:        ref,
+			Target:     target,
+			OCIPath:    img.OCIPath,
+			ScratchDir: scratchDir,
+			Layers:     mr.LayerDigests,
+			ConfigDig:  mr.ConfigDigest,
+			Identity:   identity.Subject,
+		}
+		publish = func(pctx context.Context) error {
+			if err := h.promoter.Promote(pctx, job); err != nil {
+				return fmt.Errorf("enqueue promotion: %w", err)
+			}
+			promoted = true // the worker now owns scratchDir and the blob refs
+			return nil
+		}
+	}
+
 	// Build the Decision from the gate result. Other infra errors are rendered as
-	// 500/502 by Apply. An ACR push failure surfaces as a returned error (502);
+	// 500/502 by Apply. A failed publication surfaces as a returned error (502);
 	// the Decision still carries the right status to render. Log the infra error so
 	// an operator can diagnose a 500/502 (the client only sees a terse summary).
-	d, applyErr := h.outcome.Apply(ctx, t.Pusher, req, res, gateErr, scanDur)
+	d, applyErr := h.outcome.Apply(ctx, pushID, publish, req, res, gateErr, scanDur)
 	if applyErr != nil {
 		log.Printf("manifest %s gate outcome infra error: %v", target, applyErr)
 	}
@@ -302,8 +364,7 @@ func (h *Handler) handleManifest(w http.ResponseWriter, r *http.Request, t *tena
 	// Docker-Content-Digest; without it `docker push` fails the manifest commit with
 	// "invalid checksum digest format". The digest is over the exact manifest bytes.
 	if code >= 200 && code < 300 {
-		sum := sha256.Sum256(manifestBytes)
-		w.Header().Set("Docker-Content-Digest", "sha256:"+hex.EncodeToString(sum[:]))
+		w.Header().Set("Docker-Content-Digest", img.Digest)
 	}
 	w.WriteHeader(code)
 	_, _ = w.Write([]byte(d.Summary))
@@ -330,6 +391,14 @@ func (h *Handler) observeQueueWait(d time.Duration) {
 	if m, ok := h.outcome.Metrics.(interface{ ObserveQueueWait(float64) }); ok {
 		m.ObserveQueueWait(d.Seconds())
 	}
+}
+
+// manifestDigest is the canonical content digest of the exact manifest bytes the
+// client sent. It identifies the image everywhere: the Docker-Content-Digest the
+// client verifies, the audit row's sort key, and the promotion job.
+func manifestDigest(raw []byte) string {
+	sum := sha256.Sum256(raw)
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 // targetRef builds the ACR reference for a manifest, mirroring how the client
