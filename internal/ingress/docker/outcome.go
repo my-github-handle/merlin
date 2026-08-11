@@ -94,7 +94,12 @@ func (o *Outcome) Apply(ctx context.Context, pusher acr.Pusher, req router.GateR
 		o.recordDecision(ctx, pushID, req, res, false, durMS, nil)
 		return Decision{StatusCode: 400, Summary: summary, ReportURL: reportURL}, nil
 	}
-	if err := pusher.Push(ctx, req.Image.OCIPath, req.Target); err != nil {
+	promoteStart := time.Now()
+	err := pusher.Push(ctx, req.Image.OCIPath, req.Target)
+	// Observed on failure too: a slow push that ends in an error still consumed the
+	// client's window, and excluding those observations would understate the phase.
+	o.observePromote(time.Since(promoteStart))
+	if err != nil {
 		if o.Metrics != nil {
 			o.Metrics.ObserveACRPush(false)
 		}
@@ -116,6 +121,18 @@ func (o *Outcome) Apply(ctx context.Context, pusher acr.Pusher, req router.GateR
 func (o *Outcome) observePushError() {
 	if m, ok := o.Metrics.(interface{ ObservePushError() }); ok {
 		m.ObservePushError()
+	}
+}
+
+// observePromote records how long the ACR push took — the last phase of the
+// blocked manifest-PUT window. Optional-interface for the same reason as
+// observePushError: existing MetricsObserver fakes must keep compiling.
+func (o *Outcome) observePromote(d time.Duration) {
+	if o.Metrics == nil {
+		return
+	}
+	if m, ok := o.Metrics.(interface{ ObservePromoteDuration(float64) }); ok {
+		m.ObservePromoteDuration(d.Seconds())
 	}
 }
 

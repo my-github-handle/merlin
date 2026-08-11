@@ -12,14 +12,29 @@ import (
 
 // spyMetrics captures MetricsObserver calls for assertions.
 type spyMetrics struct {
-	pushes    []bool    // ObservePush(passed)
-	acrPushes []bool    // ObserveACRPush(ok)
-	scanSecs  []float64 // ObserveScanDuration(seconds)
+	pushes       []bool    // ObservePush(passed)
+	acrPushes    []bool    // ObserveACRPush(ok)
+	scanSecs     []float64 // ObserveScanDuration(seconds)
+	assembleSecs []float64 // ObserveAssembleDuration(seconds)
+	queueSecs    []float64 // ObserveQueueWait(seconds)
+	promoteSecs  []float64 // ObservePromoteDuration(seconds)
 }
 
 func (s *spyMetrics) ObservePush(passed bool)         { s.pushes = append(s.pushes, passed) }
 func (s *spyMetrics) ObserveACRPush(ok bool)          { s.acrPushes = append(s.acrPushes, ok) }
 func (s *spyMetrics) ObserveScanDuration(sec float64) { s.scanSecs = append(s.scanSecs, sec) }
+
+// The three below are NOT part of MetricsObserver: producers reach them through
+// an optional interface assertion (Outcome.observePromote, Handler.observeQueueWait),
+// so fakes that omit them keep compiling. This one implements them to assert the
+// non-scan phases of the blocked window are observed.
+func (s *spyMetrics) ObserveAssembleDuration(sec float64) {
+	s.assembleSecs = append(s.assembleSecs, sec)
+}
+func (s *spyMetrics) ObserveQueueWait(sec float64) { s.queueSecs = append(s.queueSecs, sec) }
+func (s *spyMetrics) ObservePromoteDuration(sec float64) {
+	s.promoteSecs = append(s.promoteSecs, sec)
+}
 
 func TestOutcome_ObservesPassPushAndACR(t *testing.T) {
 	sm := &spyMetrics{}

@@ -215,7 +215,9 @@ func (h *Handler) handleManifest(w http.ResponseWriter, r *http.Request, t *tena
 	// staged blobs. Detach cancellation but keep values (trace metadata).
 	defer h.store.Cleanup(context.WithoutCancel(ctx), mr, scratchDir)
 
+	assembleStart := time.Now()
 	img, err := h.store.Assemble(ctx, mr, scratchDir)
+	h.observeAssemble(time.Since(assembleStart))
 	if err != nil {
 		http.Error(w, fmt.Sprintf("assemble image: %v", err), http.StatusInternalServerError)
 		return
@@ -248,8 +250,14 @@ func (h *Handler) handleManifest(w http.ResponseWriter, r *http.Request, t *tena
 	}
 	if h.pool != nil {
 		waitCtx, cancelWait := context.WithTimeout(ctx, timeout)
+		waitStart := time.Now()
 		release, aerr := h.pool.Acquire(waitCtx)
 		cancelWait()
+		// Observe on EVERY path, including both failure paths below. The pushes that
+		// exceed the client's 30s response-header ceiling are exactly the ones that
+		// fail here, so observing only on success yields survivor bias and makes queue
+		// wait look healthy precisely when it is the problem.
+		h.observeQueueWait(time.Since(waitStart))
 		switch {
 		case errors.Is(aerr, router.ErrSaturated):
 			// Fall through to the Outcome with the saturation error so the 503 is
@@ -299,6 +307,29 @@ func (h *Handler) handleManifest(w http.ResponseWriter, r *http.Request, t *tena
 	}
 	w.WriteHeader(code)
 	_, _ = w.Write([]byte(d.Summary))
+}
+
+// observeAssemble and observeQueueWait record the two phases of the blocked
+// manifest-PUT window that happen before the scan and were measured nowhere.
+// Both use an optional interface assertion (mirroring Outcome.observePushError)
+// rather than widening MetricsObserver, so every existing metrics fake in the
+// tests keeps compiling unchanged.
+func (h *Handler) observeAssemble(d time.Duration) {
+	if h.outcome == nil || h.outcome.Metrics == nil {
+		return
+	}
+	if m, ok := h.outcome.Metrics.(interface{ ObserveAssembleDuration(float64) }); ok {
+		m.ObserveAssembleDuration(d.Seconds())
+	}
+}
+
+func (h *Handler) observeQueueWait(d time.Duration) {
+	if h.outcome == nil || h.outcome.Metrics == nil {
+		return
+	}
+	if m, ok := h.outcome.Metrics.(interface{ ObserveQueueWait(float64) }); ok {
+		m.ObserveQueueWait(d.Seconds())
+	}
 }
 
 // targetRef builds the ACR reference for a manifest, mirroring how the client

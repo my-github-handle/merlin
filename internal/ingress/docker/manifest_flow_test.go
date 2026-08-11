@@ -129,6 +129,101 @@ func TestManifestPUTUBILayerAccepted(t *testing.T) {
 	}
 }
 
+// TestBlockedWindowPhasesObservedOnSuccessfulPush pins that a push which
+// completes records every phase of the blocked manifest-PUT window, not just the
+// scan. Attributing the window is the whole point: scan duration alone cannot
+// distinguish a slow scanner from slow assembly or a slow ACR push.
+func TestBlockedWindowPhasesObservedOnSuccessfulPush(t *testing.T) {
+	h, fp := buildIntegrationHandler(t, grype.Report{}, 2)
+	sm := &spyMetrics{}
+	h.outcome.Metrics = sm
+
+	layerDigest := uploadLayer(t, h, "app", layerWithOSID(t, "rhel"))
+	manifest := map[string]interface{}{
+		"schemaVersion": 2,
+		"config":        map[string]interface{}{"digest": layerDigest},
+		"layers":        []map[string]interface{}{{"digest": layerDigest}},
+	}
+	manifestBytes, _ := json.Marshal(manifest)
+
+	req := httptest.NewRequest(http.MethodPut, "/v2/app/manifests/v1", bytes.NewReader(manifestBytes))
+	req.Host = testTenantHost
+	req.Header.Set("Authorization", "Bearer good")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("manifest PUT: status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	if len(fp.Pushed) != 1 {
+		t.Fatalf("ACR pushes = %d, want 1", len(fp.Pushed))
+	}
+	for _, phase := range []struct {
+		name string
+		obs  []float64
+	}{
+		{"assemble", sm.assembleSecs},
+		{"queue wait", sm.queueSecs},
+		{"promote", sm.promoteSecs},
+		{"scan", sm.scanSecs},
+	} {
+		if len(phase.obs) != 1 {
+			t.Errorf("%s observations = %d, want 1 (phase unattributed)", phase.name, len(phase.obs))
+		}
+	}
+}
+
+// TestQueueWaitObservedWhenClientDisconnects pins the one failure mode that is
+// otherwise invisible in every data source. When a client gives up while its push
+// is still queued for a scan slot, Acquire returns the context's own error and the
+// handler returns silently — no response to render, no audit row, no push-decision
+// counter. The queue-wait observation is the only trace such a push leaves, so it
+// must be recorded on the failure paths too; observing only on the success path
+// would make queue wait look healthy precisely when it is the problem.
+func TestQueueWaitObservedWhenClientDisconnects(t *testing.T) {
+	h, fp := buildIntegrationHandler(t, grype.Report{}, 1)
+	sm := &spyMetrics{}
+	h.outcome.Metrics = sm
+
+	layerDigest := uploadLayer(t, h, "app", layerWithOSID(t, "rhel"))
+
+	// Occupy the pool's only slot and never release it, so the push below blocks
+	// in Acquire until its own context dies.
+	release, err := h.pool.Acquire(context.Background())
+	if err != nil {
+		t.Fatalf("seed Acquire: %v", err)
+	}
+	defer release()
+
+	manifest := map[string]interface{}{
+		"schemaVersion": 2,
+		"config":        map[string]interface{}{"digest": layerDigest},
+		"layers":        []map[string]interface{}{{"digest": layerDigest}},
+	}
+	manifestBytes, _ := json.Marshal(manifest)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodPut, "/v2/app/manifests/v1", bytes.NewReader(manifestBytes)).WithContext(ctx)
+	req.Host = testTenantHost
+	req.Header.Set("Authorization", "Bearer good")
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	if len(sm.queueSecs) != 1 {
+		t.Fatalf("queue wait observations = %d, want 1; a push that died queued left no trace", len(sm.queueSecs))
+	}
+	if sm.queueSecs[0] < 0.05 {
+		t.Errorf("queue wait = %vs, want >= 0.05s (the time actually spent queued)", sm.queueSecs[0])
+	}
+	// Nothing was scanned, so nothing may have been published.
+	if len(fp.Pushed) != 0 {
+		t.Errorf("ACR pushes = %d, want 0", len(fp.Pushed))
+	}
+}
+
 // TestManifestPUTImageByDigestUsesDigestRef verifies that a gated image pushed by
 // digest (as buildx does) is forwarded to ACR by digest (@), not as repo:sha256:...
 // which is an unparseable reference and 500s.
