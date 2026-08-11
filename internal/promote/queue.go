@@ -25,8 +25,15 @@ type Job struct {
 	// Tenant is the tenant prefix (tenant.Tenant.Prefix) the worker resolves the ACR
 	// pusher from. A repo name does not identify a tenant under the multi-ACR config,
 	// and the request host the prefix came from is gone by the time the worker runs.
-	Tenant     string   `json:"tenant"`
-	Repo       string   `json:"repo"`
+	Tenant string `json:"tenant"`
+	Repo   string `json:"repo"`
+	// Tag and Digest mirror the audited image identity. They are carried separately
+	// from Ref because the audit row needs both: a promotion that is abandoned is
+	// recorded as a new gate_decisions row, and that row is sorted by image_digest
+	// and rendered on the dashboard by repo/tag. Deriving them from Ref at that
+	// point is impossible — Ref is whichever ONE of the two the client used.
+	Tag        string   `json:"tag"`
+	Digest     string   `json:"digest"`
 	Ref        string   `json:"ref"`         // tag or sha256:... digest, exactly as the client addressed it
 	Target     string   `json:"target"`      // fully-qualified ACR ref
 	OCIPath    string   `json:"oci_path"`    // local OCI layout produced by Assemble
