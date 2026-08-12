@@ -89,6 +89,20 @@ spec:
                   name: {{ .Values.clickhouse.passwordSecret | default (printf "%s-secrets" (include "merlin.fullname" .)) }}
                   key: registry-token-secret
             {{- end }}
+            {{- /* Parenthesized so an `alerts: null` override (or an older values file
+                   that predates this block) renders as "off" instead of failing the
+                   whole release on a nil-map lookup. */}}
+            {{- if (.Values.merlin.alerts).slackWebhookFromSecret }}
+            # SLACK_WEBHOOK_URL: the alerter's destination, and a credential — anyone
+            # holding it can post to the channel. The ConfigMap renders only the
+            # ${SLACK_WEBHOOK_URL} placeholder; if this env is missing, config expansion
+            # fails closed at startup rather than starting an alerter that goes nowhere.
+            - name: SLACK_WEBHOOK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.clickhouse.passwordSecret | default (printf "%s-secrets" (include "merlin.fullname" .)) }}
+                  key: {{ (.Values.merlin.alerts).slackWebhookSecretKey | default "slack-webhook-url" }}
+            {{- end }}
           {{- if .Values.externalSecrets.enabled }}
           # envFrom makes all ESO-synced secret keys available as env vars.
           # CLICKHOUSE_PASSWORD is explicitly mapped above via secretKeyRef for clarity,

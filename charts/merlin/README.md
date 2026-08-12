@@ -247,6 +247,59 @@ Without the operator, configure your Prometheus instance to scrape:
       action: keep
 ```
 
+### Slack alerts
+
+Scraped metrics tell you what happened once you look. The alerter tells you without
+looking: every 15 minutes it runs three detectors over the audit table and posts what
+is new to a Slack incoming webhook.
+
+| Detector | Fires when |
+|---|---|
+| `novel_error` | An `error_detail` signature appears in the last hour that is absent from the last 7 days |
+| `infra_error_rate` | The window's infra-error rate clears an absolute floor **and** is a multiple of the baseline rate |
+| `killed_scan` | Enough grype scans were SIGKILLed (`signal: killed` / exit 137) in one window |
+
+Only `infra_error` decisions are considered. A push rejected for a CRITICAL CVE is the
+gate working, and alerting on those would bury every real finding.
+
+**Off by default, and there is no `enabled` flag — the webhook is the switch.** The URL
+is a credential, so it is never put in values; add it to the Secret that already holds
+the ClickHouse password and reference it:
+
+```yaml
+merlin:
+  alerts:
+    slackWebhookFromSecret: true         # injects SLACK_WEBHOOK_URL from the Secret
+    slackWebhookSecretKey: slack-webhook-url
+    environment: merlin-opsadmin         # labels every message; defaults to the pod name
+```
+
+With `externalSecrets.enabled: true`, add `slack-webhook-url` to `externalSecrets.data`.
+Otherwise patch the existing Secret directly. If the key is missing the pod fails at
+startup rather than running an alerter that posts nowhere.
+
+Optional tuning (all empty = the tuned defaults: `15m` / `1h` / `168h` / `6h`):
+
+```yaml
+merlin:
+  alerts:
+    interval: 15m
+    recentWindow: 1h        # must be >= interval, or findings between runs are never seen
+    baselineWindow: 168h    # keep inside audit retention, or old signatures read as novel
+    cooldown: 6h            # per (detector, signature); a still-firing issue resurfaces after it
+    killedScanThreshold: 5
+    maxNovelPerRun: 5       # the remainder is logged, never dropped silently
+```
+
+Both window relationships are checked at startup and refuse to boot if wrong. Repeats
+are suppressed via an `alert_notifications` table in the same ClickHouse database,
+which deliberately has **no TTL** — expiring rows would re-announce every long-standing
+finding.
+
+Scope: `killed_scan` sees the grype **child** being killed. A SIGKILL to the merlin
+**parent** (a pod OOMKill) writes no audit row at all, so no query can see it — use
+`kube_pod_container_status_last_terminated_reason` for that.
+
 ## Dashboard
 
 Merlin serves a built-in, read-only observability dashboard on `:8080` **by default**

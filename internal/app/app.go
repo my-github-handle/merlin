@@ -446,6 +446,18 @@ func BuildWithBackends(ctx context.Context, cfg config.Config) (*http.Server, *h
 		}
 	}()
 
+	// Alerter: polls the audit table and posts findings to Slack. Started last because
+	// it only reads, so nothing above depends on it — and fatal if it is configured but
+	// cannot connect, since a deployment that believes it is watched and is not is
+	// worse than one that knows it isn't.
+	alertCloser, err := startAlerter(bctx, cfg)
+	if err != nil {
+		return fail(fmt.Errorf("start alerter: %w", err))
+	}
+	if alertCloser != nil {
+		closers = append(closers, alertCloser)
+	}
+
 	// Build cleanup function: cancel JWKS context + close all resources (reverse order)
 	cleanup := func() {
 		cancel() // Stop JWKS background refresh

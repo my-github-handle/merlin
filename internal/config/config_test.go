@@ -599,3 +599,131 @@ func TestGrypeEnforceFalseIsPreserved(t *testing.T) {
 		t.Error("an explicit grype.enforce: false must not be overwritten by defaults")
 	}
 }
+
+// minimalConfig is the smallest valid config, so an alerts test only has to state
+// the alerts block it is exercising.
+func minimalConfig(extra string) string {
+	return `
+base_image:
+  allowed_ids: [rhel]
+acr:
+  registry_template: "{prefix}acr.azurecr.io"
+  base_domain: c3ci.cloud
+audit:
+  clickhouse_dsn: clickhouse://ch:9000/merlin
+tenants:
+  - prefix: c3dev
+    acr_client_id: cid
+    auth:
+      issuer: https://login/dev/v2.0
+      audience: api://merlin-dev
+      jwks_url: https://login/dev/keys
+      tenant_id: dev-tenant
+` + extra
+}
+
+func TestAlertsAreOffWithoutAWebhook(t *testing.T) {
+	// No separate `enabled` flag: a config that says enabled but has nowhere to send
+	// findings is silently useless, which is the state this whole feature exists to
+	// remove. Presence of the webhook IS the switch.
+	cfg, err := Load(writeTemp(t, minimalConfig("")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Alerts.Enabled() {
+		t.Error("alerts enabled with no slack_webhook_url")
+	}
+}
+
+func TestAlertsEnabledByWebhookAndDefaulted(t *testing.T) {
+	t.Setenv("HOOK", "https://hooks.slack.com/services/T/B/xxx")
+	cfg, err := Load(writeTemp(t, minimalConfig(`
+alerts:
+  slack_webhook_url: ${HOOK}
+`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Alerts.Enabled() {
+		t.Fatal("alerts should be enabled when a webhook is configured")
+	}
+	if cfg.Alerts.SlackWebhookURL != "https://hooks.slack.com/services/T/B/xxx" {
+		t.Errorf("webhook not expanded from env: %q", cfg.Alerts.SlackWebhookURL)
+	}
+	// Durations are left to the alert package's own defaults, so an operator who sets
+	// only the webhook gets the tuned windows rather than zero-valued ones.
+	if cfg.Alerts.Interval != "" || cfg.Alerts.RecentWindow != "" {
+		t.Errorf("config should not invent duration defaults: %+v", cfg.Alerts)
+	}
+}
+
+func TestAlertsRejectUnparseableDurations(t *testing.T) {
+	// Fail at startup, not on the first tick: a bad duration on a background ticker
+	// would otherwise be discovered as silence.
+	for _, field := range []string{"interval", "recent_window", "baseline_window", "cooldown"} {
+		t.Run(field, func(t *testing.T) {
+			_, err := Load(writeTemp(t, minimalConfig(`
+alerts:
+  slack_webhook_url: https://hooks.slack.com/x
+  `+field+`: "half an hour"
+`)))
+			if err == nil {
+				t.Fatalf("accepted an unparseable %s", field)
+			}
+			if !strings.Contains(err.Error(), field) {
+				t.Errorf("error should name the field: %v", err)
+			}
+		})
+	}
+}
+
+func TestAlertsIgnoreDurationsWhenDisabled(t *testing.T) {
+	// Validation is scoped to an enabled alerter: a commented-out webhook plus a
+	// leftover typo in a window must not stop the gate from starting.
+	if _, err := Load(writeTemp(t, minimalConfig(`
+alerts:
+  interval: "half an hour"
+`))); err != nil {
+		t.Errorf("a disabled alerter blocked startup: %v", err)
+	}
+}
+
+func TestAlertsRequireTheAuditStore(t *testing.T) {
+	// The detectors ARE audit queries. Enabled with no store, the alerter would poll
+	// nothing and report no findings forever — silence indistinguishable from health.
+	_, err := Load(writeTemp(t, `
+base_image:
+  allowed_ids: [rhel]
+acr:
+  registry_template: "{prefix}acr.azurecr.io"
+  base_domain: c3ci.cloud
+tenants:
+  - prefix: c3dev
+    acr_client_id: cid
+    auth:
+      issuer: https://login/dev/v2.0
+      audience: api://merlin-dev
+      jwks_url: https://login/dev/keys
+      tenant_id: dev-tenant
+alerts:
+  slack_webhook_url: https://hooks.slack.com/x
+`))
+	if err == nil {
+		t.Fatal("accepted an alerter with no audit.clickhouse_dsn")
+	}
+	if !strings.Contains(err.Error(), "audit.clickhouse_dsn") {
+		t.Errorf("error should name the missing DSN: %v", err)
+	}
+}
+
+func TestAlertsRejectNonPositiveDurations(t *testing.T) {
+	// "0s" parses but would make the ticker spin or the window empty.
+	_, err := Load(writeTemp(t, minimalConfig(`
+alerts:
+  slack_webhook_url: https://hooks.slack.com/x
+  cooldown: "0s"
+`)))
+	if err == nil {
+		t.Fatal("accepted a zero cooldown")
+	}
+}

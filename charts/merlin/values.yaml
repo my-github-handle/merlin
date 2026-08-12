@@ -124,6 +124,35 @@ merlin:
     # loses its staging state and must be re-pushed.
     sessionTTL: "24h"
   audit: { clickhouseDSN: "", queueSize: 1024 }   # DSN defaulted from operator-CR service if empty
+  # Background alerter: polls the audit table and posts findings to a Slack incoming
+  # webhook. OFF by default, and there is no `enabled` flag — the webhook IS the
+  # switch, because an alerter with nowhere to send findings is the silent failure
+  # this feature exists to remove.
+  #
+  # The webhook URL is a CREDENTIAL: anyone holding it can post to the channel. Do NOT
+  # set it here. Sync it as the `slack-webhook-url` key of the same Secret that holds
+  # the ClickHouse password (add it to externalSecrets.data) and set
+  # slackWebhookFromSecret: true below; the ConfigMap then renders the literal
+  # ${SLACK_WEBHOOK_URL} placeholder, which Merlin expands at startup.
+  alerts:
+    # true injects SLACK_WEBHOOK_URL from the secret and turns the alerter on.
+    slackWebhookFromSecret: false
+    # Key inside <fullname>-secrets (or clickhouse.passwordSecret) holding the URL.
+    slackWebhookSecretKey: slack-webhook-url
+    # Labels every message. One channel usually serves several deployments; empty
+    # falls back to the pod hostname.
+    environment: ""
+    # Durations are Go duration strings. Empty means the tuned default in
+    # internal/alert: 15m interval, 1h recent window, 168h baseline, 6h cooldown.
+    # recentWindow must be >= interval or findings between runs fall in no window,
+    # and baselineWindow should stay inside audit retention or old signatures read as
+    # novel again. Both are rejected/logged at startup, not discovered later.
+    interval: ""
+    recentWindow: ""
+    baselineWindow: ""
+    cooldown: ""
+    killedScanThreshold: 0   # 0 = default (5 SIGKILLed scans in one recent window)
+    maxNovelPerRun: 0        # 0 = default (5); the remainder is logged, not dropped silently
   server:
     addr: ":5000"
     metricsAddr: ":9090"

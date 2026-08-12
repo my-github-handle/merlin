@@ -19,7 +19,7 @@ LLM, and finishes an already-approved design instead of starting a new one:
 | 2 | **Bound grype's memory** in the scan path | ~1 day | Closes the only unbudgeted memory consumer in the pod — see the correction below. **Done**, 2026-08-11 |
 | 3 | **Finish Changes A + B** of the approved 2026-07-10 design (§0.1) | ~1 day | Already reviewed, never implemented; Change A is what makes the residual class diagnosable. **Done**, 2026-08-11 |
 | 4 | `ServiceMonitor` + widen latency histogram buckets + wire `scanner_db_age` | ~half day | Metrics currently don't persist and can't express p95 (§1.1). **Done**, 2026-08-11 (buckets in `2e24d23`) |
-| 5 | **Three scheduled ClickHouse queries → Slack**, deduped by a `last_notified_at` row | ~2 days | Novel-`error_detail` detection, `infra_error` step-change, OOMKilled restarts |
+| 5 | **Three scheduled ClickHouse queries → Slack**, deduped by a `last_notified_at` row | ~2 days | Novel-`error_detail` detection, `infra_error` step-change, OOMKilled restarts. **Done**, 2026-08-11 (`internal/alert`) — third detector narrowed, see below |
 | 6 | **Stop and re-measure** | — | Decide anything further from data, not from this document |
 
 **Correction to an earlier draft of step 2.** That draft claimed bounding grype "removes
@@ -53,6 +53,30 @@ Note what step 5 is *not*: no `Source` interface, no five adapters, no incident 
 state machine. A cooldown timestamp per detector buys ~90% of the suppression value
 described in §3 Task 3 for ~5% of the code. Build the state machine only if the simple
 version demonstrably fails.
+
+**Two corrections to step 5, as built (`internal/alert`, 2026-08-11).**
+
+1. *The third detector is narrower than "OOMKilled restarts."* It is `killed_scan`: grype
+   children killed by SIGKILL (`signal: killed` / exit 137), which are visible **only**
+   because step 2 made them attributable. A SIGKILL to the merlin **parent** — the actual
+   pod OOMKill — writes no audit row at all, by construction: the process is gone before
+   the audit write. No ClickHouse query can ever see it. Detecting that needs
+   `kube_pod_container_status_last_terminated_reason` from the ServiceMonitor added in
+   step 4, or the Kubernetes API (no client-go in `go.mod`). The ClickHouse-visible half
+   shipped; the pod-restart half is a step-6 decision.
+2. *There is a two-method `Source` interface, deliberately.* The prohibition above was
+   against a pluggable adapter layer, and there is none: exactly one implementation
+   (`*Store`, one ClickHouse connection) with a compile-time assertion. The interface
+   exists so the three detectors and the runner's cooldown logic are unit-testable
+   without a database — which is what pinned the failure modes that comments alone would
+   not have caught: overlapping windows (novelty can never fire), a suppressed firing
+   extending its own cooldown (the finding never resurfaces), and recording a cooldown
+   for a message Slack rejected (silence).
+
+Also worth carrying into step 6: `alert_notifications` lives in `internal/alert/schema.sql`,
+*not* `internal/audit/schema.sql`, specifically so it does not inherit the 30-day audit
+TTL. Expiring suppression rows would re-announce every long-standing finding the moment
+its row aged out.
 
 **Deliberately not in the plan:**
 

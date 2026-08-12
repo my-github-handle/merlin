@@ -4,7 +4,9 @@ package config
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -18,6 +20,7 @@ type Config struct {
 	Auth      AuthConfig      `yaml:"auth"`
 	Staging   StagingConfig   `yaml:"staging"`
 	Audit     AuditConfig     `yaml:"audit"`
+	Alerts    AlertsConfig    `yaml:"alerts"`
 	Server    ServerConfig    `yaml:"server"`
 }
 
@@ -102,6 +105,56 @@ type AuditConfig struct {
 	ClickHouseDSN string `yaml:"clickhouse_dsn"`
 	QueueSize     int    `yaml:"queue_size"`
 	RetentionDays int    `yaml:"retention_days"`
+}
+
+// AlertsConfig configures the background alerter, which polls the audit table for
+// infra-error patterns and posts findings to a Slack incoming webhook.
+//
+// There is deliberately no `enabled` flag: the webhook URL IS the switch. A config
+// that says enabled but has nowhere to send findings would be silently useless,
+// which is the exact failure mode this feature exists to remove. It also needs
+// audit.clickhouse_dsn — with no audit store there is nothing to poll.
+//
+// Every duration is a string parsed with time.ParseDuration at startup (the
+// server.gate_timeout convention), and left EMPTY by default so the tuned defaults
+// in internal/alert are the single source of truth rather than being duplicated here.
+type AlertsConfig struct {
+	// SlackWebhookURL is a credential: anyone holding it can post to the channel.
+	// Supply it via ${ENV} expansion from a secret, never inline in the values file.
+	SlackWebhookURL string `yaml:"slack_webhook_url"`
+	// Environment labels every message, because one channel usually serves several
+	// deployments. Defaults to the release/pod name at wiring time if empty.
+	Environment string `yaml:"environment"`
+	// Interval is how often the detectors run. RecentWindow should be >= Interval or
+	// findings that occur between runs fall in no window at all.
+	Interval     string `yaml:"interval"`
+	RecentWindow string `yaml:"recent_window"`
+	// BaselineWindow is the "known signatures" history that novelty is judged against.
+	// It must stay comfortably inside audit.retention_days or its older half is empty
+	// and previously-seen signatures read as novel again.
+	BaselineWindow string `yaml:"baseline_window"`
+	// Cooldown suppresses re-announcing the same (detector, signature) class.
+	Cooldown string `yaml:"cooldown"`
+	// KilledScanThreshold is how many SIGKILLed scans in one recent window trigger a
+	// page. Zero means the alert package's default.
+	KilledScanThreshold uint64 `yaml:"killed_scan_threshold"`
+	// MaxNovelPerRun caps novel-signature messages per run so a broad outage cannot
+	// flood the channel. What the cap drops is logged, never silently discarded.
+	MaxNovelPerRun int `yaml:"max_novel_per_run"`
+}
+
+// Enabled reports whether the alerter should be started.
+func (a AlertsConfig) Enabled() bool { return a.SlackWebhookURL != "" }
+
+// durations returns the yaml key -> value pairs for validation, so a bad duration is
+// rejected at startup instead of surfacing later as a silent background ticker.
+func (a AlertsConfig) durations() map[string]string {
+	return map[string]string{
+		"interval":        a.Interval,
+		"recent_window":   a.RecentWindow,
+		"baseline_window": a.BaselineWindow,
+		"cooldown":        a.Cooldown,
+	}
 }
 
 type ServerConfig struct {
@@ -268,6 +321,47 @@ func (c *Config) validate() error {
 		if t.ImageAge != nil && t.ImageAge.ThresholdDays < 0 {
 			return fmt.Errorf("config: tenants[%d] (%s) image_age.threshold_days must be >= 0", i, t.Prefix)
 		}
+	}
+	if err := c.validateAlerts(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateAlerts checks the alerter's config, but ONLY when it is enabled: a
+// commented-out webhook plus a leftover typo in a window must not stop the gate
+// from starting, because the gate is the thing that matters.
+func (c *Config) validateAlerts() error {
+	if !c.Alerts.Enabled() {
+		return nil
+	}
+	// The detectors are queries over the audit table. Without it the alerter would
+	// start, poll nothing, and report no findings forever — silence indistinguishable
+	// from health, which is the failure this whole feature exists to remove.
+	if c.Audit.ClickHouseDSN == "" {
+		return fmt.Errorf("config: alerts.slack_webhook_url is set but audit.clickhouse_dsn is empty; the alerter reads the audit table")
+	}
+	// Sorted so the reported field is deterministic when more than one is wrong.
+	keys := make([]string, 0, 4)
+	for k := range c.Alerts.durations() {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		v := c.Alerts.durations()[k]
+		if v == "" {
+			continue // empty means "use the alert package default"
+		}
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("config: alerts.%s %q is not a duration (e.g. 15m, 1h, 168h): %w", k, v, err)
+		}
+		if d <= 0 {
+			return fmt.Errorf("config: alerts.%s must be > 0, got %s", k, v)
+		}
+	}
+	if c.Alerts.MaxNovelPerRun < 0 {
+		return fmt.Errorf("config: alerts.max_novel_per_run must be >= 0")
 	}
 	return nil
 }

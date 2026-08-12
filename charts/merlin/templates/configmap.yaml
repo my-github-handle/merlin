@@ -68,6 +68,37 @@ data:
       # preventing silent misconfiguration. This keeps the password out of the ConfigMap (no secret in git).
       clickhouse_dsn: {{ include "merlin.clickhouseDSN" . | quote }}
       queue_size: {{ .Values.merlin.audit.queueSize }}
+    {{- with .Values.merlin.alerts }}
+    {{- if .slackWebhookFromSecret }}
+    alerts:
+      # Literal placeholder, NOT expanded by Helm: the Deployment injects
+      # SLACK_WEBHOOK_URL from the secret and Merlin's loader expands it at startup,
+      # failing fast if it is unset. The webhook URL is a credential and must never be
+      # rendered into the ConfigMap. Its presence is also what ENABLES the alerter.
+      slack_webhook_url: "${SLACK_WEBHOOK_URL}"
+      {{- with .environment }}
+      environment: {{ . | quote }}
+      {{- end }}
+      {{- with .interval }}
+      interval: {{ . | quote }}
+      {{- end }}
+      {{- with .recentWindow }}
+      recent_window: {{ . | quote }}
+      {{- end }}
+      {{- with .baselineWindow }}
+      baseline_window: {{ . | quote }}
+      {{- end }}
+      {{- with .cooldown }}
+      cooldown: {{ . | quote }}
+      {{- end }}
+      {{- if .killedScanThreshold }}
+      killed_scan_threshold: {{ .killedScanThreshold }}
+      {{- end }}
+      {{- if .maxNovelPerRun }}
+      max_novel_per_run: {{ .maxNovelPerRun }}
+      {{- end }}
+    {{- end }}
+    {{- end }}
     server:
       addr: {{ .Values.merlin.server.addr | quote }}
       metrics_addr: {{ .Values.merlin.server.metricsAddr | quote }}
