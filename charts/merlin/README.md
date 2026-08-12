@@ -208,7 +208,29 @@ merlin:
 
 ## Monitoring
 
-Merlin exposes Prometheus metrics at `:9090/metrics` (cluster-internal). The metrics port is exposed via the Service but NOT via the Ingress. Configure your Prometheus instance to scrape:
+Merlin exposes Prometheus metrics at `:9090/metrics` (cluster-internal). The metrics port is exposed via the Service but NOT via the Ingress.
+
+**Nothing scrapes it until you say so.** With the Prometheus Operator, enable the chart's
+`ServiceMonitor` (default off, because the manifest needs the `monitoring.coreos.com/v1`
+CRDs and a cluster without them fails the whole release):
+
+```yaml
+metrics:
+  serviceMonitor:
+    enabled: true
+    labels: {}       # must match the Prometheus CR's spec.serviceMonitorSelector
+    interval: 30s
+    scrapeTimeout: 10s
+```
+
+If that selector is non-empty and `labels` does not carry the label it expects, the
+ServiceMonitor is created and silently never scraped — check it first:
+
+```bash
+kubectl -n <prom-ns> get prometheus -o jsonpath='{.items[*].spec.serviceMonitorSelector}'
+```
+
+Without the operator, configure your Prometheus instance to scrape:
 
 ```yaml
 - job_name: 'merlin'
@@ -224,8 +246,6 @@ Merlin exposes Prometheus metrics at `:9090/metrics` (cluster-internal). The met
       regex: metrics
       action: keep
 ```
-
-Alternatively, create a `ServiceMonitor` resource if you use the Prometheus Operator.
 
 ## Dashboard
 

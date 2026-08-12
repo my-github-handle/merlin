@@ -80,7 +80,12 @@ func Build(cfg config.Config) (*http.Server, *http.Server, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	grypePolicy := grype.New(runner, cfg.Grype.SeverityThreshold, grypeOptions(cfg)...)
+	// Metrics are constructed BEFORE the policies: the grype policy is the only
+	// component that sees the scanner DB's build date, so it holds the age observer.
+	reg := prometheus.NewRegistry()
+	metrics := observability.NewMetrics(reg)
+
+	grypePolicy := grype.New(runner, cfg.Grype.SeverityThreshold, grypeOptions(cfg, metrics)...)
 	basePolicy := baseimage.New(cfg.BaseImage.AllowedIDs)
 	def, per := imageAgeRules(cfg)
 	agePolicy := imageage.New(def, per)
@@ -120,10 +125,9 @@ func Build(cfg config.Config) (*http.Server, *http.Server, error) {
 	}
 	handler := dockeringress.NewHandler(resolver, nil, rt, outcome, nil)
 
-	// Metrics.
-	reg := prometheus.NewRegistry()
-	metrics := observability.NewMetrics(reg)
-	outcome.Metrics = metrics // observe push decisions, ACR pushes, scan latency
+	// Metrics (registry built above, with the policies).
+	outcome.Metrics = metrics           // observe push decisions, ACR pushes, scan latency
+	handler.SetRequestObserver(metrics) // count requests answered before a decision exists
 
 	mainSrv := &http.Server{Addr: cfg.Server.Addr, Handler: handler}
 	metricsSrv := &http.Server{Addr: cfg.Server.MetricsAddr, Handler: metrics.Handler()}
@@ -262,12 +266,17 @@ func BuildWithBackends(ctx context.Context, cfg config.Config) (*http.Server, *h
 	}
 	closers = append(closers, func() { reportsReader.Close() })
 
+	// Metrics are constructed BEFORE the policies: the grype policy is the only
+	// component that sees the scanner DB's build date, so it holds the age observer.
+	reg := prometheus.NewRegistry()
+	metrics := observability.NewMetrics(reg)
+
 	// Policies + engine
 	runner, err := grypeRunner(cfg)
 	if err != nil {
 		return fail(err)
 	}
-	grypePolicy := grype.New(runner, cfg.Grype.SeverityThreshold, grypeOptions(cfg)...)
+	grypePolicy := grype.New(runner, cfg.Grype.SeverityThreshold, grypeOptions(cfg, metrics)...)
 	basePolicy := baseimage.New(cfg.BaseImage.AllowedIDs)
 	def, per := imageAgeRules(cfg)
 	agePolicy := imageage.New(def, per)
@@ -312,10 +321,9 @@ func BuildWithBackends(ctx context.Context, cfg config.Config) (*http.Server, *h
 	handler.SetRegistryAuth(issuer, cfg.Server.ExternalURL+"/token", cfg.Auth.Service)
 	handler.SetTokenHandler(th)
 
-	// Metrics
-	reg := prometheus.NewRegistry()
-	metrics := observability.NewMetrics(reg)
-	outcome.Metrics = metrics // observe push decisions, ACR pushes, scan latency
+	// Metrics (registry built above, with the policies).
+	outcome.Metrics = metrics           // observe push decisions, ACR pushes, scan latency
+	handler.SetRequestObserver(metrics) // count requests answered before a decision exists
 
 	mainSrv := &http.Server{Addr: cfg.Server.Addr, Handler: handler}
 	metricsSrv := &http.Server{Addr: cfg.Server.MetricsAddr, Handler: metrics.Handler()}
@@ -465,12 +473,17 @@ func generatePushID() string {
 // Non-enforcement is logged loudly at every startup on purpose: it publishes
 // images with Critical CVEs, so it needs to be visible in the pod logs of every
 // restart rather than discoverable only by reading values.yaml.
-func grypeOptions(cfg config.Config) []grype.Option {
+// grypeOptions derives the grype policy options from config, and wires the
+// scanner-DB-age observer. dbAge may be nil (no metrics).
+func grypeOptions(cfg config.Config, dbAge grype.DBAgeObserver) []grype.Option {
+	// Reported on every scan: the DB is refreshed out-of-band by rebuilding the
+	// image, so a scan is the only moment Merlin can learn how old it is.
+	opts := []grype.Option{grype.WithDBAgeObserver(dbAge)}
 	if cfg.Grype.Enforce == nil || *cfg.Grype.Enforce {
-		return nil
+		return opts
 	}
 	log.Printf("WARNING: grype.enforce=false — vulnerability findings at/above %s are recorded but DO NOT block publication. Images with Critical CVEs will reach ACR.", cfg.Grype.SeverityThreshold)
-	return []grype.Option{grype.Observe()}
+	return append(opts, grype.Observe())
 }
 
 // imageAgeRules derives the default age rule and the per-tenant overrides from

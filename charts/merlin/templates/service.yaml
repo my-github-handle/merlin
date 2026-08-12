@@ -2,7 +2,13 @@ apiVersion: v1
 kind: Service
 metadata:
   name: {{ include "merlin.fullname" . }}
-  labels: {{- include "merlin.labels" . | nindent 4 }}
+  # component: gate is on the Service OBJECT (not just its pod selector) so the
+  # ServiceMonitor can select this Service alone. The Valkey/ClickHouse operators
+  # propagate name+instance onto their own Services, so those two labels do not
+  # identify Merlin's gate.
+  labels:
+    {{- include "merlin.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gate
 spec:
   type: {{ .Values.service.type }}
   selector: {{- include "merlin.gateSelectorLabels" . | nindent 4 }}

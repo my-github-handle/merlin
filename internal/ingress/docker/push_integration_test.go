@@ -85,7 +85,7 @@ func TestPushGoodUBIForwarded(t *testing.T) {
 	}
 	req := router.GateRequest{Source: "docker", Image: img, Target: "myreg.azurecr.io/app:v1"}
 	res, gateErr := h.router.Gate(ctx, req)
-	d, _ := h.outcome.Apply(ctx, "", SyncPublish(fp, req), req, res, gateErr, 0)
+	d, _ := h.outcome.Apply(ctx, "", SyncPublish(fp, req, nil), req, res, gateErr, 0)
 	if d.StatusCode != 201 {
 		t.Errorf("status = %d, want 201 (summary=%q)", d.StatusCode, d.Summary)
 	}
@@ -116,7 +116,7 @@ func TestPushCriticalCVERejected(t *testing.T) {
 	}
 	req := router.GateRequest{Image: img, Target: "myreg.azurecr.io/app:v1"}
 	res, gateErr := h.router.Gate(ctx, req)
-	d, _ := h.outcome.Apply(ctx, "", SyncPublish(fp, req), req, res, gateErr, 0)
+	d, _ := h.outcome.Apply(ctx, "", SyncPublish(fp, req, nil), req, res, gateErr, 0)
 	if d.StatusCode != 400 {
 		t.Errorf("status = %d, want 400", d.StatusCode)
 	}
@@ -146,7 +146,7 @@ func TestPushAlpineRejectedByBasePolicy(t *testing.T) {
 	}
 	req := router.GateRequest{Image: img, Target: "myreg.azurecr.io/app:v1"}
 	res, gateErr := h.router.Gate(ctx, req)
-	d, _ := h.outcome.Apply(ctx, "", SyncPublish(fp, req), req, res, gateErr, 0)
+	d, _ := h.outcome.Apply(ctx, "", SyncPublish(fp, req, nil), req, res, gateErr, 0)
 	if d.StatusCode != 400 {
 		t.Errorf("status = %d, want 400 (alpine base)", d.StatusCode)
 	}

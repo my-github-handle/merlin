@@ -182,3 +182,69 @@ func TestSetScannerDBAge(t *testing.T) {
 		t.Fatal("nil metrics")
 	}
 }
+
+// labelledCounters returns name{label=value,...} -> value for one counter family,
+// so a test can assert the LABEL SET, not just a total. For merlin_acr_push_total
+// and merlin_requests_total the labels are the whole point of the metric.
+func labelledCounters(t *testing.T, reg *prometheus.Registry, name string) map[string]float64 {
+	t.Helper()
+	got := map[string]float64{}
+	for _, mf := range mustGather(t, reg) {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			parts := make([]string, 0, len(m.GetLabel()))
+			for _, lp := range m.GetLabel() {
+				parts = append(parts, lp.GetName()+"="+lp.GetValue())
+			}
+			got[strings.Join(parts, ",")] = counterValue(m)
+		}
+	}
+	return got
+}
+
+// TestACRPushIsCountedPerRegistryAndCause covers what the registry+result pair was
+// added for: two tenants pushing to two registries, one of them failing on auth,
+// must be distinguishable. A single un-labelled error counter made exactly this
+// case unreadable for two days.
+func TestACRPushIsCountedPerRegistryAndCause(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := NewMetrics(reg)
+	m.ObserveACRPush("a.azurecr.io", "ok")
+	m.ObserveACRPush("a.azurecr.io", "ok")
+	m.ObserveACRPush("b.azurecr.io", "auth")
+
+	got := labelledCounters(t, reg, "merlin_acr_push_total")
+	for key, want := range map[string]float64{
+		"registry=a.azurecr.io,result=ok":   2,
+		"registry=b.azurecr.io,result=auth": 1,
+	} {
+		if got[key] != want {
+			t.Errorf("merlin_acr_push_total{%s} = %v, want %v (all: %v)", key, got[key], want, got)
+		}
+	}
+}
+
+// TestRequestsAreCountedByMethodRouteStatus pins the one metric that sees requests
+// answered before a gate decision exists — the 401s and 404s that make the gate
+// look idle while clients are being turned away.
+func TestRequestsAreCountedByMethodRouteStatus(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := NewMetrics(reg)
+	m.ObserveRequest("PUT", "manifest", "201")
+	m.ObserveRequest("PUT", "manifest", "400")
+	m.ObserveRequest("GET", "base", "401")
+	m.ObserveRequest("GET", "base", "401")
+
+	got := labelledCounters(t, reg, "merlin_requests_total")
+	for key, want := range map[string]float64{
+		"method=PUT,route=manifest,status=201": 1,
+		"method=PUT,route=manifest,status=400": 1,
+		"method=GET,route=base,status=401":     2,
+	} {
+		if got[key] != want {
+			t.Errorf("merlin_requests_total{%s} = %v, want %v (all: %v)", key, got[key], want, got)
+		}
+	}
+}

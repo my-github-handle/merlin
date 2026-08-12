@@ -246,3 +246,47 @@ func TestImagesDegradesOnError(t *testing.T) {
 		t.Error("expected Errored=true when reader fails")
 	}
 }
+
+// TestOverviewACRSuccessSumsAllRegistriesAndClasses covers the two ways the
+// registry+result label pair could silently break this figure. Reading a single
+// series would report ONE tenant's registry as if it were the whole fleet, and
+// looking for result="error" would find nothing at all now that failures are split
+// into causes — either bug shows a healthy 100% during an outage.
+func TestOverviewACRSuccessSumsAllRegistriesAndClasses(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	c := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "merlin_acr_push_total", Help: "x",
+	}, []string{"registry", "result"})
+	reg.MustRegister(c)
+	// 60 + 30 = 90 ok, 5 + 4 + 1 = 10 failed, across two registries.
+	c.WithLabelValues("a.azurecr.io", "ok").Add(60)
+	c.WithLabelValues("b.azurecr.io", "ok").Add(30)
+	c.WithLabelValues("a.azurecr.io", "auth").Add(5)
+	c.WithLabelValues("b.azurecr.io", "timeout").Add(4)
+	c.WithLabelValues("b.azurecr.io", "network").Add(1)
+
+	now := func() time.Time { return time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC) }
+	svc := NewService(fakeReader{}, reg, now)
+
+	vm, err := svc.Overview(context.Background(), Range1d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vm.ACRPushSuccess != 90 {
+		t.Errorf("ACRPushSuccess = %v, want 90", vm.ACRPushSuccess)
+	}
+}
+
+// TestOverviewACRSuccessNoPushes pins the empty case: with no pushes recorded the
+// figure stays at zero rather than dividing by zero into NaN, which renders as
+// "NaN%" on the overview page.
+func TestOverviewACRSuccessNoPushes(t *testing.T) {
+	svc := newTestServiceWithMetrics(fakeReader{}, false)
+	vm, err := svc.Overview(context.Background(), Range1d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vm.ACRPushSuccess != 0 {
+		t.Errorf("ACRPushSuccess = %v, want 0 with no pushes", vm.ACRPushSuccess)
+	}
+}

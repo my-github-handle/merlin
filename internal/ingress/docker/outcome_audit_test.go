@@ -55,7 +55,7 @@ func TestOutcome_RecordsPassDecision(t *testing.T) {
 		ScannerDBVersion: "db-v1",
 	}
 
-	_, err := o.Apply(context.Background(), "", SyncPublish(&acr.FakePusher{}, req), req, res, nil, 0)
+	_, err := o.Apply(context.Background(), "", SyncPublish(&acr.FakePusher{}, req, nil), req, res, nil, 0)
 	if err != nil {
 		t.Fatalf("Apply failed: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestOutcome_RecordsFailDecision(t *testing.T) {
 		ScannerDBVersion: "db-v1",
 	}
 
-	_, err := o.Apply(context.Background(), "", SyncPublish(&acr.FakePusher{}, req), req, res, nil, 0)
+	_, err := o.Apply(context.Background(), "", SyncPublish(&acr.FakePusher{}, req, nil), req, res, nil, 0)
 	if err != nil {
 		t.Fatalf("Apply failed: %v", err)
 	}
@@ -180,7 +180,7 @@ func TestOutcome_RecordsInfraErrorDecision(t *testing.T) {
 	}
 	res := policy.Result{Passed: false}
 
-	_, err := o.Apply(context.Background(), "", SyncPublish(&acr.FakePusher{}, req), req, res, errFake, 0)
+	_, err := o.Apply(context.Background(), "", SyncPublish(&acr.FakePusher{}, req, nil), req, res, errFake, 0)
 	if err != nil {
 		t.Fatalf("Apply failed: %v", err)
 	}
@@ -210,7 +210,7 @@ func TestOutcome_NilRecorderDoesNotPanic(t *testing.T) {
 	}
 	res := policy.Result{Passed: true}
 
-	_, err := o.Apply(context.Background(), "", SyncPublish(&acr.FakePusher{}, req), req, res, nil, 0)
+	_, err := o.Apply(context.Background(), "", SyncPublish(&acr.FakePusher{}, req, nil), req, res, nil, 0)
 	if err != nil {
 		t.Fatalf("Apply failed: %v", err)
 	}

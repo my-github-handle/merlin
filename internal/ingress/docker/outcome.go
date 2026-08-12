@@ -33,8 +33,18 @@ type DecisionRecorder interface {
 // it. All methods must be safe for concurrent use (Apply runs per request).
 type MetricsObserver interface {
 	ObservePush(passed bool)
-	ObserveACRPush(ok bool)
 	ObserveScanDuration(seconds float64)
+}
+
+// ACRPushObserver counts real ACR push attempts, by registry and cause. It is
+// satisfied by observability.Metrics and consumed by SyncPublish, which is one of
+// the two places that actually calls pusher.Push (the other is the promotion
+// worker). Deliberately NOT part of MetricsObserver: once promotion moved off the
+// manifest-PUT path, Outcome.Apply's publish step became an enqueue in the
+// deployed configuration, and counting an enqueue as an ACR push would have
+// reported queue health as registry health.
+type ACRPushObserver interface {
+	ObserveACRPush(registry, result string)
 }
 
 // Outcome is the Docker outcome adapter: push-or-reject the synchronous push.
@@ -59,9 +69,17 @@ type PublishFunc func(ctx context.Context) error
 // SyncPublish is the inline publication action: push the assembled OCI layout to
 // the target registry and wait for it. This is what Apply did before publication
 // became injectable, and it remains the behaviour when no promotion queue is wired.
-func SyncPublish(pusher acr.Pusher, req router.GateRequest) PublishFunc {
+//
+// obs may be nil (hermetic tests). It records the attempt against the target
+// registry with its failure class, because this is a real ACR push — see
+// ACRPushObserver for why the caller cannot do this on Apply's behalf.
+func SyncPublish(pusher acr.Pusher, req router.GateRequest, obs ACRPushObserver) PublishFunc {
 	return func(ctx context.Context) error {
-		return pusher.Push(ctx, req.Image.OCIPath, req.Target)
+		err := pusher.Push(ctx, req.Image.OCIPath, req.Target)
+		if obs != nil {
+			obs.ObserveACRPush(acr.RegistryFromTarget(req.Target), string(acr.ClassifyPushError(err)))
+		}
+		return err
 	}
 }
 
@@ -120,16 +138,10 @@ func (o *Outcome) Apply(ctx context.Context, pushID string, publish PublishFunc,
 	// point — the phase should collapse to near zero.
 	o.observePromote(time.Since(promoteStart))
 	if err != nil {
-		if o.Metrics != nil {
-			o.Metrics.ObserveACRPush(false)
-		}
 		// The scan PASSED but the image is not published. Record as an infra failure
 		// (not a policy rejection) with the cause so the report page can say so.
 		o.recordDecision(ctx, pushID, req, res, false, durMS, fmt.Errorf("publish: %w", err))
 		return Decision{StatusCode: 502, Summary: "passed but publication failed", ReportURL: reportURL, InfraError: true}, fmt.Errorf("publish: %w", err)
-	}
-	if o.Metrics != nil {
-		o.Metrics.ObserveACRPush(true)
 	}
 	o.recordDecision(ctx, pushID, req, res, true, durMS, nil)
 	return Decision{StatusCode: 201, Summary: summary, ReportURL: reportURL}, nil

@@ -21,6 +21,7 @@ type Metrics struct {
 	pendingPromotes  prometheus.Gauge
 	scratchBytes     prometheus.Gauge
 	acrPush          *prometheus.CounterVec
+	requestsTotal    *prometheus.CounterVec
 }
 
 // NewMetrics registers and returns Merlin's metrics on reg.
@@ -78,13 +79,30 @@ func NewMetrics(reg *prometheus.Registry) *Metrics {
 			Name: "merlin_scratch_bytes",
 			Help: "Bytes held by Merlin's scratch directories on the local volume.",
 		}),
+		// registry names WHICH tenant registry a push went to and result names WHY it
+		// failed (acr.PushErrorClass). With only a result label, a tenant losing
+		// AcrPush looked exactly like a network blip — see PR 2431, where an
+		// unlabelled error counter hid a persistent 401 for two days. Cardinality is
+		// one registry per tenant (a handful) x 6 closed classes.
 		acrPush: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "merlin_acr_push_total",
-			Help: "ACR push attempts by result.",
-		}, []string{"result"}),
+			Help: "ACR push attempts by registry and result (ok, auth, not_found, timeout, network, other).",
+		}, []string{"registry", "result"}),
+		// Every other counter here is decision-shaped, so a request that fails BEFORE a
+		// decision exists — 401 at auth, 404 on an unknown host, 503 shed at the upload
+		// gate, 405 — is currently invisible: the gate looks idle while clients are being
+		// turned away. This is the only metric that sees those.
+		//
+		// route is a bounded CLASS, never the raw path: paths carry repo names, tags and
+		// digests, so labelling them would grow a new time series per image pushed.
+		requestsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "merlin_requests_total",
+			Help: "Docker V2 requests by method, route class, and response status.",
+		}, []string{"method", "route", "status"}),
 	}
 	reg.MustRegister(m.pushTotal, m.scanDuration, m.assembleDuration, m.queueWait,
-		m.promoteDuration, m.scannerDBAge, m.pendingPromotes, m.scratchBytes, m.acrPush)
+		m.promoteDuration, m.scannerDBAge, m.pendingPromotes, m.scratchBytes, m.acrPush,
+		m.requestsTotal)
 	return m
 }
 
@@ -118,12 +136,23 @@ func (m *Metrics) ObservePromoteDuration(seconds float64)  { m.promoteDuration.O
 func (m *Metrics) SetPendingPromotions(n int)  { m.pendingPromotes.Set(float64(n)) }
 func (m *Metrics) SetScratchBytes(bytes int64) { m.scratchBytes.Set(float64(bytes)) }
 
-func (m *Metrics) ObserveACRPush(ok bool) {
-	result := "error"
-	if ok {
-		result = "ok"
-	}
-	m.acrPush.WithLabelValues(result).Inc()
+// ObserveACRPush counts one ACR push attempt against the registry it targeted.
+// result is an acr.PushErrorClass value: "ok" on success, else the coarse cause.
+//
+// It is called by whoever actually invokes pusher.Push — SyncPublish inline, or
+// the promotion worker when publication is deferred — and NOT by the gate
+// outcome. Once promotion moved off the manifest-PUT path, the outcome's
+// "publish" step became an enqueue, so counting it here too would have counted
+// every async push twice and reported queue health as ACR health.
+func (m *Metrics) ObserveACRPush(registry, result string) {
+	m.acrPush.WithLabelValues(registry, result).Inc()
+}
+
+// ObserveRequest counts one HTTP request by method, bounded route class, and
+// response status. Callers must pass a route CLASS, not a path — see the
+// requestsTotal registration and docker.routeClass.
+func (m *Metrics) ObserveRequest(method, route, status string) {
+	m.requestsTotal.WithLabelValues(method, route, status).Inc()
 }
 
 // Handler returns the Prometheus metrics HTTP handler.

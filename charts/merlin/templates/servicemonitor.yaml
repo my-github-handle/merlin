@@ -1,0 +1,47 @@
+{{- /*
+ServiceMonitor for the Prometheus Operator.
+
+Merlin has exposed /metrics on port 9090 since the first release, but nothing ever
+told Prometheus to scrape it — so every counter, histogram and gauge in
+internal/observability existed only in a pod's memory and was lost on restart. This
+template is the missing half.
+
+Gated on metrics.serviceMonitor.enabled and DEFAULT OFF: the manifest uses
+monitoring.coreos.com/v1, so applying it to a cluster without the Prometheus
+Operator CRDs fails the whole release ("no matches for kind ServiceMonitor"). It is
+turned on per environment, where the operator is known to be installed.
+*/ -}}
+{{- if .Values.metrics.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "merlin.fullname" . }}
+  {{- with .Values.metrics.serviceMonitor.namespace }}
+  namespace: {{ . }}
+  {{- end }}
+  labels:
+    {{- include "merlin.labels" . | nindent 4 }}
+    {{- /* Many clusters run Prometheus with a serviceMonitorSelector; without the
+           label it expects, this object is created and silently never scraped. */}}
+    {{- with .Values.metrics.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  {{- /* Selects the SERVICE, not the pods. name+instance alone would also match the
+         Valkey/ClickHouse Services (the operators propagate those two labels), so the
+         component discriminator is required — see the Service's own labels. */}}
+  selector:
+    matchLabels: {{- include "merlin.gateSelectorLabels" . | nindent 6 }}
+  endpoints:
+    {{- /* By PORT NAME, not number: the Service's metrics port is configurable
+           (metrics.port), and a hardcoded number silently stops matching when it
+           changes. */}}
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.metrics.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.metrics.serviceMonitor.scrapeTimeout }}
+      scheme: http
+{{- end }}

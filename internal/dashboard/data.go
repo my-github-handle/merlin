@@ -176,6 +176,32 @@ func (s *Service) counterValue(name, label, value string) float64 {
 	return 0
 }
 
+// counterSumWhere totals every series of a counter whose label equals value
+// (equal=true) or differs from it (equal=false). Unlike counterValue it does not
+// stop at the first match, so it stays correct for counters that carry a
+// dimension the caller is not selecting on — e.g. summing across registries.
+func (s *Service) counterSumWhere(name, label, value string, equal bool) float64 {
+	mfs, err := s.g.Gather()
+	if err != nil {
+		return 0
+	}
+	var total float64
+	for _, mf := range mfs {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			if matchLabel(m, label, value) != equal {
+				continue
+			}
+			if c := m.GetCounter(); c != nil {
+				total += c.GetValue()
+			}
+		}
+	}
+	return total
+}
+
 func matchLabel(m *dto.Metric, label, value string) bool {
 	for _, lp := range m.GetLabel() {
 		if lp.GetName() == label && lp.GetValue() == value {
@@ -212,8 +238,13 @@ func (s *Service) Overview(ctx context.Context, rng Range) (OverviewVM, error) {
 		vm.Stats = toStatsVM(st)
 	}
 	vm.ScannerDBAgeDays = s.gaugeValue("merlin_scanner_db_age_days")
-	ok := s.counterValue("merlin_acr_push_total", "result", "ok")
-	errc := s.counterValue("merlin_acr_push_total", "result", "error")
+	// Sum across registries, and treat every non-"ok" result as a failure. Both
+	// matter since merlin_acr_push_total gained a registry label and split its
+	// failures into causes: counterValue returns the FIRST matching series, so it
+	// would report one tenant's pushes as if they were all of them, and there is no
+	// longer any series labelled result="error" to find.
+	ok := s.counterSumWhere("merlin_acr_push_total", "result", "ok", true)
+	errc := s.counterSumWhere("merlin_acr_push_total", "result", "ok", false)
 	if ok+errc > 0 {
 		vm.ACRPushSuccess = ok / (ok + errc) * 100
 	}

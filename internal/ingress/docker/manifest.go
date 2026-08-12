@@ -319,7 +319,7 @@ func (h *Handler) handleManifest(w http.ResponseWriter, r *http.Request, t *tena
 	// publication is synchronous or queued — it renders the same pass/reject/infra
 	// outcomes either way — but only this scope holds the resolved tenant, the
 	// scratch dir, and the staged blob digests the worker will need.
-	publish := SyncPublish(t.Pusher, req)
+	publish := SyncPublish(t.Pusher, req, h.acrPushObserver())
 	if h.promoter != nil {
 		// Every field the worker's Cleanup needs must be carried on the Job: it
 		// releases blob ref-counts by ConfigDig + Layers and removes ScratchDir.
@@ -406,6 +406,19 @@ func (h *Handler) observeAssemble(d time.Duration) {
 	if m, ok := h.outcome.Metrics.(interface{ ObserveAssembleDuration(float64) }); ok {
 		m.ObserveAssembleDuration(d.Seconds())
 	}
+}
+
+// acrPushObserver returns the metrics sink as an ACRPushObserver, or nil when the
+// configured sink does not count ACR pushes (hermetic tests). Same optional
+// assertion as above, and for the same reason.
+func (h *Handler) acrPushObserver() ACRPushObserver {
+	if h.outcome == nil || h.outcome.Metrics == nil {
+		return nil
+	}
+	if o, ok := h.outcome.Metrics.(ACRPushObserver); ok {
+		return o
+	}
+	return nil
 }
 
 func (h *Handler) observeQueueWait(d time.Duration) {

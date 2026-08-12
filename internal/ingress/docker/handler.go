@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,7 +35,24 @@ type Handler struct {
 	tokenHandler   *TokenHandler
 	promoter       promote.Promoter // nil = publish to ACR synchronously
 	maxPending     int              // 0 = no admission bound on the promotion backlog
+	requests       RequestObserver  // nil = no per-request counting (hermetic tests)
 }
+
+// RequestObserver receives per-request telemetry. observability.Metrics satisfies
+// it. It is a local interface for the same reason MetricsObserver is: it keeps the
+// ingress package free of an observability import.
+//
+// It exists because every other counter in Merlin is decision-shaped, so a request
+// answered BEFORE a decision exists — 401 at auth, 404 on an unknown host, 503 shed
+// at the upload gate — is counted nowhere. Those are precisely the failures where
+// the gate looks idle while clients are being turned away.
+type RequestObserver interface {
+	ObserveRequest(method, route, status string)
+}
+
+// SetRequestObserver wires per-request counting. Nil disables it. Safe to call only
+// before the handler starts serving.
+func (h *Handler) SetRequestObserver(o RequestObserver) { h.requests = o }
 
 // SetPromoter defers ACR publication to a durable queue, so the manifest PUT is not
 // held across the push. Nil keeps the synchronous push (hermetic tests,
@@ -111,8 +129,45 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 	start := time.Now()
 	h.mux.ServeHTTP(sw, r)
+	if h.requests != nil {
+		// After the mux, so sw.status is the status actually written — including the
+		// ones no handler in this package chose (mux 404s) and the ones written from
+		// deep inside a helper (the upload gate's 503).
+		h.requests.ObserveRequest(r.Method, routeClass(r.URL.Path), strconv.Itoa(sw.status))
+	}
 	log.Printf("v2 %s %s%s -> %d (%dB, %s)",
 		r.Method, r.URL.Path, queryForLog(r.URL.RawQuery), sw.status, sw.written, time.Since(start).Round(time.Millisecond))
+}
+
+// routeClass maps a request path to a bounded label value.
+//
+// This is the cardinality guard, and it is load-bearing: a raw path carries the
+// repo, the tag and often a digest, all attacker-or-CI controlled, so labelling
+// paths would create a new permanent time series per image pushed and eventually
+// take the scrape target down. Only these classes are ever emitted.
+//
+// Order matters: the upload path also contains "/blobs/", so blob_upload must be
+// tested first, and the bounded /v2/ prefix must come last so it does not swallow
+// the specific classes.
+func routeClass(path string) string {
+	switch {
+	case path == "/v2/" || path == "/v2":
+		return "base"
+	case path == "/token":
+		return "token"
+	case strings.HasPrefix(path, "/reports/"):
+		return "report"
+	case strings.Contains(path, "/blobs/uploads/"):
+		return "blob_upload"
+	case strings.Contains(path, "/blobs/"):
+		return "blob"
+	case strings.Contains(path, "/manifests/"):
+		return "manifest"
+	case strings.HasPrefix(path, "/v2/"):
+		return "v2_other"
+	default:
+		return "other"
+	}
 }
 
 // statusWriter records the response status and byte count for request logging.

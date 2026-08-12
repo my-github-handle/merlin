@@ -16,6 +16,24 @@ service:
   port: 5000
 metrics:
   port: 9090
+  serviceMonitor:
+    # Default OFF because the manifest needs the Prometheus Operator CRDs — on a
+    # cluster without them the whole release fails with "no matches for kind
+    # ServiceMonitor". Enable per environment.
+    #
+    # Until this is on, /metrics is served and scraped by nobody: every counter and
+    # histogram lives only in the pod's memory and is lost on restart.
+    enabled: false
+    # Empty = same namespace as the release.
+    namespace: ""
+    # Labels the cluster's Prometheus uses to pick up ServiceMonitors
+    # (serviceMonitorSelector). Without the label it expects, the object is created
+    # and silently never scraped — check the Prometheus CR before enabling.
+    labels: {}
+    interval: 30s
+    # Below interval: Merlin's /metrics is a handful of families, so a scrape that
+    # takes longer than this means the pod is in trouble, not that the payload is big.
+    scrapeTimeout: 10s
 dashboard:
   # Observability dashboard (on by default). The Service/containerPort are emitted
   # unless merlin.server.dashboardAddr is "off". Port must match dashboardAddr below.

@@ -45,6 +45,9 @@ type Worker struct {
 	// Cleanup releases the job's scratch dir and staged blob ref-counts. It runs
 	// only when no retry will follow — see handle.
 	Cleanup func(ctx context.Context, j Job) error
+	// Metrics receives promotion telemetry. ObserveACRPush is reached through an
+	// optional interface assertion (see observeACRPush) so existing fakes that only
+	// implement ObservePromoteDuration keep compiling.
 	Metrics interface{ ObservePromoteDuration(float64) }
 	// MaxAttempts bounds pushes per job. Zero means defaultMaxAttempts. Without a
 	// bound, a permanently failing push (revoked credentials, deleted repo)
@@ -189,6 +192,12 @@ func (w *Worker) handle(ctx context.Context, j Job) {
 		// ACR is the problem.
 		w.Metrics.ObservePromoteDuration(time.Since(start).Seconds())
 	}
+	// This is the REAL ACR push in the deployed configuration — the gate's publish
+	// step only enqueued this job — so the push counter is incremented here, by
+	// registry and cause. Retries count separately on purpose: three attempts
+	// against a revoked credential are three auth failures, and collapsing them
+	// would hide how long the condition persisted.
+	w.observeACRPush(acr.RegistryFromTarget(j.Target), string(acr.ClassifyPushError(err)))
 	if err != nil {
 		w.fail(ctx, j, fmt.Errorf("acr push: %w", err))
 		return
@@ -257,6 +266,19 @@ func (w *Worker) retire(ctx context.Context, j Job, cause error) {
 		log.Printf("promote %s: retired but ack failed (will be retried): %v", j.PushID, aerr)
 	}
 	w.cleanup(ctx, j)
+}
+
+// observeACRPush records one real ACR push attempt. Optional-interface so the
+// many test fakes that only implement ObservePromoteDuration keep compiling.
+func (w *Worker) observeACRPush(registry, result string) {
+	if w.Metrics == nil {
+		return
+	}
+	if m, ok := w.Metrics.(interface {
+		ObserveACRPush(registry, result string)
+	}); ok {
+		m.ObserveACRPush(registry, result)
+	}
 }
 
 func (w *Worker) finalize(ctx context.Context, j Job, ok bool, detail string) {

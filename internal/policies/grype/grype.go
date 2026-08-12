@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/merlin-gate/merlin/internal/policy"
 )
@@ -20,10 +21,32 @@ type Policy struct {
 	runner    Runner
 	threshold string
 	observe   bool
+	dbAge     DBAgeObserver
+	now       func() time.Time
+}
+
+// DBAgeObserver receives the age of the scanner's vulnerability DB, in days.
+// observability.Metrics satisfies it.
+//
+// The gauge behind it existed and was rendered on the dashboard long before
+// anything set it, which is worse than not having it: an unset gauge reads as
+// "0 days old" — the healthiest possible value — so a scanner whose DB had stopped
+// updating (and was therefore passing images with known CVEs) looked perfectly
+// fresh. The grype policy is the only component that knows the DB's build date, so
+// the observation belongs here.
+type DBAgeObserver interface {
+	SetScannerDBAgeDays(days float64)
 }
 
 // Option configures a Policy.
 type Option func(*Policy)
+
+// WithDBAgeObserver reports the scanner DB's age after every scan. Nil is a no-op.
+func WithDBAgeObserver(o DBAgeObserver) Option { return func(p *Policy) { p.dbAge = o } }
+
+// withClock overrides the clock used to derive the DB age. Unexported: only the
+// tests need a fixed now.
+func withClock(now func() time.Time) Option { return func(p *Policy) { p.now = now } }
 
 // unenforcedPrefix marks a reason that was recorded but did NOT block the push.
 // The engine keys Result.Unenforced off any reason on a passing verdict, and the
@@ -58,6 +81,28 @@ func New(runner Runner, threshold string, opts ...Option) *Policy {
 
 func (p *Policy) Name() string { return "grype" }
 
+// observeDBAge publishes the DB's age in days.
+//
+// A zero built time is left UNREPORTED rather than published as zero days: zero is
+// the freshest value the gauge can hold, so writing it on missing data would hide
+// exactly the condition the metric exists to catch. A build time in the future
+// (pod/DB clock skew) is clamped to zero, since a negative age breaks any
+// "older than N days" comparison.
+func (p *Policy) observeDBAge(built time.Time) {
+	if p.dbAge == nil || built.IsZero() {
+		return
+	}
+	now := time.Now
+	if p.now != nil {
+		now = p.now
+	}
+	age := now().Sub(built)
+	if age < 0 {
+		age = 0
+	}
+	p.dbAge.SetScannerDBAgeDays(age.Hours() / 24)
+}
+
 func (p *Policy) Evaluate(ctx context.Context, img policy.StagedImage) (policy.Verdict, error) {
 	if img.OCIPath == "" {
 		return policy.Verdict{}, fmt.Errorf("grype scan: empty OCI path for image")
@@ -66,6 +111,9 @@ func (p *Policy) Evaluate(ctx context.Context, img policy.StagedImage) (policy.V
 	if err != nil {
 		return policy.Verdict{}, fmt.Errorf("grype scan: %w", err)
 	}
+	// Every scan re-reports the age. The DB is refreshed out-of-band (image rebuild),
+	// so a scan is the only moment Merlin learns anything about it.
+	p.observeDBAge(rep.DBBuilt)
 	min := severityRank[strings.ToUpper(p.threshold)]
 	var reasons []string
 	for _, f := range rep.Findings {
