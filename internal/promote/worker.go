@@ -2,6 +2,7 @@ package promote
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -268,10 +269,35 @@ func (w *Worker) localize(ctx context.Context, j Job) (Job, bool) {
 	return j, true
 }
 
+// terminalError is implemented by errors that report whether a retry can ever
+// succeed — internal/staging's *BlobMissingError is the one that matters in
+// production.
+//
+// It is matched structurally rather than by importing staging: this package is
+// deliberately independent of which blob store staged the image (the worker also
+// runs in hermetic wiring with no staging store at all), and an import for the sake
+// of one type check would invert that. errors.As finds it through fmt.Errorf("%w")
+// wrapping, so the classification survives localize's own message.
+type terminalError interface{ Terminal() bool }
+
 // fail decides between retry and retirement. A job that has spent its budget is
-// retired; anything else goes back to the head of the queue with its scratch dir
-// intact.
+// retired, as is one whose cause says no retry can help; anything else goes back to
+// the head of the queue with its scratch dir intact.
+//
+// Terminal causes skip the budget entirely. A promotion whose staged blob has been
+// deleted fails identically on all three attempts — there is no upload in flight to
+// wait for — and each attempt writes its own contradicting audit row. Spending the
+// budget on it delays the honest verdict and triples the noise.
+//
+// The default for an unclassified error is RETRY, and that asymmetry is deliberate:
+// retrying something hopeless wastes two attempts, while abandoning something
+// retryable loses an approved image after its client was told 201.
 func (w *Worker) fail(ctx context.Context, j Job, cause error) {
+	var t terminalError
+	if errors.As(cause, &t) && t.Terminal() {
+		w.retire(ctx, j, cause)
+		return
+	}
 	if j.Attempts >= w.maxAttempts() {
 		w.retire(ctx, j, cause)
 		return

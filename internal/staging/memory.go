@@ -34,7 +34,10 @@ func (m *memBlobStore) Get(_ context.Context, key string) (io.ReadCloser, error)
 	defer m.mu.Unlock()
 	b, ok := m.data[key]
 	if !ok {
-		return nil, fmt.Errorf("blob %q not found", key)
+		// Same terminal type the Azure store returns for a 404, so the hermetic tests
+		// of the assemble path exercise the real classification rather than a
+		// friendlier stand-in.
+		return nil, &BlobMissingError{Key: key}
 	}
 	return io.NopCloser(bytes.NewReader(b)), nil
 }

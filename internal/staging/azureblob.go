@@ -7,6 +7,7 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/bloberror"
 )
 
 type azureBlobStore struct {
@@ -53,9 +54,27 @@ func (a *azureBlobStore) Put(ctx context.Context, key string, r io.Reader) error
 func (a *azureBlobStore) Get(ctx context.Context, key string) (io.ReadCloser, error) {
 	resp, err := a.client.DownloadStream(ctx, a.container, key, nil)
 	if err != nil {
-		return nil, err
+		return nil, classifyBlobGetError(key, err)
 	}
 	return resp.Body, nil
+}
+
+// classifyBlobGetError turns "this blob does not exist" into *BlobMissingError and
+// leaves every other failure exactly as it arrived.
+//
+// The narrowness is the point. Only BlobNotFound is mapped: ContainerNotFound is
+// configuration and ServerBusy or a dial error is weather, and both of those still
+// deserve the promotion worker's retry budget. Mapping on the 404 STATUS instead of
+// the error code would have swept ContainerNotFound in with it and reported a missing
+// layer digest for a misconfigured account.
+func classifyBlobGetError(key string, err error) error {
+	if bloberror.HasCode(err, bloberror.BlobNotFound) {
+		// Wrapped, not replaced: the azcore error carries the request ID that Azure
+		// support asks for, and discarding it would make a storage-side investigation
+		// impossible.
+		return fmt.Errorf("%w: %w", &BlobMissingError{Key: key}, err)
+	}
+	return err
 }
 
 func (a *azureBlobStore) Delete(ctx context.Context, key string) error {
