@@ -224,10 +224,22 @@ metrics:
 ```
 
 If that selector is non-empty and `labels` does not carry the label it expects, the
-ServiceMonitor is created and silently never scraped — check it first:
+ServiceMonitor is created and silently never scraped. Two selectors have to accept you,
+and an empty map `{}` means **all** for both — it is only an *absent*
+`serviceMonitorNamespaceSelector` that restricts a Prometheus to its own namespace:
 
 ```bash
-kubectl -n <prom-ns> get prometheus -o jsonpath='{.items[*].spec.serviceMonitorSelector}'
+kubectl get prometheus -A -o \
+  jsonpath='{range .items[*]}{.metadata.namespace}{" sm="}{.spec.serviceMonitorSelector}{" ns="}{.spec.serviceMonitorNamespaceSelector}{" replicas="}{.spec.replicas}{"\n"}{end}'
+```
+
+Check `replicas` in the same breath: a Prometheus scaled to 0 accepts your
+ServiceMonitor on paper and scrapes nothing. The only proof is asking the running
+instance for its targets:
+
+```bash
+kubectl get --raw "/api/v1/namespaces/<prom-ns>/pods/<prom-pod>:9090/proxy/api/v1/targets?state=active" \
+  | grep -o '"job":"merlin"' | head
 ```
 
 Without the operator, configure your Prometheus instance to scrape:
