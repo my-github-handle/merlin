@@ -222,29 +222,12 @@ func TestWorkerSurvivesRecoverFailure(t *testing.T) {
 	}
 }
 
-// TestWorkerNegativeRecoverAfterUsesTheDefaultWindow pins the guard on a nonsense
-// window. A negative RecoverAfter means "claimed in the future", which would
-// reclaim nothing at all — while the zero value deliberately means the opposite
-// (reclaim everything). Silently doing neither is the trap; the default window is
-// what recover() substitutes.
-func TestWorkerNegativeRecoverAfterUsesTheDefaultWindow(t *testing.T) {
-	q := newFaultQueue()
-	w := testWorker(&Worker{
-		Queue:        q,
-		Pushers:      func(string) (acr.Pusher, error) { return &fakePusher{}, nil },
-		Recorder:     &fakeFinalizer{},
-		RecoverAfter: -time.Minute,
-	})
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go w.Run(ctx)
-
-	waitFor(t, func() bool { return len(q.windows()) > 0 })
-	if got := q.windows()[0]; got != defaultRecoverAfter {
-		t.Errorf("recover window = %v, want %v (a negative window reclaims nothing)", got, defaultRecoverAfter)
-	}
-}
+// The negative-RecoverAfter case that used to live here moved into
+// TestWorkerRecoveryWindowNeverReclaimsLiveClaims (worker_recovery_test.go), which
+// covers zero and negative in one table. Its comment here asserted that "the zero
+// value deliberately means the opposite (reclaim everything)" — production proved
+// that reading wrong, and a test comment stating the bug as the contract is worse
+// than no comment.
 
 // TestWorkerCleansUpEvenWhenAckFails pins the published-but-unacked case. The image
 // IS in ACR at this point, so the only remaining question is disk: skipping Cleanup

@@ -57,13 +57,19 @@ type Worker struct {
 	// defaultPollInterval.
 	PollInterval time.Duration
 	// RecoverAfter is how old a claim must be before this worker treats it as
-	// abandoned. Zero means defaultRecoverAfter.
+	// abandoned. Any value <= 0 means defaultRecoverAfter — see recoverAfter, which
+	// is the only thing that may read this field.
 	//
-	// It must NOT default to zero-as-in-"reclaim everything": the chart runs
-	// replicaCount: 2, so a starting worker that reclaimed every outstanding claim
+	// It must NOT be passed to Queue.Recover as zero-as-in-"reclaim everything": the
+	// chart runs several replicas, so a worker that reclaimed every outstanding claim
 	// would re-promote whatever its sibling is pushing at that moment — a duplicate
 	// push, and for a tag target a tag that moves backward (see Queue.Recover).
-	// Tests that want the reclaim-everything behaviour set it explicitly.
+	//
+	// This is not hypothetical. It shipped: nothing set the field, recover() guarded
+	// only `< 0`, and Recover(ctx, 0) puts the cutoff at now, so every sweep on every
+	// replica stole every in-flight claim. See
+	// TestWorkerRecoveryWindowNeverReclaimsLiveClaims for what it cost. A test that
+	// wants a claim reclaimed immediately advances the queue's clock instead.
 	RecoverAfter time.Duration
 }
 
@@ -89,6 +95,39 @@ func (w *Worker) pollInterval() time.Duration {
 	return w.PollInterval
 }
 
+// recoverAfter is the claim age at which this worker considers a claim abandoned.
+//
+// Zero and negative both mean the default, and the reason they are folded together
+// here rather than at the call site is that they used to fail in OPPOSITE
+// directions — zero reclaimed every live claim, negative reclaimed none — while
+// looking equally like "unset".
+//
+// This is the only place the recovery WINDOW is derived. Run separately derives how
+// OFTEN to sweep, which is a different question with a different safe default — see
+// sweepEvery.
+func (w *Worker) recoverAfter() time.Duration {
+	if w.RecoverAfter <= 0 {
+		return defaultRecoverAfter
+	}
+	return w.RecoverAfter
+}
+
+// sweepEvery is how often Run looks for abandoned claims. It is deliberately NOT
+// recoverAfter: sweeping is cheap (two hash reads) and detection latency for a pod
+// that died mid-push is the whole point, so a worker sweeps every minute while only
+// reclaiming claims older than the 15-minute window.
+//
+// An explicit RecoverAfter still sets the cadence too, which keeps a test that wants
+// exactly one sweep able to get one by asking for a long window. That conflation is
+// harmless — the cadence only controls how often a bounded check runs — but it is
+// the reason the two are separate functions rather than one value.
+func (w *Worker) sweepEvery() time.Duration {
+	if w.RecoverAfter <= 0 {
+		return recoverErrorInterval
+	}
+	return w.RecoverAfter
+}
+
 // Run drains the queue until ctx is canceled.
 //
 // The ctx passed here must be the PROCESS lifetime context, never a request
@@ -96,10 +135,7 @@ func (w *Worker) pollInterval() time.Duration {
 // so a request-scoped context would be canceled immediately and every promotion
 // would fail with context.Canceled.
 func (w *Worker) Run(ctx context.Context) {
-	recoverEvery := w.RecoverAfter
-	if recoverEvery <= 0 {
-		recoverEvery = recoverErrorInterval
-	}
+	recoverEvery := w.sweepEvery()
 	nextRecover := time.Now() // recover once at start, then on this cadence
 	for {
 		if ctx.Err() != nil {
@@ -133,11 +169,7 @@ func (w *Worker) Run(ctx context.Context) {
 // that died mid-promotion. Errors are logged, not fatal: a failed recovery sweep
 // leaves the jobs claimed, and the next sweep tries again.
 func (w *Worker) recover(ctx context.Context) {
-	after := w.RecoverAfter
-	if after < 0 {
-		after = defaultRecoverAfter
-	}
-	jobs, err := w.Queue.Recover(ctx, after)
+	jobs, err := w.Queue.Recover(ctx, w.recoverAfter())
 	if err != nil {
 		log.Printf("promote: recover abandoned claims: %v", err)
 	}

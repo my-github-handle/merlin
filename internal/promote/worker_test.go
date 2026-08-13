@@ -357,16 +357,26 @@ func TestWorkerRetiresJobWhenTenantIsUnresolvable(t *testing.T) {
 
 // TestWorkerRecoversAbandonedClaimsOnStart pins the OOMKill recovery path from the
 // worker's side: a claim left by a dead predecessor must be promoted, not stranded.
+//
+// The claim is aged with the queue's clock rather than by widening the worker's
+// window to zero. That distinction is the whole point after the reclaim-everything
+// outage: this test and TestWorkerDoesNotStealAFreshSiblingClaim differ ONLY in how
+// old the claim is, so they cannot both pass unless the window is respected. Setting
+// RecoverAfter: 0 here made this test pass for the wrong reason and left the real
+// production configuration untested.
 func TestWorkerRecoversAbandonedClaimsOnStart(t *testing.T) {
-	q := NewMemoryQueue()
+	q := NewMemoryQueue().(*memoryQueue)
 	ctx := context.Background()
 	if err := q.Enqueue(ctx, Job{PushID: "orphan", Target: "acr.io/app:v1"}); err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
-	// A predecessor claimed it and died without acking.
+	// A predecessor claimed it well outside the recovery window and died without
+	// acking. Written before Run starts, so the worker goroutine never races it.
+	q.now = func() time.Time { return time.Now().Add(-defaultRecoverAfter - time.Minute) }
 	if _, ok, _ := q.Claim(ctx); !ok {
 		t.Fatal("setup: claim failed")
 	}
+	q.now = time.Now
 
 	pusher := &fakePusher{}
 	w := testWorker(&Worker{
@@ -374,9 +384,8 @@ func TestWorkerRecoversAbandonedClaimsOnStart(t *testing.T) {
 		Pushers:  func(string) (acr.Pusher, error) { return pusher, nil },
 		Recorder: &fakeFinalizer{},
 		Cleanup:  func(context.Context, Job) error { return nil },
-		// Zero reclaims every outstanding claim. Production uses a non-zero window so
-		// a sibling replica's live claim is not stolen mid-push.
-		RecoverAfter: 0,
+		// RecoverAfter unset: the production wiring, and the default window is what
+		// makes the aged claim recoverable.
 	})
 	runCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
