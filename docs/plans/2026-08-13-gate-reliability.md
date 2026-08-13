@@ -57,36 +57,78 @@ c3devops.azurecr.io/c3.ai/dcgm-exporter-fips:4.6.0.4.8.3-r1-202607310210:
 re-assemble …: get blob sha256:da82c86a…: RESPONSE 404: BlobNotFound
 ```
 
-**Root cause (hypothesis, needs one confirming query).** The async worker
-(`internal/promote/worker.go`, `defaultMaxAttempts = 3`) re-assembles the OCI layout from
-staged blobs at promotion time, but the staged blob is already gone from
-`merlin-staging`. The prime suspect is cleanup running against blobs the queued job still
-needs — `manifest.go:239` calls `h.store.Cleanup(context.WithoutCancel(ctx), …)` on the
-synchronous path, and the job's own comment warns that "every field the worker's Cleanup
-needs must be carried on the Job … Omitting any of them leaks the staged blobs". This is
-the inverse: not a leak, a premature delete. Timing corroborates — first occurrence is
-53 minutes after async promote went live.
+**Root cause — CONFIRMED 2026-08-13, and the hypothesis below was WRONG.** Kept as
+written so the refutation is legible, because the wrong answer is the plausible one and
+someone will reach for it again:
 
-**Confirm first (do not fix blind).** For one failing digest, establish the order of
-events: was the blob deleted by the sync path's `Cleanup` before the worker claimed the
-job, or did the upload never land? Query `tag_aliases` + the audit row for the same
-`push_id`, and list the staging container for a sibling digest of the same push.
+> ~~The prime suspect is cleanup running against blobs the queued job still needs —
+> `manifest.go:239` calls `h.store.Cleanup(context.WithoutCancel(ctx), …)` on the
+> synchronous path… not a leak, a premature delete.~~
 
-**Change.** Whichever the confirmation shows:
-- If premature cleanup: the sync path must not release blob ref-counts for a push whose
-  promotion is still queued. Ref-count release becomes the *worker's* responsibility on
-  terminal success/abandon, and the sync path releases only when `h.promoter == nil`.
-- If the blob never landed: the enqueue must happen after durable blob commit, not before.
+That deferred `Cleanup` is gated by `if promoted { return }`, and `promoted` is set by the
+publish closure only after `Promote` returned nil, so it never touches a queued job's
+blobs. The upload had not failed either: the gate scanned the image for 80s, which means
+`Assemble` had already read every blob.
 
-**Also, regardless of cause:** a job that exhausts `MaxAttempts` on a *missing input*
-should not be retried 3× (it cannot succeed — 404 is terminal, unlike a network error),
-and it must not report `passed` upstream. Distinguish terminal from retryable in the
-worker's error classification.
+**The actual cause is a reclaim-everything default in the recovery sweep.**
+`Worker.RecoverAfter` was never set in `internal/app/app.go`, so it was `0`, and
+`recover()` guarded only `after < 0`. `Queue.Recover(ctx, 0)` puts its cutoff at `now`, so
+**every** outstanding claim — including one made a millisecond ago by a live sibling — was
+requeued. With 10 replicas each sweeping every 60s, an in-flight promotion was duplicated
+within seconds. The 404 is then *self-inflicted*: the first duplicate to finish pushes and
+runs `Cleanup`, releasing the push's blob ref-counts and deleting the bytes; every other
+duplicate fails `get blob … 404 BlobNotFound`, burns 3 attempts, and each `retire()`
+writes a `passed=false, infra_error=true` row.
+
+**Evidence.** Push `49a1e2b3…` (`c3.ai/opensearch-fips:v3.7.0-r2-…`): one `passed` row at
+23:14:11 (`duration_ms=80102`) followed by **six** `infra_error` rows to 23:15:20, with
+six *different* pods logging attempts for it and `promote: recovered 2 abandoned
+promotion(s)` ten seconds after the gate passed. `push_id` is `crypto/rand` per request,
+so this is one job processed repeatedly, not six pushes.
+
+**What the harm actually is — mis-reporting, not (in the sampled cases) data loss.** Both
+sampled failing digests exist in ACR and match the gated `image_digest` exactly, and
+`merlin_acr_push_total` has only `result="ok"` series: **no ACR push has ever failed.** So
+the gate was telling the truth when it said `passed` and lying afterwards. One
+unproven detail, flagged rather than papered over: ACR `lastUpdateTime` for those tags
+predates the failures, most plausibly because a byte-identical manifest PUT is a
+server-side no-op — not verified.
+
+**Fixed in two commits.**
+1. `fix(promote): stop reclaiming live claims on every recovery sweep` — `recoverAfter()`
+   folds zero *and* negative into `defaultRecoverAfter` (they previously failed in
+   opposite directions while looking equally like "unset"), and `sweepEvery()` separates
+   *how often to look* from *how stale is stale*. `app.go` is deliberately left without an
+   explicit `RecoverAfter` so the corrected zero-value default stays the single source of
+   truth; a duplicate constant there would mask a recurrence.
+2. `fix(promote,staging): a missing staged blob is terminal, not retryable` — the plan's
+   "regardless of cause" clause. `staging.BlobMissingError` carries `Terminal() bool`;
+   `azureBlobStore.Get` maps only `bloberror.BlobNotFound` (ContainerNotFound is
+   configuration, ServerBusy is weather — both keep the retry budget); `promote.fail()`
+   retires on it via `errors.As` against a local interface, so promote does not import
+   staging. Unclassified errors still get the full budget: retrying something hopeless
+   wastes two attempts, abandoning something retryable loses an approved image.
+
+**Residual, recorded not fixed.**
+- `retire()` calls `Cleanup`, so a *losing* duplicate's retirement can still delete staged
+  blobs out from under a winner. The recover fix takes duplicates from routine (~every 6s
+  fleet-wide) to exceptional (a genuinely 15-minute-stale claim), but the queue is
+  deliberately at-least-once, so this is reduced rather than eliminated.
+- Successful promotions remain invisible: `AuditFinalizer.FinalizePromotion` returns early
+  when `ok`, and `handle()` logs nothing on success, so `merlin_acr_push_total{result="ok"}`
+  is the only proof a push happened. That asymmetry is what made this incident read as
+  data loss for as long as it did.
+- `sweepEvery()` is not covered by a test: with any window a unit test can wait out, a
+  1-minute and a 1-hour cadence are indistinguishable. Behaviour is unchanged from what
+  shipped, so this is a documented gap, not a regression.
 
 **Verify.** `SELECT count() FROM gate_decisions WHERE infra_error AND error_detail LIKE
 '%BlobNotFound%' AND ts > now()-INTERVAL 1 HOUR` → 0, sustained over a soak that includes
 the 17:00–18:00 traffic peak (169 pushes/h observed). Cross-check a sample of `passed`
-pushes actually exist in ACR via `az acr repository show-tags`.
+pushes actually exist in ACR via `az acr repository show-tags`. **Not yet run: the fix is
+committed but not deployed.** A second signal is now available and is the cheaper one to
+watch: `promote: recovered N abandoned promotion(s)` should become rare in the pod logs
+instead of appearing within seconds of every gate pass.
 
 ---
 
