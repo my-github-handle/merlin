@@ -36,7 +36,7 @@ independently verifiable; none depends on a later one.
 
 | # | Step | Effort | Why this order |
 |---|---|---|---|
-| 1 | **Stop losing published images** — promotion `BlobNotFound` | ~1–2 days | Silent data loss: the gate says pass, the image never reaches ACR. The only class where the client is told everything is fine |
+| ~~1~~ | ~~**Stop losing published images**~~ **DONE, soak met 2026-08-14** (`d982de6`+`6b94784`) | ~1–2 days | Silent data loss: the gate says pass, the image never reaches ACR. The only class where the client is told everything is fine. 439-push peak, zero `BlobNotFound` |
 | ~~2~~ | ~~**Stop killing in-flight scans**~~ **CODE DONE `92edcac`, not yet deployed** | ~2h | ~10 lines. Stops throwing away 30–120s of completed scan work per abandoned push. Publication had to detach too, or the surviving scan is discarded at the last step |
 | 3 | **Make scans fast again** — retune the memory bound | ~half day + a soak | The root cause upstream of step 2. Needs a capacity decision, so it is not a pure code change |
 | 4 | **Reuse a completed decision on retry** | ~1 day | What converts steps 2+3 into a *client-visible* fix rather than only less wasted work |
@@ -133,9 +133,13 @@ should become rare in the pod logs instead of appearing within seconds of every 
 fixture push produced **exactly one** `gate_decisions` row (`passed=true`, no
 `infra_error`, no duplicates) where the same push shape previously produced one pass plus
 six contradictory `infra_error` rows, and **zero** `recovered N abandoned promotion(s)`
-lines appeared on either pod. It is one push, not a soak: organic traffic has been zero
-since 2026-08-13 23:50, so the "`BlobNotFound` count is 0" query is currently vacuous and
-proves nothing on its own. The soak across a real traffic peak is still owed.
+lines appeared on either pod. It was one push, not a soak.
+
+**SOAK MET 2026-08-14.** The peak arrived: **439 pushes between 17:00 and 21:51, with zero
+`BlobNotFound` rows** — against 160 in 24h before the fix, and the busiest window measured
+to date. This is no longer a vacuous count; the query had traffic to find. §1 is closed.
+The 91 `infra_error` rows in that window are entirely the scan classes (§2's 77 kills and
+§3's 14 OOMs), not promotion.
 
 ---
 
@@ -267,10 +271,39 @@ publication that survived from one that never looked); the abandon label must ca
 must *not* claim a client left. Each was mutation-checked by re-attaching the context or
 disabling the label one at a time.
 
-**NOT yet verified live.** The Verify clause above is unmet — nothing is deployed:
-`values.opsadmin.multiacr.yaml` still pins `52d1751`. And organic traffic has been zero
-since 2026-08-13 23:50, so as with §1 the count-based query will read 0 for the wrong
-reason until a real peak passes through.
+**Deployed as `46f0ce5` at 2026-08-14 21:53.** Ten pods on the new image, gate answering
+401 on `/v2/`, no errors in the logs beyond the known `grype.enforce=false` warning. Three
+pods restarted once during the rollout burst — DNS for `login.microsoftonline.com` timed
+out, the JWKS refresh failed, and the pod exited 2 *fail-closed*. That is a pre-existing
+startup class, unrelated to this change, and the restart succeeded; worth its own item if
+it recurs (a JWKS fetch that retries at boot instead of exiting).
+
+**Pre-change baseline, measured over a real peak — 2026-08-14 17:00–21:51, 439 pushes.**
+This supersedes the "traffic has been zero" note under §1: today's window is the busiest
+measured so far.
+
+| | count | share |
+|---|---|---|
+| rows | 439 | |
+| passed | 326 | 74.3% |
+| `infra_error` | 91 | **20.7%** |
+| ↳ `signal: killed` | 77 | 17.5% of all pushes, 85% of infra errors |
+| ↳ `exit status 2: runtime: out of memory` | 14 | 3.2% — a *different* class, step 3's |
+| `BlobNotFound` | **0** | §1 verified, see below |
+
+**One number does not fit the §2 diagnosis, and it matters.** The killed class's median
+`duration_ms` today is **41.7s**, not the 31.1s that made the original case (it matched the
+~30s client ceiling exactly). `duration_ms` is `scanDur` — the scan's own runtime measured
+*after* slot acquisition (`outcome.go:108`) — so a 41.7s median means those scans ran 41.7s
+before dying, past the ceiling that was supposed to be killing them. Two readings fit:
+clients with longer timeouts than buildx's, or a real share of these being kernel OOM kills
+(the 14 explicit OOM rows prove memory pressure is live and concurrent). **This is precisely
+what the new labels settle.** From now on each row says whether the request context was
+canceled, so the split is measured per row instead of inferred from a median. Do not treat
+"77 killed rows" as "77 impatient clients" until the labelled rows say so.
+
+**Verification is now cheap and non-vacuous** — traffic is live, so compare the same query
+across the rollout boundary at 21:53 rather than waiting for a fixture push.
 
 ---
 
