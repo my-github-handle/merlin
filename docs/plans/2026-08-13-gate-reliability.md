@@ -125,10 +125,66 @@ server-side no-op — not verified.
 **Verify.** `SELECT count() FROM gate_decisions WHERE infra_error AND error_detail LIKE
 '%BlobNotFound%' AND ts > now()-INTERVAL 1 HOUR` → 0, sustained over a soak that includes
 the 17:00–18:00 traffic peak (169 pushes/h observed). Cross-check a sample of `passed`
-pushes actually exist in ACR via `az acr repository show-tags`. **Not yet run: the fix is
-committed but not deployed.** A second signal is now available and is the cheaper one to
-watch: `promote: recovered N abandoned promotion(s)` should become rare in the pod logs
-instead of appearing within seconds of every gate pass.
+pushes actually exist in ACR via `az acr repository show-tags`. A second signal is now
+available and is the cheaper one to watch: `promote: recovered N abandoned promotion(s)`
+should become rare in the pod logs instead of appearing within seconds of every gate pass.
+
+**Deployed as `d982de6` on 2026-08-13. First data point: clean, and thin.** A deliberate
+fixture push produced **exactly one** `gate_decisions` row (`passed=true`, no
+`infra_error`, no duplicates) where the same push shape previously produced one pass plus
+six contradictory `infra_error` rows, and **zero** `recovered N abandoned promotion(s)`
+lines appeared on either pod. It is one push, not a soak: organic traffic has been zero
+since 2026-08-13 23:50, so the "`BlobNotFound` count is 0" query is currently vacuous and
+proves nothing on its own. The soak across a real traffic peak is still owed.
+
+---
+
+## 1b. The index forward races the async promotion (found while verifying §1)
+
+**Not in the original plan, because the audit table cannot see it.** An index PUT is
+forwarded verbatim and never produces a `gate_decisions` row, so this failure class is
+invisible in every query in this document. It was found by pushing a fixture through the
+live gate on 2026-08-13 to generate traffic for §1's soak.
+
+**What happened.** `docker push` → the image manifest passed the gate (one row,
+`passed=true`, `duration_ms=45609`), then 70ms later the index PUT returned **400**:
+
+```
+forward index manifest sha256:79238d95… -> c3devops.azurecr.io/e2e/gatecheck:recoverfix-1
+failed: MANIFEST_BLOB_UNKNOWN: blob unknown to registry; sha256:cb04f117…
+```
+
+ACR afterwards held `sha256:cb04f117…` (the gated image) and the attestation, **with no
+tags** and no index. The worst combination available: published, unusable by tag, and
+reported to the client as a failed push.
+
+**Root cause.** `manifest.go` stated the invariant it relied on — "The index PUT only
+succeeds once its referenced image manifest is already in ACR — so a rejected image
+cannot be published by reference" — and async promote (2026-08-12, the same deploy that
+caused §1) broke it. The image is enqueued, not pushed, when the gate answers 201. The
+async-promote plan does not mention indexes at all; this was unconsidered, not accepted.
+
+**Fixed in `6b94784`.** The index forward retries while the error says a *reference* is
+missing, bounded at 90s (`acr.IsMissingReference`: `MANIFEST_BLOB_UNKNOWN` and
+`BLOB_UNKNOWN` only — `MANIFEST_UNKNOWN` is a miss on the target, `UNAUTHORIZED` and
+`MANIFEST_INVALID` are faults in who we are or what we sent). Scoped to indexes; an
+attestation's references are blobs the handler seeds synchronously, so a miss there is
+Merlin's own bug and must fail fast.
+
+**Why waiting does not weaken the gate.** A rejected image is never enqueued and never
+promoted, so its reference never appears and the wait ends in the same 400. What changes
+is how long a rejection takes to report, not whether it holds.
+
+**Residual, recorded not fixed.** The index push is not durable. If the client hangs up
+during the wait — or the promotion takes longer than 90s under a backlog — the tag is
+still lost, and only a client retry recovers it (by then the image is in ACR, so the
+retry resolves on its first attempt). Making the index forward a queued job would fix
+that, at the cost of publishing a tag for a push the client was told had failed.
+
+**Verify.** Re-push the same fixture and require exit 0 plus the tag present in ACR
+(`az acr manifest list-metadata -n <acr> --repository <repo>` shows the tag on the gated
+digest). Watch for `forward index -> … succeeded after waiting N attempt(s)` in the pod
+logs: it is the positive signal that the race is being absorbed rather than avoided.
 
 ---
 
