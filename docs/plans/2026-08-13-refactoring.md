@@ -122,6 +122,32 @@ session: `docker create` → `docker cp` config → `docker start -a`).
 
 ## R2 — Untangle the manifest gate path *(ride along with reliability step 2)*
 
+**Status: DONE 2026-08-14.** Refactor `a440b59`, behaviour `92edcac` — two commits, in
+that order, as required.
+
+`handleManifest` (253 lines of body) is now the sequence and nothing else; the phases it
+used to interleave are named units: `readManifestPush` → `manifestPush`, `stageImage` →
+`stagedImage`, `gateRequestFor`, `runGate`/`runScan` → `gateRun`, `publication`,
+`logGateOutcome`, `writeDecision`. Two details worth knowing, because both were forced by
+the code rather than chosen:
+
+- `stageImage` cleans up its **own** failed assemble. The handler's cleanup defer cannot
+  be registered before it holds a `stagedImage`, and the old inline version relied on a
+  defer that was already in scope.
+- `publication.handedOff` replaces the `promoted` closure variable, so ownership of the
+  staged bytes is a field on the thing that transfers them. That is also what made the
+  behaviour commit's publish-context change a two-line edit in one place.
+
+The context policy landed as three named funcs — `waitContext`, `scanContext`,
+`publishBudget` — which is exactly the seam step 2 needed: its whole behaviour change is
+`context.WithoutCancel` inside `scanContext` and `publication.run`.
+
+**Verify (met).** The refactor commit touched only `manifest.go`: `git show --stat a440b59`
+is one file, and every test in the package passed untouched (87.0% statements, from 87.1%
+— same tests over more statements). The behaviour commit then added
+`manifest_abandoned_scan_test.go` and one test *helper* (`buildIntegrationHandlerWithRunner`,
+so a test can supply a grype runner that blocks mid-scan); package coverage 87.3%.
+
 **Do not schedule this separately.** `internal/ingress/docker/manifest.go` (461 lines) is
 exactly where reliability steps 2 and 4 land. Refactoring it first means editing it twice;
 refactoring it after means editing tangled code under outage pressure. Do them in one
@@ -248,7 +274,7 @@ Named so nobody "fixes" them later:
 | Order | Item | Gate |
 |---|---|---|
 | ~~1~~ | ~~R3 (promote coverage)~~ **DONE** | net in place; reliability step 1 is unblocked |
-| 2 | R2 + reliability step 2 | one change, two commits |
+| ~~2~~ | ~~R2 + reliability step 2~~ **DONE** | `a440b59` refactor + `92edcac` behaviour; live verification still owed |
 | 3 | R0 (app coverage) | unblocks R1 |
 | 4 | R1 (one constructor) | after R0 |
 | 5 | R4 items | any time, independently |

@@ -37,7 +37,7 @@ independently verifiable; none depends on a later one.
 | # | Step | Effort | Why this order |
 |---|---|---|---|
 | 1 | **Stop losing published images** — promotion `BlobNotFound` | ~1–2 days | Silent data loss: the gate says pass, the image never reaches ACR. The only class where the client is told everything is fine |
-| 2 | **Stop killing in-flight scans** — decouple scan ctx from `r.Context()` | ~2h | ~10 lines. Stops throwing away 30–120s of completed scan work per abandoned push |
+| ~~2~~ | ~~**Stop killing in-flight scans**~~ **CODE DONE `92edcac`, not yet deployed** | ~2h | ~10 lines. Stops throwing away 30–120s of completed scan work per abandoned push. Publication had to detach too, or the surviving scan is discarded at the last step |
 | 3 | **Make scans fast again** — retune the memory bound | ~half day + a soak | The root cause upstream of step 2. Needs a capacity decision, so it is not a pure code change |
 | 4 | **Reuse a completed decision on retry** | ~1 day | What converts steps 2+3 into a *client-visible* fix rather than only less wasted work |
 | 5 | **Un-blind the alerter** — floor-OR-factor, ref normalization, kill attribution | ~half day | Cheap, but worthless before 1–4: it would just page about a known 50% |
@@ -225,6 +225,52 @@ failure and label it (`scan abandoned: client disconnected after …` vs the raw
 **Verify.** After the change, `signal: killed` rows drop to ~0 and are replaced by either
 a clean decision or an explicitly labelled client-abandon row. Scan pool utilisation
 (`observeQueueWait`) should improve at peak.
+
+**Fixed in `92edcac`, on top of the R2 refactor `a440b59`.** The context policy is now
+three named functions in `manifest.go`, and the asymmetry the plan asked for is explicit:
+
+- `waitContext` — a push *queued* for a slot still follows the request. Nothing is running
+  to protect, and a client that has left should give up its place.
+- `scanContext` — `context.WithoutCancel(reqCtx)` + `WithTimeout(gateBudget())`. Detached,
+  but never unbounded: "detached" would otherwise mean a wedged grype holds a slot forever.
+- `publication.run` — **also** detached, which the plan did not call out and which the
+  fix is incomplete without. Publishing on the request context trades `signal: killed`
+  for `publish: context canceled`: the scan survives and is then discarded at the last
+  step. Recording was already safe — `audit.Auditor.Record` ignores its ctx (non-blocking
+  queue send) — so only publish needed changing.
+
+**Three labels now, not two.** `explainScanFailure` inspects both contexts, because after
+this change a kill is no longer the client's doing and misattributing it the other way is
+just as misleading:
+
+| Condition | `error_detail` |
+|---|---|
+| `scanCtx.Err() != nil` | `scan exceeded the 5m gate budget: <raw>` |
+| `reqCtx.Err() != nil` | `scan abandoned: client disconnected while it ran (31.1s): <raw>` |
+| neither | the raw error, unchanged (this is the OOM case step 5 pages on) |
+
+The raw error is always kept as a `%w` tail, so `LIKE '%signal: killed%'` still finds every
+kill; the prefix is what says who did it.
+
+**The trade, stated plainly.** An abandoned push now holds its slot until the scan finishes
+(bounded by `gate_timeout`) instead of dying at ~30s. That is worse for peak slot pressure
+in isolation — but strictly better than the status quo it replaces, where the client's retry
+started a *second* full scan of the same content-addressed image. Step 4 is what turns that
+retry into a lookup and closes the gap.
+
+**Covered by `manifest_abandoned_scan_test.go`** (RED first, all four failing with the exact
+live symptom `policy "grype" could not run: grype scan: signal: killed`): the scan's own
+`ctx.Err()` must be nil after the client cancels; the ACR push must still happen (needed a
+context-honouring `acr.Pusher` — `acr.FakePusher` ignores its ctx and cannot tell a
+publication that survived from one that never looked); the abandon label must carry both
+"client disconnected" and the raw signal; and an over-budget scan must name the budget and
+must *not* claim a client left. Each was mutation-checked by re-attaching the context or
+disabling the label one at a time.
+
+**NOT yet verified live.** The Verify clause above is unmet — nothing is deployed:
+`values.opsadmin.multiacr.yaml` still pins `52d1751`. And organic traffic has been zero
+since 2026-08-13 23:50, so as with §1 the count-based query will read 0 for the wrong
+reason until a real peak passes through.
 
 ---
 
