@@ -447,9 +447,7 @@ type gateRun struct {
 // different answers, so each is named rather than derived inline here.
 func (h *Handler) runGate(reqCtx context.Context, req router.GateRequest) gateRun {
 	if h.pool == nil {
-		start := time.Now()
-		res, err := h.router.Gate(reqCtx, req)
-		return gateRun{res: res, err: err, scanDur: time.Since(start)}
+		return h.runScan(reqCtx, h.router, req)
 	}
 
 	waitCtx, cancelWait := h.waitContext(reqCtx)
@@ -472,11 +470,46 @@ func (h *Handler) runGate(reqCtx context.Context, req router.GateRequest) gateRu
 	}
 	defer release()
 
+	return h.runScan(reqCtx, h.pool.Router(), req)
+}
+
+// runScan runs the gate itself, under scanContext, and explains any failure.
+func (h *Handler) runScan(reqCtx context.Context, rt *router.Router, req router.GateRequest) gateRun {
 	scanCtx, cancelScan := h.scanContext(reqCtx)
 	defer cancelScan()
 	start := time.Now()
-	res, err := h.pool.Router().Gate(scanCtx, req)
-	return gateRun{res: res, err: err, scanDur: time.Since(start)}
+	res, err := rt.Gate(scanCtx, req)
+	elapsed := time.Since(start)
+	return gateRun{res: res, err: h.explainScanFailure(err, scanCtx, reqCtx, elapsed), scanDur: elapsed}
+}
+
+// explainScanFailure says why a scan failed when the raw error cannot.
+//
+// A grype child killed by the kernel's OOM killer and one killed by a context cancel
+// BOTH surface as "signal: killed" with empty stderr. That ambiguity cost weeks: 72 such
+// rows were read as memory pressure while their median duration of 31.1s named the
+// client's 30s response-header ceiling instead — and the alerter's killed_scan detector
+// still pages about memory, so the row is where the difference has to be recorded.
+//
+// Two annotations, in order of certainty:
+//   - the scan outran its own budget. Merlin killed it; that is a scan-too-slow problem,
+//     not a memory one.
+//   - the client had already left. Since scanContext is detached the scan was NOT killed
+//     for that, but the row is the only record of a push no one received.
+//
+// Everything else passes through untouched, the kernel's kill included: after this
+// change a bare "signal: killed" means what it was always read as meaning.
+func (h *Handler) explainScanFailure(err error, scanCtx, reqCtx context.Context, elapsed time.Duration) error {
+	if err == nil {
+		return nil
+	}
+	if scanCtx.Err() != nil {
+		return fmt.Errorf("scan exceeded the %s gate budget: %w", h.gateBudget(), err)
+	}
+	if reqCtx.Err() != nil {
+		return fmt.Errorf("scan abandoned: client disconnected while it ran (%s): %w", elapsed.Round(time.Millisecond), err)
+	}
+	return err
 }
 
 // defaultGateTimeout budgets one phase of the gate when the operator configured none.
@@ -496,11 +529,34 @@ func (h *Handler) waitContext(reqCtx context.Context) (context.Context, context.
 	return context.WithTimeout(reqCtx, h.gateBudget())
 }
 
-// scanContext derives the context the scan itself runs under. Separate from
-// waitContext, and named, because the lifetime of a scan that already holds a slot is
-// its own question — this is where an answer other than "exactly the request's" goes.
+// scanContext derives the context the scan itself runs under: DETACHED from the
+// request, bounded by the gate budget.
+//
+// The slot wait makes the opposite choice, and both are deliberate. A push still queued
+// has nothing running to protect, so a client that leaves should give up its place. A
+// push that holds a slot and has started grype is different: killing it discards the
+// scan, keeps the slot occupied for nothing, and — because the gate is fail-closed —
+// records an infra_error for an image nobody ever judged.
+//
+// That is not hypothetical. The largest failure class on the live gate was 72 rows of
+// "signal: killed" at a median 31.1s, which is the docker/buildx hardcoded ~30s
+// response-header ceiling: the client gave up, the request context canceled, and
+// exec.CommandContext SIGKILLed grype mid-scan. Detaching costs nothing the client can
+// see — it has already gone — and leaves the decision recorded and the image published,
+// so its retry finds the work done instead of paying for it a second time.
+//
+// Values are kept (trace metadata); only cancellation is dropped. The budget is still
+// enforced, so a detached scan cannot run forever.
 func (h *Handler) scanContext(reqCtx context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(reqCtx, h.gateBudget())
+	return context.WithTimeout(context.WithoutCancel(reqCtx), h.gateBudget())
+}
+
+// publishBudget bounds publication once it is detached from the request (see
+// publication.run). It reuses the gate budget deliberately: that is the operator's
+// existing statement of how long one push may hold a request goroutine, and a
+// publication still running past it is stuck rather than slow.
+func (h *Handler) publishBudget() time.Duration {
+	return h.gateBudget()
 }
 
 // publication is what "publish" means for one push, and who owns the staged bytes
@@ -510,6 +566,7 @@ type publication struct {
 	sync     PublishFunc      // synchronous ACR push; used when promoter is nil
 	promoter promote.Promoter // non-nil: hand the push off to the worker instead
 	job      promote.Job
+	budget   time.Duration // bounds the detached context run uses
 	// handedOff records that the promotion worker took ownership of the scratch dir
 	// and the staged blob refs, so the handler must not clean them up.
 	handedOff bool
@@ -517,7 +574,22 @@ type publication struct {
 
 // run publishes the push. It is the PublishFunc the Outcome calls on a pass, so a
 // failure here surfaces as the 502 Apply renders.
+//
+// It publishes on a context detached from the request, for the same reason scanContext
+// detaches the scan and to finish the job that starts there: a scan that survived an
+// abandoned client would otherwise be thrown away at the very last step, trading the old
+// "signal: killed" row for a "publish: context canceled" one. The image passed the gate;
+// publishing it is what the client's retry would do anyway, and doing it now is what
+// makes that retry immediate.
+//
+// Bounded, because detached must not mean unbounded — nothing else would stop a stuck
+// registry from pinning this request goroutine and its scratch dir forever.
 func (p *publication) run(ctx context.Context) error {
+	if p.budget > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(context.WithoutCancel(ctx), p.budget)
+		defer cancel()
+	}
 	if p.promoter == nil {
 		return p.sync(ctx)
 	}
@@ -533,7 +605,7 @@ func (p *publication) run(ctx context.Context) error {
 // resolved tenant, the scratch dir and the staged blob digests the worker will need.
 func (h *Handler) publicationFor(t *tenant.Tenant, req router.GateRequest, push manifestPush, s stagedImage, pushID string) publication {
 	if h.promoter == nil {
-		return publication{sync: SyncPublish(t.Pusher, req, h.acrPushObserver())}
+		return publication{sync: SyncPublish(t.Pusher, req, h.acrPushObserver()), budget: h.publishBudget()}
 	}
 	// Every field the worker's Cleanup needs must be carried on the Job: it
 	// releases blob ref-counts by ConfigDig + Layers and removes ScratchDir.
@@ -546,6 +618,7 @@ func (h *Handler) publicationFor(t *tenant.Tenant, req router.GateRequest, push 
 	// needs both.
 	return publication{
 		promoter: h.promoter,
+		budget:   h.publishBudget(),
 		job: promote.Job{
 			PushID:     pushID,
 			Tenant:     t.Prefix,

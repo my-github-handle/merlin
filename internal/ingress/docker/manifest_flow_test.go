@@ -31,12 +31,20 @@ func buildIntegrationHandler(t *testing.T, gryReport grype.Report, poolSize int)
 // supplied by the caller, for tests that need a pusher that blocks or fails.
 func buildIntegrationHandlerWithPusher(t *testing.T, gryReport grype.Report, poolSize int, pusher acr.Pusher) *Handler {
 	t.Helper()
+	return buildIntegrationHandlerWithRunner(t, staticRunner{report: gryReport}, poolSize, pusher)
+}
+
+// buildIntegrationHandlerWithRunner is buildIntegrationHandlerWithPusher with the grype
+// runner supplied too, for tests about what happens DURING a scan (a runner that blocks
+// and inspects its own context) rather than about its verdict.
+func buildIntegrationHandlerWithRunner(t *testing.T, runner grype.Runner, poolSize int, pusher acr.Pusher) *Handler {
+	t.Helper()
 	n := 0
 	st := staging.New(staging.NewMemoryBlobStore(), staging.NewMemorySessionStore(), func() string {
 		n++
 		return "u" + string(rune('0'+n))
 	})
-	tp := grype.New(staticRunner{report: gryReport}, "CRITICAL")
+	tp := grype.New(runner, "CRITICAL")
 	bp := baseimage.New([]string{"rhel", "wolfi", "chainguard"})
 	rt := router.New(policy.NewEngine(tp, bp))
 	pool := router.NewPool(rt, poolSize)
