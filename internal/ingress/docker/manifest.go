@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/merlin-gate/merlin/internal/acr"
 	"github.com/merlin-gate/merlin/internal/audit"
 	"github.com/merlin-gate/merlin/internal/policy"
 	"github.com/merlin-gate/merlin/internal/promote"
@@ -47,7 +48,16 @@ func (h *Handler) forwardManifest(w http.ResponseWriter, ctx context.Context, t 
 		}
 	}
 
-	if err := t.Pusher.PushManifest(ctx, raw, m.MediaType, target); err != nil {
+	err := t.Pusher.PushManifest(ctx, raw, m.MediaType, target)
+	if err != nil && kind == kindIndex {
+		// The index's references may simply not have landed yet: publication is
+		// asynchronous, so the image it names is enqueued rather than in ACR. Wait for
+		// it. Scoped to kindIndex because an attestation's references are the blobs
+		// seeded a few lines above — synchronously, by us — so a miss there is our bug,
+		// not a pending promotion.
+		err = h.awaitIndexReferences(ctx, t.Pusher, raw, m.MediaType, target, err)
+	}
+	if err != nil {
 		// An index whose gated image was rejected has no sub-manifest in ACR, so
 		// this PUT fails — that is the gate holding, not an internal fault. Surface
 		// it as a 400 so the push fails cleanly with the reason.
@@ -73,6 +83,81 @@ func (h *Handler) forwardManifest(w http.ResponseWriter, ctx context.Context, t 
 
 	w.Header().Set("Docker-Content-Digest", digest)
 	w.WriteHeader(http.StatusCreated)
+}
+
+const (
+	// defaultIndexReferenceWait bounds how long a tag-addressed index forward waits
+	// for the image it references to finish promoting to ACR.
+	//
+	// Sized against what it is waiting for: a promotion is a queue wait plus a
+	// re-assemble of the OCI layout from the shared blob store plus the ACR push, so
+	// seconds for a small image and tens of seconds for a multi-GB one under a
+	// backlog. Not longer, because the wait holds a request open, and a client that
+	// gives up is better served by a retry (by then the image IS in ACR, so the retry
+	// resolves on the first attempt) than by a connection held past its own timeout.
+	defaultIndexReferenceWait = 90 * time.Second
+	// defaultIndexReferencePoll is the gap between attempts. Each attempt is one
+	// manifest PUT, so this is cheap; keeping it short matters because the common case
+	// is a promotion that lands within a second or two of the index arriving.
+	defaultIndexReferencePoll = 500 * time.Millisecond
+)
+
+func (h *Handler) indexReferenceWait() time.Duration {
+	if h.indexWait <= 0 {
+		return defaultIndexReferenceWait
+	}
+	return h.indexWait
+}
+
+func (h *Handler) indexReferencePoll() time.Duration {
+	if h.indexPoll <= 0 {
+		return defaultIndexReferencePoll
+	}
+	return h.indexPoll
+}
+
+// awaitIndexReferences retries an index forward that failed because a manifest it
+// references is not in ACR yet, until the reference lands or the wait runs out.
+// first is the error the initial attempt already returned.
+//
+// Why this exists: forwarding an index depends on an ordering that deferring
+// publication to a queue silently broke. buildx PUTs the image manifest and then the
+// index milliseconds later; while promotion was synchronous the image was in ACR
+// before the gate answered 201, so the index always resolved. Once promotion became a
+// queue the index arrived first, ACR answered MANIFEST_BLOB_UNKNOWN, and the client's
+// whole push failed 400 — with the gated image sitting in ACR UNTAGGED, which is the
+// worst of both outcomes: published, unusable, and reported as a failure.
+//
+// Why waiting does not weaken the gate: a rejected image is never enqueued and never
+// promoted, so its reference never appears and the wait ends in the same 400 it would
+// have produced immediately. The wait changes how long a rejection takes to report,
+// not whether it holds.
+func (h *Handler) awaitIndexReferences(ctx context.Context, p acr.Pusher, raw []byte, mediaType, target string, first error) error {
+	if !acr.IsMissingReference(first) {
+		return first
+	}
+	deadline := time.Now().Add(h.indexReferenceWait())
+	err := first
+	for attempts := 1; ; attempts++ {
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("index references an image that has not finished publishing after %d attempts over %s (retry the push): %w",
+				attempts, h.indexReferenceWait(), err)
+		}
+		select {
+		// The client leaving is the other reason to stop: there is no one left to
+		// answer, and the connection's slot is worth more to a push that is still here.
+		case <-ctx.Done():
+			return fmt.Errorf("index references an image that has not finished publishing, client left: %w", err)
+		case <-time.After(h.indexReferencePoll()):
+		}
+		if err = p.PushManifest(ctx, raw, mediaType, target); err == nil {
+			log.Printf("forward index -> %s succeeded after waiting %d attempt(s) for promotion", target, attempts+1)
+			return nil
+		}
+		if !acr.IsMissingReference(err) {
+			return err
+		}
+	}
 }
 
 // TagAliasRecorder is optionally implemented by the Outcome's DecisionRecorder

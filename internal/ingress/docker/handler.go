@@ -36,6 +36,11 @@ type Handler struct {
 	promoter       promote.Promoter // nil = publish to ACR synchronously
 	maxPending     int              // 0 = no admission bound on the promotion backlog
 	requests       RequestObserver  // nil = no per-request counting (hermetic tests)
+	// indexWait/indexPoll bound the retry of an image-index forward whose referenced
+	// image is still being promoted. Zero means the defaults; only tests set them, to
+	// avoid a real-time wait, so there is no operator knob to get wrong.
+	indexWait time.Duration
+	indexPoll time.Duration
 }
 
 // RequestObserver receives per-request telemetry. observability.Metrics satisfies
