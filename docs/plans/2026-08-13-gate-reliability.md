@@ -302,8 +302,34 @@ what the new labels settle.** From now on each row says whether the request cont
 canceled, so the split is measured per row instead of inferred from a median. Do not treat
 "77 killed rows" as "77 impatient clients" until the labelled rows say so.
 
-**Verification is now cheap and non-vacuous** — traffic is live, so compare the same query
-across the rollout boundary at 21:53 rather than waiting for a fixture push.
+**VERIFIED LIVE, first 41 pushes after the rollout (21:53 onward).** Traffic was live, so
+this is a same-day comparison across the 21:53 boundary, not a fixture push:
+
+| | before (439 pushes) | after (41 pushes) |
+|---|---|---|
+| `infra_error` | 91 (20.7%) | **0** |
+| `signal: killed` | 77 (17.5%) | **0** |
+| `runtime: out of memory` | 14 (3.2%) | 0 *(expected ~1.3 — not yet meaningful)* |
+| passed | 326 (74.3%) | 40 (97.6%; the 1 non-pass is a genuine policy rejection) |
+| max `duration_ms` | — | **194.3s** |
+
+The kill count is the one that carries weight: at the pre-change rate, 41 pushes should have
+produced ~7 kills, and P(0 kills) ≈ 0.0005. **The positive evidence is better than the
+absence, though** — of the 40 passing scans, **17 ran longer than 30s, 15 longer than 42s,
+and 6 longer than 100s**, one reaching 194.3s. Those are scans that exceeded the ceiling and
+the old killed-class median respectively: previously they *were* the `signal: killed` rows.
+Now they finish, publish, and record a pass. `merlin_acr_push_total` shows `result="ok"` only
+and no failures, so detaching publication held up too — a scan that survives is not
+discarded at the last step.
+
+**Not yet answered:** no row has carried either new label yet, because nothing has failed.
+The 41.7s-median question above therefore stands open — the first labelled row is what
+resolves whether the old kills were impatient clients or the kernel. Watch for
+`error_detail LIKE '%client disconnected%'` (impatient client, benign) versus a **bare**
+`signal: killed` with no prefix (real OOM, step 3's problem, and what step 5 should page on).
+
+**Still owed:** a full peak on the new image. This window is 41 pushes in ~10 minutes at the
+tail of the peak; the 17:00–18:00 burst (197 pushes/h) has not yet run through it.
 
 ---
 
