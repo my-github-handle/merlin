@@ -275,8 +275,19 @@ disabling the label one at a time.
 401 on `/v2/`, no errors in the logs beyond the known `grype.enforce=false` warning. Three
 pods restarted once during the rollout burst — DNS for `login.microsoftonline.com` timed
 out, the JWKS refresh failed, and the pod exited 2 *fail-closed*. That is a pre-existing
-startup class, unrelated to this change, and the restart succeeded; worth its own item if
-it recurs (a JWKS fetch that retries at boot instead of exiting).
+startup class, unrelated to this change, and the restart succeeded.
+
+**Correction, 2026-08-14, from R0's live-wiring tests: the JWKS fetch is NOT what exited.**
+The proposed fix above — "a JWKS fetch that retries at boot instead of exiting" — describes
+behaviour the code already has. `auth.NewEntraKeyfunc` wraps `keyfunc.NewDefaultCtx`, which
+logs a failed refresh and keeps retrying in the background; a test that points a tenant at
+an unreachable JWKS URL confirms `BuildWithBackends` **succeeds**, the gate serves, and
+`/v2/` still answers 401 (fail-closed at request time rather than at boot). The
+`Failed to refresh HTTP JWK Set` line in those pods was therefore a symptom sharing a cause
+with the exit, not the cause. Whatever exited 2 is still unidentified — do not "fix" the
+keyfunc. Next step if it recurs: capture the previous container's full termination log
+(`kubectl logs --previous`) rather than reasoning from the ERROR line, since that line is
+now known to be survivable.
 
 **Pre-change baseline, measured over a real peak — 2026-08-14 17:00–21:51, 439 pushes.**
 This supersedes the "traffic has been zero" note under §1: today's window is the busiest

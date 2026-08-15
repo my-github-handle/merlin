@@ -29,7 +29,9 @@ Functions over the 50-line guideline:
 
 Coverage on the packages this plan touches — **this drives the ordering**. All figures are
 from a hermetic `go test`, which is the honest default but *understates* any package with
-tagged integration tests whose backend is absent; R3 is the worked example of how badly.
+tagged integration tests whose backend is absent. R3 was the first worked example; R0 showed
+it was systemic (see below), and `internal/app` is the extreme case — 43 points between the
+hermetic and provisioned figures.
 
 | Package | Coverage | vs 80% target |
 |---|---|---|
@@ -37,9 +39,22 @@ tagged integration tests whose backend is absent; R3 is the worked example of ho
 | `internal/observability` | 88.9% | ✅ |
 | `internal/ingress/docker` | 86.9% | ✅ |
 | `internal/dashboard` | 76.0% | ⚠️ |
-| `internal/staging` | 70.5% | ❌ |
-| `internal/promote` | ~~64.4%~~ → 82.7% / 98.4% | ✅ **R3 done** — and 64.4% was a missing *backend*, not missing tests (see R3) |
-| `internal/app` | **28.4%** | ❌❌ ← where the 331-line function lives |
+| `internal/staging` | ~~70.5%~~ → 77.3% | ⚠️ backend supplied, no new tests |
+| `internal/alert` | ~~67.1%~~ → 81.6% | ✅ backend supplied, no new tests |
+| `internal/audit` | → 71.0% | ⚠️ backend supplied, no new tests |
+| `internal/promote` | ~~64.4%~~ → 82.7% / 98.5% | ✅ **R3 done** — and 64.4% was a missing *backend*, not missing tests (see R3) |
+| `internal/app` | ~~28.4%~~ → 39.3% hermetic / **82.1%** live | ✅ **R0 done** |
+
+**Four of those rows moved without a single new test being written.** `mage integration`
+ran the `integration` tag but set neither `MERLIN_VALKEY_ADDR` nor `MERLIN_CLICKHOUSE_DSN`,
+so five of the six tagged files skipped and the target reported success. R3 found this in
+`promote` and called it a lesson; it was in fact a *target* defect affecting every tagged
+suite, and it is now fixed at the source — `Integration` provisions both backends, runs
+each package against **its own ClickHouse database**, and `checkIntegrationPackages` fails
+if a package grows a tagged test without being registered, so the list cannot rot back into
+silence. Per-package databases are not tidiness: the first provisioned run failed in
+`internal/alert` because `go test ./...` runs packages in parallel and `internal/audit` was
+inserting rows into the database `alert` was counting.
 
 **The inversion is the point:** the largest, most tangled function in the codebase sits in
 the least-tested package, and the worst production bug sits in the second-least-tested one.
@@ -74,20 +89,78 @@ This also violates the repo's own immutability rule (`rules/common/coding-style.
 
 ## R0 — Build the net before touching the wiring *(prerequisite)*
 
+**Status: DONE 2026-08-14.** 28.4% → **82.1%** with backends (`mage testAppWiring`),
+**39.3%** hermetic. R1 is unblocked.
+
 **Why first.** Refactoring a 331-line function at 28.4% coverage is not refactoring; it is
 rewriting untested production wiring and hoping. Nothing else in R1 may start until this
 lands.
 
-**Change.** Cover `internal/app` construction to ≥80%: for each backend, assert what
-`BuildWithBackends` wires — that the ACR push observer reaches `outcome`, the pool honours
-`gate_timeout`, the alerter starts only with a webhook and is absent from `Build`, closers
-run in reverse order, and each `err` path returns the wrapped message. `internal/app`
-already has `alerts_test.go` as a model; these are table tests against a config, not live
-backends.
+**The plan's own premise was wrong, and it mattered.** This item said "these are table
+tests against a config, not live backends." They cannot be. `BuildWithBackends` is 158 of
+the package's 257 statements (61.5%) and cannot be *entered* without live clients —
+`NewValkeySessionStoreWithTTL` pings on construction and `NewClickHouseWriter` bootstraps
+its schema. With every other function in the package at 100%, the hermetic ceiling is
+**44.7%**. So ≥80% was arithmetically unreachable the way this item described, and the
+work split in two:
 
-**Verify.** `go test -cover ./internal/app/...` ≥ 80%, and every new test fails if you
-delete the line it covers (mutate-and-check by hand — coverage that passes with the
-behaviour removed is decoration).
+1. `wiring_derived_test.go` — hermetic, for everything *derived* from config rather than
+   dialled. 28.4% → 39.3%. The case worth keeping is the PARTIAL per-tenant image-age
+   override: a tenant setting only `enabled` must inherit the default threshold, because a
+   zero-value copy would set `thresholdDays: 0` and a 0-day threshold rejects every image
+   ever built.
+2. `wiring_live_test.go` (tag `integration`) + `mage testAppWiring` — 82.1%.
+
+**Assertions go through the returned surface, never a private field.** This is what makes
+it a net for R1 rather than a cast of the current implementation: R1 replaces the
+positional returns with a `Servers` struct and the 11 setters with a `HandlerConfig`, so a
+test reaching into handler internals would have to be rewritten by the very refactor it
+guards — which by ground rule 1 would prove it was never a refactor.
+
+**Three things the item asked for are NOT asserted, and pretending otherwise would be the
+decoration this plan warns about:**
+
+- **Closers run in reverse order.** The `closers` slice is private and `cleanup()` returns
+  nothing, so order is unobservable from outside the package. What IS asserted: `cleanup()`
+  returns within 10s, and does so after the parent context is cancelled. R1 gives each
+  helper its own closer — assert order there, where it becomes visible.
+- **The pool honours `gate_timeout`.** Observable only by driving a scan to its deadline,
+  which `internal/ingress/docker` already does at 87.3% (`manifest_abandoned_scan_test.go`).
+  Duplicating it here would need a full push through the app-level handler for no new
+  information.
+- **The ACR push observer reaches `outcome`.** `outcome` is a local inside
+  `BuildWithBackends`. The registry-sharing half of this claim *is* covered (below); the
+  push-observer half waits for R1 to make it a named seam.
+
+**Two findings the tests produced rather than confirmed:**
+
+- **An unreachable JWKS at boot does NOT fail the build.** `keyfunc.NewDefaultCtx` logs the
+  failed refresh and retries in the background, so the gate starts and rejects every token
+  until the set loads — still fail-closed, at request time instead of boot time. This
+  matters beyond the test: three pods restarted `exit=2` during the `46f0ce5` rollout
+  carrying exactly that message, so **the keyfunc is not what exited** and the JWKS-at-boot
+  item in the reliability plan needs a different root cause.
+- **The gate answers 404, not 401, to an unrecognised Host.** Routing is per-tenant by host
+  (`<prefix>.<acr.baseDomain>`). Correct — a 401 challenge to an unknown host would solicit
+  credentials for a tenant this gate does not serve — and now pinned.
+
+**Verify (met).** `mage testAppWiring` → 82.1%. Mutation-checked by breaking one production
+line at a time:
+
+| Mutation | Result |
+|---|---|
+| dashboard built even when `dashboard_addr: off` | caught (6 tests) |
+| gate and dashboard servers swapped in the return | caught — the exact bug the positional returns invite |
+| metrics server handed a fresh registry | **NOT caught at first** — see below |
+
+The third mutation is the one worth recording. The original test asserted that
+`merlin_promote_pending` *appeared* in `/metrics`, and it passed happily against a
+brand-new registry — because constructing metrics over any registry registers the same
+names, all reading zero. Presence of a metric name proves nothing about which registry
+serves it. The test now drives a request through the **gate** and then requires a
+**positive** `merlin_requests_total` sample from the **metrics** server, which no separate
+registry can satisfy. Exactly the decoration this item's Verify clause was written to
+catch, caught by it.
 
 ---
 
@@ -275,6 +348,6 @@ Named so nobody "fixes" them later:
 |---|---|---|
 | ~~1~~ | ~~R3 (promote coverage)~~ **DONE** | net in place; reliability step 1 is unblocked |
 | ~~2~~ | ~~R2 + reliability step 2~~ **DONE** | `a440b59` refactor + `92edcac` behaviour; live verification still owed |
-| 3 | R0 (app coverage) | unblocks R1 |
-| 4 | R1 (one constructor) | after R0 |
+| ~~3~~ | ~~R0 (app coverage)~~ **DONE** | 82.1% live / 39.3% hermetic; R1 unblocked |
+| 4 | R1 (one constructor) | **next** — start with the `Servers` struct; assert closer ORDER once helpers own their closers |
 | 5 | R4 items | any time, independently |
