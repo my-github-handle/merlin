@@ -18,10 +18,11 @@ func minimalConfig() config.Config {
 }
 
 func TestBuildWiresServers(t *testing.T) {
-	main, metrics, err := Build(minimalConfig())
+	srv, err := Build(minimalConfig())
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
+	main, metrics := srv.Gate, srv.Metrics
 	if main == nil || metrics == nil {
 		t.Fatal("expected both servers wired")
 	}
@@ -35,7 +36,7 @@ func TestBuildWiresServers(t *testing.T) {
 func TestBuildWithBackendsRejectsNoTenants(t *testing.T) {
 	cfg := prodConfig() // shared helper in app_backends_test.go
 	cfg.Tenants = nil
-	_, _, _, _, err := BuildWithBackends(context.Background(), cfg)
+	_, err := BuildWithBackends(context.Background(), cfg)
 	if err == nil {
 		t.Fatal("expected error when no tenants configured")
 	}

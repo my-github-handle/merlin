@@ -35,25 +35,23 @@ func main() {
 
 	// Choose build mode: production (with live backends) or hermetic (for dev/test)
 	mode := os.Getenv("MERLIN_MODE")
-	var mainSrv, metricsSrv, dashboardSrv *http.Server
-	var cleanup func()
+	var srv app.Servers
 
 	if mode == "production" {
 		log.Println("Starting in production mode with live backends...")
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		mainSrv, metricsSrv, dashboardSrv, cleanup, err = app.BuildWithBackends(ctx, cfg)
+		srv, err = app.BuildWithBackends(ctx, cfg)
 		if err != nil {
 			log.Fatalf("build production: %v", err)
 		}
-		defer cleanup()
+		defer srv.Close()
 	} else {
 		log.Println("Starting in hermetic mode (dev/test)...")
-		mainSrv, metricsSrv, err = app.Build(cfg)
+		srv, err = app.Build(cfg)
 		if err != nil {
 			log.Fatalf("build hermetic: %v", err)
 		}
-		cleanup = func() {}
 	}
 
 	// Drain budget for in-flight pushes on SIGTERM. Parsed before serving so a bad
@@ -69,23 +67,23 @@ func main() {
 
 	// Start servers
 	go func() {
-		log.Printf("Metrics listening on %s", metricsSrv.Addr)
-		if err := metricsSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Printf("Metrics listening on %s", srv.Metrics.Addr)
+		if err := srv.Metrics.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("metrics server: %v", err)
 		}
 	}()
 
 	go func() {
-		log.Printf("Merlin listening on %s", mainSrv.Addr)
-		if err := mainSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Printf("Merlin listening on %s", srv.Gate.Addr)
+		if err := srv.Gate.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("main server: %v", err)
 		}
 	}()
 
-	if dashboardSrv != nil {
+	if srv.Dashboard != nil {
 		go func() {
-			log.Printf("Dashboard listening on %s", dashboardSrv.Addr)
-			if err := dashboardSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("Dashboard listening on %s", srv.Dashboard.Addr)
+			if err := srv.Dashboard.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				log.Printf("dashboard server: %v", err) // log, don't Fatal — never take down the gate
 			}
 		}()
@@ -100,17 +98,17 @@ func main() {
 	// active handlers to finish (or the timeout to elapse).
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancelShutdown()
-	if err := mainSrv.Shutdown(shutdownCtx); err != nil {
+	if err := srv.Gate.Shutdown(shutdownCtx); err != nil {
 		log.Printf("main server shutdown: %v", err)
 	}
-	if err := metricsSrv.Shutdown(shutdownCtx); err != nil {
+	if err := srv.Metrics.Shutdown(shutdownCtx); err != nil {
 		log.Printf("metrics server shutdown: %v", err)
 	}
-	if dashboardSrv != nil {
-		if err := dashboardSrv.Shutdown(shutdownCtx); err != nil {
+	if srv.Dashboard != nil {
+		if err := srv.Dashboard.Shutdown(shutdownCtx); err != nil {
 			log.Printf("dashboard server shutdown: %v", err)
 		}
 	}
 
-	cleanup()
+	srv.Close()
 }

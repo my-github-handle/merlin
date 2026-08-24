@@ -48,6 +48,37 @@ const (
 	scratchSweepInterval = time.Hour
 )
 
+// Servers is what a build hands back: the listeners to serve, and the single
+// function that releases everything they hold.
+//
+// It replaces a five-value positional return. That return was
+// `(*http.Server, *http.Server, *http.Server, func(), error)` — three
+// interchangeable pointer types in a row, so transposing the gate and the
+// dashboard compiled cleanly and bound the registry protocol to the dashboard's
+// port. The R0 wiring tests catch that mutation today; this makes it
+// unexpressible instead.
+type Servers struct {
+	// Gate serves the Docker registry V2 protocol. This is the one whose port
+	// clients push to.
+	Gate *http.Server
+
+	// Metrics serves the Prometheus endpoint for the registry the gate's
+	// components were built over.
+	Metrics *http.Server
+
+	// Dashboard is nil when dashboard_addr is "off" or empty, and also when the
+	// renderer failed to build — the dashboard must never keep the gate from
+	// serving, so its absence is a normal outcome rather than an error.
+	Dashboard *http.Server
+
+	// Close releases every backend the build opened, in reverse order of
+	// acquisition, and stops the goroutines it started. Non-nil on every
+	// successful build, including the hermetic one, so callers never branch on
+	// it. Call it AFTER draining the servers: an in-flight push is still using
+	// the session store and the blob client.
+	Close func()
+}
+
 // grypeRunner builds the grype Runner with the configured per-scan memory bound
 // applied. The limit string is validated at config load, so an error here means
 // the config was constructed in-process rather than loaded from disk.
@@ -59,7 +90,8 @@ func grypeRunner(cfg config.Config) (grype.Runner, error) {
 	return grype.NewExecRunner("grype", grype.WithMemoryLimit(limit)), nil
 }
 
-// Build wires config into the V2 server and the metrics server.
+// Build wires config into the V2 server and the metrics server. The returned
+// Servers has no Dashboard: the hermetic path wires the request surface only.
 //
 // TODO(production / BuildWithBackends): Build is intentionally HERMETIC — it wires
 // the request path for unit testing with NO live backends. Before this proxy is
@@ -74,11 +106,11 @@ func grypeRunner(cfg config.Config) (grype.Runner, error) {
 //     anonymous authenticator placeholder).
 //   - handleManifest/handleUpload: full V2 flow wiring + router.ErrSaturated->503
 //     (see TODO(phase5) in manifest.go/upload.go) with a deadline-bearing context.
-func Build(cfg config.Config) (*http.Server, *http.Server, error) {
+func Build(cfg config.Config) (Servers, error) {
 	// Policies + engine.
 	runner, err := grypeRunner(cfg)
 	if err != nil {
-		return nil, nil, err
+		return Servers{}, err
 	}
 	// Metrics are constructed BEFORE the policies: the grype policy is the only
 	// component that sees the scanner DB's build date, so it holds the age observer.
@@ -129,48 +161,56 @@ func Build(cfg config.Config) (*http.Server, *http.Server, error) {
 	outcome.Metrics = metrics           // observe push decisions, ACR pushes, scan latency
 	handler.SetRequestObserver(metrics) // count requests answered before a decision exists
 
-	mainSrv := &http.Server{Addr: cfg.Server.Addr, Handler: handler}
-	metricsSrv := &http.Server{Addr: cfg.Server.MetricsAddr, Handler: metrics.Handler()}
-	return mainSrv, metricsSrv, nil
+	// Close is a no-op rather than nil: Build opens nothing, but a caller that has
+	// to check which build produced its Servers before releasing them has gained
+	// nothing over the positional return.
+	return Servers{
+		Gate:    &http.Server{Addr: cfg.Server.Addr, Handler: handler},
+		Metrics: &http.Server{Addr: cfg.Server.MetricsAddr, Handler: metrics.Handler()},
+		Close:   func() {},
+	}, nil
 }
 
 // BuildWithBackends wires config into production servers with REAL backends (JWKS, Azure Blob,
 // Valkey, ClickHouse, ACR). It validates required production config fields BEFORE constructing
 // any live client, ensuring unit tests can verify config validation without hitting the network.
 //
-// Returns main server, metrics server, dashboard server (nil if dashboard_addr empty), cleanup func, and error.
-func BuildWithBackends(ctx context.Context, cfg config.Config) (*http.Server, *http.Server, *http.Server, func(), error) {
+// On success every field of the returned Servers is populated except Dashboard,
+// which is nil when the dashboard is off. On any error the zero Servers is
+// returned — nothing to serve, and nothing to close, because fail() has already
+// released whatever had been opened.
+func BuildWithBackends(ctx context.Context, cfg config.Config) (Servers, error) {
 	// VALIDATE-FIRST: Check required production fields before constructing live clients.
 	// This allows unit tests to exercise validation logic without network calls.
 	if cfg.ACR.RegistryTemplate == "" {
-		return nil, nil, nil, nil, fmt.Errorf("production config: ACR.RegistryTemplate is required")
+		return Servers{}, fmt.Errorf("production config: ACR.RegistryTemplate is required")
 	}
 	if cfg.ACR.BaseDomain == "" {
-		return nil, nil, nil, nil, fmt.Errorf("production config: ACR.BaseDomain is required")
+		return Servers{}, fmt.Errorf("production config: ACR.BaseDomain is required")
 	}
 	if len(cfg.Tenants) == 0 {
-		return nil, nil, nil, nil, fmt.Errorf("production config: at least one tenant is required")
+		return Servers{}, fmt.Errorf("production config: at least one tenant is required")
 	}
 	if cfg.Auth.RegistryTokenSecret == "" {
-		return nil, nil, nil, nil, fmt.Errorf("production config: Auth.RegistryTokenSecret is required")
+		return Servers{}, fmt.Errorf("production config: Auth.RegistryTokenSecret is required")
 	}
 	if cfg.Server.ExternalURL == "" {
-		return nil, nil, nil, nil, fmt.Errorf("production config: Server.ExternalURL is required")
+		return Servers{}, fmt.Errorf("production config: Server.ExternalURL is required")
 	}
 	if cfg.Staging.BlobAccountURL == "" {
-		return nil, nil, nil, nil, fmt.Errorf("production config: Staging.BlobAccountURL is required")
+		return Servers{}, fmt.Errorf("production config: Staging.BlobAccountURL is required")
 	}
 	if cfg.Staging.ValkeyAddr == "" {
-		return nil, nil, nil, nil, fmt.Errorf("production config: Staging.ValkeyAddr is required")
+		return Servers{}, fmt.Errorf("production config: Staging.ValkeyAddr is required")
 	}
 	if cfg.Audit.ClickHouseDSN == "" {
-		return nil, nil, nil, nil, fmt.Errorf("production config: Audit.ClickHouseDSN is required")
+		return Servers{}, fmt.Errorf("production config: Audit.ClickHouseDSN is required")
 	}
 
 	// Parse gate timeout
 	gateTimeout, err := time.ParseDuration(cfg.Server.GateTimeout)
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("parse gate timeout %q: %w", cfg.Server.GateTimeout, err)
+		return Servers{}, fmt.Errorf("parse gate timeout %q: %w", cfg.Server.GateTimeout, err)
 	}
 
 	// --- LIVE BACKENDS (network calls below) ---
@@ -180,12 +220,12 @@ func BuildWithBackends(ctx context.Context, cfg config.Config) (*http.Server, *h
 
 	// Track opened resources for cleanup on error
 	var closers []func()
-	fail := func(e error) (*http.Server, *http.Server, *http.Server, func(), error) {
+	fail := func(e error) (Servers, error) {
 		cancel()
 		for i := len(closers) - 1; i >= 0; i-- {
 			closers[i]()
 		}
-		return nil, nil, nil, nil, e
+		return Servers{}, e
 	}
 
 	// Per-tenant resolver: each tenant gets its own ACR host, outbound push
@@ -458,15 +498,19 @@ func BuildWithBackends(ctx context.Context, cfg config.Config) (*http.Server, *h
 		closers = append(closers, alertCloser)
 	}
 
-	// Build cleanup function: cancel JWKS context + close all resources (reverse order)
-	cleanup := func() {
-		cancel() // Stop JWKS background refresh
-		for i := len(closers) - 1; i >= 0; i-- {
-			closers[i]()
-		}
-	}
-
-	return mainSrv, metricsSrv, dashSrv, cleanup, nil
+	return Servers{
+		Gate:      mainSrv,
+		Metrics:   metricsSrv,
+		Dashboard: dashSrv,
+		// Cancel the JWKS context and the goroutines started above, then close
+		// every resource in reverse order of acquisition.
+		Close: func() {
+			cancel()
+			for i := len(closers) - 1; i >= 0; i-- {
+				closers[i]()
+			}
+		},
+	}, nil
 }
 
 // generatePushID creates a random 16-byte hex ID for tracking push sessions.

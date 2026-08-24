@@ -170,7 +170,8 @@ catch, caught by it.
 
 **Change, in three behaviour-preserving commits:**
 
-1. **Named result struct.** Replace the positional multi-return with
+1. **Named result struct.** ✅ **DONE 2026-08-24** (see below). Replace the positional
+   multi-return with
    `type Servers struct { Gate, Metrics, Dashboard *http.Server; Close func() }`. Mechanical,
    compiler-verified, and it removes the port-swap class of bug outright.
 2. **Config struct in place of setters.** Give `docker.New` a `HandlerConfig` carrying what
@@ -190,6 +191,52 @@ documented predicate, not an accident of which function you edited.
 **Verify.** No behaviour diff: `helm template` output unchanged, and a dry-run boot against
 the live ConfigMap produces byte-identical startup logs (the probe technique from this
 session: `docker create` → `docker cp` config → `docker start -a`).
+
+### Commit 1 — `Servers` (landed 2026-08-24)
+
+`Build` returns `(Servers, error)`; `BuildWithBackends` returns `(Servers, error)`. Zero
+production behaviour change, and the verification was run rather than asserted:
+
+- **Startup logs are identical.** Built `HEAD` in a throwaway `git worktree` and the working
+  tree side by side, rendered the live ConfigMap (`helm template -s templates/configmap.yaml`
+  against `values.opsadmin.multiacr.yaml`), retargeted only the three port fields, and booted
+  both binaries against it. The two log sets differ only in the *interleaving* of
+  `Merlin listening` and `Metrics listening`, which are emitted by two concurrent goroutines
+  and race the same way in both builds — sorted, the diff is empty. This substitutes for the
+  plan's `docker create` probe, which was the technique available when the plan was written;
+  a local worktree gives the same before/after pair without a registry round-trip.
+- **`helm template` byte-identical** (nothing under `charts/` was touched, confirmed rather
+  than assumed).
+- `mage integration`: app 81.9%, audit 71.0%, alert 81.6%, promote 98.5%, staging 77.3%.
+  `go test ./...` clean.
+
+App coverage moved 82.1% → **81.9%**. That is not a lost assertion: the same tests now run
+over a handful of extra statements (the struct literals in each return). Worth stating rather
+than rounding away, because a refactor that quietly *drops* coverage is exactly what this
+number is here to catch.
+
+**Two ground-rule tensions, called out rather than glossed:**
+
+1. **"A refactor commit changes no test" — this one edits 12 call sites.** Changing a return
+   from five values to one necessarily edits every caller, tests included. What matters is
+   that no *assertion* changed: every R0 test still checks the same behaviour through the
+   same returned surface, only spelled `built.Gate` instead of `main`. That is the property
+   R0 was built for, and it held.
+2. **Two assertions were strengthened, deliberately.** `TestBuildWithBackendsArityCompiles`
+   asserted only that a five-value signature compiled — a tautology the compiler already
+   enforced, and meaningless once the arity is one. It is now
+   `TestFailedBuildReturnsNothingToUse`, which pins the real hazard: a failed build returns
+   the **zero** `Servers`, every field nil including `Close`, so a caller cannot serve a
+   half-wired gate and cannot double-release what `fail()` already closed. Separately,
+   `TestBuildIsHermeticAndComplete/starts no alerter` argued from the signature ("Build
+   returns no closer, so it cannot own a goroutine") — an argument this commit invalidates,
+   since `Servers.Close` is now non-nil for the hermetic build too. It counts goroutines
+   instead. Both are stricter than what they replaced; neither weakens to fit the refactor.
+
+**One design decision worth recording:** `Servers.Close` is a **no-op, not nil**, for the
+hermetic `Build`. A caller forced to ask which constructor produced its `Servers` before it
+can release them has gained nothing over the positional return. `main` lost its
+`cleanup = func() {}` branch as a result.
 
 ---
 
@@ -349,5 +396,5 @@ Named so nobody "fixes" them later:
 | ~~1~~ | ~~R3 (promote coverage)~~ **DONE** | net in place; reliability step 1 is unblocked |
 | ~~2~~ | ~~R2 + reliability step 2~~ **DONE** | `a440b59` refactor + `92edcac` behaviour; live verification still owed |
 | ~~3~~ | ~~R0 (app coverage)~~ **DONE** | 82.1% live / 39.3% hermetic; R1 unblocked |
-| 4 | R1 (one constructor) | **next** — start with the `Servers` struct; assert closer ORDER once helpers own their closers |
+| 4 | R1 (one constructor) | **in progress** — commit 1 (`Servers`) landed; next is `HandlerConfig` for the 11 setters, then decomposing `BuildWithBackends`; assert closer ORDER once helpers own their closers |
 | 5 | R4 items | any time, independently |

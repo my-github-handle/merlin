@@ -138,31 +138,32 @@ func withDatabase(dsn, db string) string {
 	return dsn[:i+1] + db
 }
 
-// TestLiveWiringBuildsEveryServerAtItsConfiguredAddress is the arity-and-address
-// assertion. Positional returns are the bug class R1's Servers struct removes: three
-// bare *http.Server values in a row means swapping two compiles cleanly and would
-// serve the dashboard, which has NO auth, on the gate port. Distinct ports here mean
-// that swap is caught.
+// TestLiveWiringBuildsEveryServerAtItsConfiguredAddress pins each server to its own
+// configured address. It was written against the positional return, where three bare
+// *http.Server values in a row meant swapping two compiled cleanly and would serve
+// the dashboard, which has NO auth, on the gate port; distinct ports caught that swap.
+// Servers has since made the swap unnameable, but the addresses still have to come
+// from the right config fields, and that is what remains under test.
 func TestLiveWiringBuildsEveryServerAtItsConfiguredAddress(t *testing.T) {
 	cfg := liveConfig(t, "merlin_wiring_addrs")
 	cfg.Server.Addr = ":15001"
 	cfg.Server.MetricsAddr = ":15002"
 	cfg.Server.DashboardAddr = ":15003"
 
-	main, metrics, dash, cleanup, err := BuildWithBackends(context.Background(), cfg)
+	built, err := BuildWithBackends(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	defer cleanup()
+	defer built.Close()
 
 	for _, tc := range []struct {
 		name string
 		srv  *http.Server
 		want string
 	}{
-		{"gate", main, ":15001"},
-		{"metrics", metrics, ":15002"},
-		{"dashboard", dash, ":15003"},
+		{"gate", built.Gate, ":15001"},
+		{"metrics", built.Metrics, ":15002"},
+		{"dashboard", built.Dashboard, ":15003"},
 	} {
 		if tc.srv == nil {
 			t.Fatalf("%s server is nil", tc.name)
@@ -191,15 +192,15 @@ func gateRequest(cfg config.Config, method, path string) *http.Request {
 // TestLiveWiringRoutesByTenantHost pins the routing rule the helper above depends on.
 func TestLiveWiringRoutesByTenantHost(t *testing.T) {
 	cfg := liveConfig(t, "merlin_wiring_hosts")
-	main, _, _, cleanup, err := BuildWithBackends(context.Background(), cfg)
+	built, err := BuildWithBackends(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	defer cleanup()
+	defer built.Close()
 
 	t.Run("configured tenant host challenges", func(t *testing.T) {
 		rec := httptest.NewRecorder()
-		main.Handler.ServeHTTP(rec, gateRequest(cfg, http.MethodGet, "/v2/"))
+		built.Gate.Handler.ServeHTTP(rec, gateRequest(cfg, http.MethodGet, "/v2/"))
 		if rec.Code != http.StatusUnauthorized {
 			t.Errorf("GET /v2/ on %s.%s = %d, want 401", cfg.Tenants[0].Prefix, cfg.ACR.BaseDomain, rec.Code)
 		}
@@ -209,7 +210,7 @@ func TestLiveWiringRoutesByTenantHost(t *testing.T) {
 		rec := httptest.NewRecorder()
 		r := httptest.NewRequest(http.MethodGet, "/v2/", nil)
 		r.Host = "not-a-tenant.c3ci.cloud"
-		main.Handler.ServeHTTP(rec, r)
+		built.Gate.Handler.ServeHTTP(rec, r)
 		if rec.Code != http.StatusNotFound {
 			t.Errorf("GET /v2/ on an unconfigured host = %d, want 404: issuing a 401 challenge would solicit credentials for a tenant this gate does not serve", rec.Code)
 		}
@@ -231,15 +232,15 @@ func TestLiveWiringToleratesAnUnreachableJWKSAtBoot(t *testing.T) {
 	cfg := liveConfig(t, "merlin_wiring_jwksdown")
 	cfg.Tenants[0].Auth.JWKSURL = "http://127.0.0.1:1/keys"
 
-	main, _, _, cleanup, err := BuildWithBackends(context.Background(), cfg)
+	built, err := BuildWithBackends(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("an unreachable JWKS must not stop the gate from starting: %v", err)
 	}
-	defer cleanup()
+	defer built.Close()
 
 	// Still fail-closed: the challenge is issued, but no token can validate.
 	rec := httptest.NewRecorder()
-	main.Handler.ServeHTTP(rec, gateRequest(cfg, http.MethodGet, "/v2/"))
+	built.Gate.Handler.ServeHTTP(rec, gateRequest(cfg, http.MethodGet, "/v2/"))
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("GET /v2/ = %d, want 401", rec.Code)
 	}
@@ -256,14 +257,14 @@ func TestLiveWiringGateChallengeCarriesConfig(t *testing.T) {
 	cfg.Server.ExternalURL = "https://gate.example.test"
 	cfg.Auth.Service = "merlin-under-test"
 
-	main, _, _, cleanup, err := BuildWithBackends(context.Background(), cfg)
+	built, err := BuildWithBackends(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	defer cleanup()
+	defer built.Close()
 
 	rec := httptest.NewRecorder()
-	main.Handler.ServeHTTP(rec, gateRequest(cfg, http.MethodGet, "/v2/"))
+	built.Gate.Handler.ServeHTTP(rec, gateRequest(cfg, http.MethodGet, "/v2/"))
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("GET /v2/ = %d, want 401 (the AppGW health probe expects exactly 401; anything else marks the backend unhealthy -> 502)", rec.Code)
@@ -293,19 +294,19 @@ func TestLiveWiringGateChallengeCarriesConfig(t *testing.T) {
 // distinguish a shared registry from a separate one.
 func TestLiveWiringMetricsServerExposesMerlinMetrics(t *testing.T) {
 	cfg := liveConfig(t, "merlin_wiring_metrics")
-	main, metrics, _, cleanup, err := BuildWithBackends(context.Background(), cfg)
+	built, err := BuildWithBackends(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	defer cleanup()
+	defer built.Close()
 
 	// Drive the GATE, then scrape the METRICS server. The request observer lives on
 	// the docker handler; the scrape reads the registry. If those are not the same
 	// registry, the counter below is absent or zero.
-	main.Handler.ServeHTTP(httptest.NewRecorder(), gateRequest(cfg, http.MethodGet, "/v2/"))
+	built.Gate.Handler.ServeHTTP(httptest.NewRecorder(), gateRequest(cfg, http.MethodGet, "/v2/"))
 
 	rec := httptest.NewRecorder()
-	metrics.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	built.Metrics.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /metrics = %d, want 200", rec.Code)
 	}
@@ -351,20 +352,20 @@ func TestLiveWiringDashboardIsOptional(t *testing.T) {
 			cfg := liveConfig(t, fmt.Sprintf("merlin_wiring_dash%d", i))
 			cfg.Server.DashboardAddr = tc.addr
 
-			_, _, dash, cleanup, err := BuildWithBackends(context.Background(), cfg)
+			built, err := BuildWithBackends(context.Background(), cfg)
 			if err != nil {
 				t.Fatalf("build: %v", err)
 			}
-			defer cleanup()
+			defer built.Close()
 
-			if got := dash != nil; got != tc.want {
+			if got := built.Dashboard != nil; got != tc.want {
 				t.Fatalf("dashboard built = %v, want %v for dashboard_addr=%q", got, tc.want, tc.addr)
 			}
 			if !tc.want {
 				return
 			}
 			rec := httptest.NewRecorder()
-			dash.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+			built.Dashboard.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 			if rec.Code != http.StatusOK {
 				t.Errorf("dashboard GET / = %d, want 200 (its ingress probe expects 200 here, not the gate's 401)", rec.Code)
 			}
@@ -373,33 +374,33 @@ func TestLiveWiringDashboardIsOptional(t *testing.T) {
 }
 
 // TestLiveWiringCleanupCancelsBackgroundWork covers the contract main() depends on:
-// cleanup must stop the goroutines BuildWithBackends started (the promotion worker and
-// the metrics sampler) and close the ClickHouse handles. If cleanup returned while the
+// Servers.Close must stop the goroutines BuildWithBackends started (the promotion
+// worker and the metrics sampler) and close the ClickHouse handles. If Close returned while the
 // worker was still claiming jobs, a shutting-down pod would keep taking promotions it
 // will never finish — which is exactly the abandoned-claim state §1's recovery sweep
 // exists to clean up.
 func TestLiveWiringCleanupCancelsBackgroundWork(t *testing.T) {
-	_, _, _, cleanup, err := BuildWithBackends(context.Background(), liveConfig(t, "merlin_wiring_cleanup"))
+	built, err := BuildWithBackends(context.Background(), liveConfig(t, "merlin_wiring_cleanup"))
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
 
 	done := make(chan struct{})
-	go func() { defer close(done); cleanup() }()
+	go func() { defer close(done); built.Close() }()
 	select {
 	case <-done:
 	case <-time.After(10 * time.Second):
-		t.Fatal("cleanup did not return within 10s — a closer is blocking process shutdown")
+		t.Fatal("Close did not return within 10s — a closer is blocking process shutdown")
 	}
 }
 
 // TestLiveWiringParentContextCancelStopsWorkers is the other half: the caller's
-// context, not just cleanup, must stop background work. main() cancels on SIGTERM, and
+// context, not just Close, must stop background work. main() cancels on SIGTERM, and
 // Kubernetes sends SIGTERM before the grace period expires, so a worker that ignores
 // the parent context keeps claiming promotion jobs right up until SIGKILL.
 func TestLiveWiringParentContextCancelStopsWorkers(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	_, _, _, cleanup, err := BuildWithBackends(ctx, liveConfig(t, "merlin_wiring_parentctx"))
+	built, err := BuildWithBackends(ctx, liveConfig(t, "merlin_wiring_parentctx"))
 	if err != nil {
 		cancel()
 		t.Fatalf("build: %v", err)
@@ -407,11 +408,11 @@ func TestLiveWiringParentContextCancelStopsWorkers(t *testing.T) {
 	cancel() // SIGTERM equivalent
 
 	done := make(chan struct{})
-	go func() { defer close(done); cleanup() }()
+	go func() { defer close(done); built.Close() }()
 	select {
 	case <-done:
 	case <-time.After(10 * time.Second):
-		t.Fatal("cleanup blocked after the parent context was canceled")
+		t.Fatal("Close blocked after the parent context was canceled")
 	}
 }
 
@@ -467,10 +468,10 @@ func TestLiveWiringBackendFailuresAreNamed(t *testing.T) {
 			cfg := liveConfig(t, "merlin_wiring_errors")
 			tc.mutate(&cfg)
 
-			main, metrics, dash, cleanup, err := BuildWithBackends(context.Background(), cfg)
+			built, err := BuildWithBackends(context.Background(), cfg)
 			if err == nil {
-				if cleanup != nil {
-					cleanup()
+				if built.Close != nil {
+					built.Close()
 				}
 				t.Fatal("expected a build failure")
 			}
@@ -479,8 +480,8 @@ func TestLiveWiringBackendFailuresAreNamed(t *testing.T) {
 			}
 			// fail() must return nothing usable: a caller that ignores err and serves
 			// main anyway would run a gate with a nil auditor.
-			if main != nil || metrics != nil || dash != nil || cleanup != nil {
-				t.Error("a failed build must return nil servers and a nil cleanup, so a caller cannot serve a half-wired gate")
+			if built.Gate != nil || built.Metrics != nil || built.Dashboard != nil || built.Close != nil {
+				t.Error("a failed build must return the zero Servers, so a caller cannot serve a half-wired gate")
 			}
 		})
 	}

@@ -7,13 +7,22 @@ import (
 	"github.com/merlin-gate/merlin/internal/config"
 )
 
-// When dashboard_addr is empty, BuildWithBackends must still return (no dashboard
-// server) and must not require any dashboard config. We only assert the arity/typing
-// compiles and that validation of OTHER required fields still triggers first.
-func TestBuildWithBackendsArityCompiles(t *testing.T) {
-	// Missing required production fields -> error, but the 5-value signature must hold.
-	_, _, _, _, err := BuildWithBackends(context.Background(), config.Config{})
+// A failed build must return the ZERO Servers, not a partly-filled one.
+//
+// This test used to assert only that the five-value signature compiled, which the
+// compiler already guaranteed. Servers makes the real risk expressible instead: a
+// caller that got an error and reached for a field anyway. Every field must be nil
+// — including Close, so `defer srv.Close()` after a failed build panics loudly
+// rather than double-releasing what fail() already closed.
+func TestFailedBuildReturnsNothingToUse(t *testing.T) {
+	srv, err := BuildWithBackends(context.Background(), config.Config{})
 	if err == nil {
 		t.Fatal("expected validation error on empty config")
+	}
+	if srv.Gate != nil || srv.Metrics != nil || srv.Dashboard != nil {
+		t.Errorf("failed build returned servers: %+v", srv)
+	}
+	if srv.Close != nil {
+		t.Error("failed build returned a Close func; fail() has already released everything")
 	}
 }

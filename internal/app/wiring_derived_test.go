@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -200,19 +201,22 @@ func TestStartAlerterRejectsBadWindowsBeforeConnecting(t *testing.T) {
 // nothing else would notice if they went missing.
 func TestBuildIsHermeticAndComplete(t *testing.T) {
 	t.Run("derives the stub registry from the template", func(t *testing.T) {
-		main, metrics, err := Build(minimalConfig())
+		srv, err := Build(minimalConfig())
 		if err != nil {
 			t.Fatalf("build: %v", err)
 		}
-		if main.Handler == nil || metrics.Handler == nil {
+		if srv.Gate.Handler == nil || srv.Metrics.Handler == nil {
 			t.Fatal("both servers need handlers")
+		}
+		if srv.Dashboard != nil {
+			t.Error("the hermetic build must wire no dashboard")
 		}
 	})
 
 	t.Run("falls back when ACR config is absent", func(t *testing.T) {
 		cfg := minimalConfig()
 		cfg.ACR = config.ACRConfig{} // no template, no base domain
-		if _, _, err := Build(cfg); err != nil {
+		if _, err := Build(cfg); err != nil {
 			t.Fatalf("Build must not require ACR config — it is hermetic: %v", err)
 		}
 	})
@@ -220,20 +224,31 @@ func TestBuildIsHermeticAndComplete(t *testing.T) {
 	t.Run("propagates a bad memory limit", func(t *testing.T) {
 		cfg := minimalConfig()
 		cfg.Grype.MemoryLimit = "not-a-size"
-		if _, _, err := Build(cfg); err == nil {
+		if _, err := Build(cfg); err == nil {
 			t.Fatal("expected the grypeRunner error to surface")
 		}
 	})
 
 	t.Run("starts no alerter", func(t *testing.T) {
-		// Build takes no context and returns no closer, so it CANNOT own a goroutine.
-		// That is the contract R1 has to keep when Build and BuildWithBackends start
-		// sharing helpers; assert it via the signature-shaped fact that there is
-		// nothing to clean up.
+		// Build takes no context, so it cannot own a goroutine that anything could
+		// stop — and startAlerter REQUIRES one, so the alerter is unreachable from
+		// here by construction. That is the contract R1 has to keep once Build and
+		// BuildWithBackends share helpers.
+		//
+		// Counted rather than argued from the signature: Servers.Close is now
+		// non-nil for the hermetic build too (so callers never branch on it), which
+		// means "there is nothing to clean up" no longer follows from the return
+		// type. The goroutine census is the fact that survives that change.
+		before := runtime.NumGoroutine()
 		cfg := minimalConfig()
 		cfg.Alerts = config.AlertsConfig{SlackWebhookURL: "https://hooks.slack.example/none"}
-		if _, _, err := Build(cfg); err != nil {
+		srv, err := Build(cfg)
+		if err != nil {
 			t.Fatalf("Build must ignore alert config entirely: %v", err)
+		}
+		srv.Close()
+		if after := runtime.NumGoroutine(); after > before {
+			t.Errorf("goroutines %d -> %d: the hermetic build started background work", before, after)
 		}
 	})
 }
@@ -244,7 +259,7 @@ func TestBuildIsHermeticAndComplete(t *testing.T) {
 func TestBuildWithBackendsRejectsBadGateTimeout(t *testing.T) {
 	cfg := prodConfig()
 	cfg.Server.GateTimeout = "5 minutes"
-	_, _, _, _, err := BuildWithBackends(context.Background(), cfg)
+	_, err := BuildWithBackends(context.Background(), cfg)
 	if err == nil {
 		t.Fatal("expected a parse error for an invalid gate_timeout")
 	}
