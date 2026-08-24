@@ -8,27 +8,17 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
-
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/merlin-gate/merlin/internal/acr"
-	"github.com/merlin-gate/merlin/internal/audit"
 	"github.com/merlin-gate/merlin/internal/auth"
 	"github.com/merlin-gate/merlin/internal/config"
-	"github.com/merlin-gate/merlin/internal/dashboard"
 	dockeringress "github.com/merlin-gate/merlin/internal/ingress/docker"
-	"github.com/merlin-gate/merlin/internal/observability"
-	"github.com/merlin-gate/merlin/internal/policies/baseimage"
 	"github.com/merlin-gate/merlin/internal/policies/grype"
 	"github.com/merlin-gate/merlin/internal/policies/imageage"
-	"github.com/merlin-gate/merlin/internal/policy"
-	"github.com/merlin-gate/merlin/internal/promote"
 	"github.com/merlin-gate/merlin/internal/router"
-	"github.com/merlin-gate/merlin/internal/staging"
 	"github.com/merlin-gate/merlin/internal/tenant"
 )
 
@@ -93,38 +83,27 @@ func grypeRunner(cfg config.Config) (grype.Runner, error) {
 // Build wires config into the V2 server and the metrics server. The returned
 // Servers has no Dashboard: the hermetic path wires the request surface only.
 //
-// TODO(production / BuildWithBackends): Build is intentionally HERMETIC — it wires
-// the request path for unit testing with NO live backends. Before this proxy is
-// production-usable, a BuildWithBackends variant (env-gated) MUST wire:
-//   - JWKS keyfunc: replace the stub keyfunc with an Entra ID JWKS-backed validator
-//     (RS256) — the current stub rejects all real tokens.
-//   - staging.Store: Azure Blob + Valkey (currently nil) — required for blob upload
-//     and image assembly; the handler cannot process a real push without it.
-//   - audit.Auditor: ClickHouse-backed Auditor for the audit trail and reverse lookups.
-//   - reports.ReportSource: back GET /reports/<push_id> (currently nil -> 404).
-//   - ACR pusher: Azure Managed Identity credentials (NewACRPusher currently uses an
-//     anonymous authenticator placeholder).
-//   - handleManifest/handleUpload: full V2 flow wiring + router.ErrSaturated->503
-//     (see TODO(phase5) in manifest.go/upload.go) with a deadline-bearing context.
+// It goes through the SAME helpers as BuildWithBackends, with the live backends left
+// out. That is what makes the divergence between the two paths readable: everything
+// Build omits is a field it does not set on a shared config, not a block of wiring
+// that happens to be missing. The differences, in full:
+//
+//   - Auth is a stub keyfunc that rejects every real token, and there is one fake
+//     tenant whose pusher uses the anonymous keychain and never reaches ACR.
+//   - No Store and no Reports on the handler: that absence IS the hermetic contract.
+//   - No Pool, so scans run unpooled; no promoter, so publication is synchronous.
+//   - No audit recorder, and no IDGen — which means the docker package's own
+//     generator is used. It differs from this package's: on a crypto/rand failure
+//     docker's falls back to a timestamp while ours panics. Left as-is here because
+//     this commit preserves behaviour; worth reconciling separately.
 func Build(cfg config.Config) (Servers, error) {
-	// Policies + engine.
-	runner, err := grypeRunner(cfg)
+	_, metrics := newMetrics()
+	engine, err := buildPolicyEngine(cfg, metrics)
 	if err != nil {
 		return Servers{}, err
 	}
-	// Metrics are constructed BEFORE the policies: the grype policy is the only
-	// component that sees the scanner DB's build date, so it holds the age observer.
-	reg := prometheus.NewRegistry()
-	metrics := observability.NewMetrics(reg)
 
-	grypePolicy := grype.New(runner, cfg.Grype.SeverityThreshold, grypeOptions(cfg, metrics)...)
-	basePolicy := baseimage.New(cfg.BaseImage.AllowedIDs)
-	def, per := imageAgeRules(cfg)
-	agePolicy := imageage.New(def, per)
-	engine := policy.NewEngine(grypePolicy, basePolicy, agePolicy)
-
-	// Auth — stub keyfunc for hermetic unit testing. See TODO(production / BuildWithBackends)
-	// for production wiring requirements.
+	// Auth — stub keyfunc for hermetic unit testing. Production wiring is buildAuth.
 	keyfunc := func(*jwt.Token) (interface{}, error) { return nil, http.ErrAbortHandler }
 	authn := auth.NewJWTAuthenticator("https://issuer", "api://merlin", keyfunc)
 
@@ -140,30 +119,21 @@ func Build(cfg config.Config) (Servers, error) {
 	if baseDomain == "" {
 		baseDomain = "test.local"
 	}
-	tenants := map[string]*tenant.Tenant{
+	resolver := tenant.NewStaticResolver(baseDomain, map[string]*tenant.Tenant{
 		stubPrefix: {
 			Prefix:   stubPrefix,
 			Registry: registry,
 			Pusher:   acr.NewACRPusher(registry),
 			Authn:    authn,
 		},
-	}
-	resolver := tenant.NewStaticResolver(baseDomain, tenants)
+	})
 
-	// Router + Docker outcome/ingress.
-	rt := router.New(engine)
-	outcome := &dockeringress.Outcome{
-		ReportBaseURL: "/reports",
-	}
-	// Metrics (registry built above, with the policies).
-	outcome.Metrics = metrics // observe push decisions, ACR pushes, scan latency
-
-	// No Store and no Reports: that absence IS the hermetic contract, and stating it
-	// as two omitted fields rather than two positional nils is the point of the config.
+	// No recorder and no IDGen; metrics still observe push decisions, ACR pushes and
+	// scan latency, because those are the assertions the hermetic tests can make.
 	handler, err := dockeringress.New(dockeringress.HandlerConfig{
 		Resolver: resolver,
-		Router:   rt,
-		Outcome:  outcome,
+		Router:   router.New(engine),
+		Outcome:  buildOutcome(nil, metrics, nil),
 		Requests: metrics, // count requests answered before a decision exists
 	})
 	if err != nil {
@@ -173,50 +143,27 @@ func Build(cfg config.Config) (Servers, error) {
 	// Close is a no-op rather than nil: Build opens nothing, but a caller that has
 	// to check which build produced its Servers before releasing them has gained
 	// nothing over the positional return.
-	return Servers{
-		Gate:    &http.Server{Addr: cfg.Server.Addr, Handler: handler},
-		Metrics: &http.Server{Addr: cfg.Server.MetricsAddr, Handler: metrics.Handler()},
-		Close:   func() {},
-	}, nil
+	return buildServers(cfg, handler, metrics, nil, func() {}), nil
 }
 
-// BuildWithBackends wires config into production servers with REAL backends (JWKS, Azure Blob,
-// Valkey, ClickHouse, ACR). It validates required production config fields BEFORE constructing
-// any live client, ensuring unit tests can verify config validation without hitting the network.
+// BuildWithBackends wires config into production servers with REAL backends (JWKS,
+// Azure Blob, Valkey, ClickHouse, ACR). Required production config is validated
+// BEFORE any live client is constructed, so a misconfigured deployment fails with a
+// startup error naming the field rather than a network timeout.
 //
-// On success every field of the returned Servers is populated except Dashboard,
-// which is nil when the dashboard is off. On any error the zero Servers is
-// returned — nothing to serve, and nothing to close, because fail() has already
-// released whatever had been opened.
+// On success every field of the returned Servers is populated except Dashboard, which
+// is nil when the dashboard is off. On any error the zero Servers is returned —
+// nothing to serve and nothing to close, because fail() has already released whatever
+// had been opened, in reverse order.
+//
+// The body is the SEQUENCE and nothing else. Each step is a helper in components.go
+// that owns its own resources and its own closer, which is what makes the closer
+// ordering assertable (see closerStack) and the hermetic path above a subset of this
+// one rather than a parallel implementation.
 func BuildWithBackends(ctx context.Context, cfg config.Config) (Servers, error) {
-	// VALIDATE-FIRST: Check required production fields before constructing live clients.
-	// This allows unit tests to exercise validation logic without network calls.
-	if cfg.ACR.RegistryTemplate == "" {
-		return Servers{}, fmt.Errorf("production config: ACR.RegistryTemplate is required")
+	if err := validateProductionConfig(cfg); err != nil {
+		return Servers{}, err
 	}
-	if cfg.ACR.BaseDomain == "" {
-		return Servers{}, fmt.Errorf("production config: ACR.BaseDomain is required")
-	}
-	if len(cfg.Tenants) == 0 {
-		return Servers{}, fmt.Errorf("production config: at least one tenant is required")
-	}
-	if cfg.Auth.RegistryTokenSecret == "" {
-		return Servers{}, fmt.Errorf("production config: Auth.RegistryTokenSecret is required")
-	}
-	if cfg.Server.ExternalURL == "" {
-		return Servers{}, fmt.Errorf("production config: Server.ExternalURL is required")
-	}
-	if cfg.Staging.BlobAccountURL == "" {
-		return Servers{}, fmt.Errorf("production config: Staging.BlobAccountURL is required")
-	}
-	if cfg.Staging.ValkeyAddr == "" {
-		return Servers{}, fmt.Errorf("production config: Staging.ValkeyAddr is required")
-	}
-	if cfg.Audit.ClickHouseDSN == "" {
-		return Servers{}, fmt.Errorf("production config: Audit.ClickHouseDSN is required")
-	}
-
-	// Parse gate timeout
 	gateTimeout, err := time.ParseDuration(cfg.Server.GateTimeout)
 	if err != nil {
 		return Servers{}, fmt.Errorf("parse gate timeout %q: %w", cfg.Server.GateTimeout, err)
@@ -224,326 +171,86 @@ func BuildWithBackends(ctx context.Context, cfg config.Config) (Servers, error) 
 
 	// --- LIVE BACKENDS (network calls below) ---
 
-	// Create cancellable context for JWKS refresh goroutine
+	// bctx bounds every goroutine started below: the per-tenant JWKS refreshers, the
+	// promotion worker, the samplers and the alerter.
 	bctx, cancel := context.WithCancel(ctx)
-
-	// Track opened resources for cleanup on error
-	var closers []func()
+	var closers closerStack
 	fail := func(e error) (Servers, error) {
 		cancel()
-		for i := len(closers) - 1; i >= 0; i-- {
-			closers[i]()
-		}
+		closers.closeAll()
 		return Servers{}, e
 	}
 
-	// Per-tenant resolver: each tenant gets its own ACR host, outbound push
-	// identity (workload-identity client ID), and inbound Entra auth surface
-	// (JWKS keyfunc + JWT authenticator). The resolver binds a request host to
-	// its tenant by DNS prefix; this host->tenant mapping is the security
-	// boundary, so it MUST be a real static resolver built from config.
-	tenants := make(map[string]*tenant.Tenant, len(cfg.Tenants))
-	for _, tc := range cfg.Tenants {
-		registry := tc.Registry(cfg.ACR.RegistryTemplate)
-		kf, err := auth.NewEntraKeyfunc(bctx, tc.Auth.JWKSURL)
-		if err != nil {
-			return fail(fmt.Errorf("tenant %s: JWKS keyfunc: %w", tc.Prefix, err))
-		}
-		tAuthn := auth.NewJWTAuthenticator(tc.Auth.Issuer, tc.Auth.Audience, kf)
-		tPusher, err := acr.NewACRPusherWithClientID(registry, tc.ACRClientID)
-		if err != nil {
-			return fail(fmt.Errorf("tenant %s: ACR pusher: %w", tc.Prefix, err))
-		}
-		tenants[tc.Prefix] = &tenant.Tenant{
-			Prefix:   tc.Prefix,
-			Registry: registry,
-			Pusher:   tPusher,
-			Authn:    tAuthn,
-		}
-	}
-	resolver := tenant.NewStaticResolver(cfg.ACR.BaseDomain, tenants)
-
-	// Registry token issuer + client credentials validator
-	ttl, err := time.ParseDuration(cfg.Auth.RegistryTokenTTL)
-	if err != nil {
-		return fail(fmt.Errorf("parse registry_token_ttl: %w", err))
-	}
-	issuer := auth.NewRegistryTokenIssuer([]byte(cfg.Auth.RegistryTokenSecret), cfg.Auth.Service, ttl)
-	// Client-credentials validator is shared across tenants; uses the first tenant's
-	// Entra tenant/audience. Per-tenant client-creds is out of scope (see plan).
-	cc := auth.NewEntraClientCredentials(cfg.Tenants[0].Auth.TenantID, cfg.Tenants[0].Auth.Audience+"/.default")
-
-	// Staging: Azure Blob + Valkey session store
-	blobStore, err := staging.NewAzureBlobStoreWithCredential(cfg.Staging.BlobAccountURL, cfg.Staging.BlobContainer)
-	if err != nil {
-		return fail(fmt.Errorf("create blob store: %w", err))
-	}
-	sessionTTL, err := time.ParseDuration(cfg.Staging.SessionTTL)
-	if err != nil {
-		return fail(fmt.Errorf("parse staging.session_ttl: %w", err))
-	}
-	sessionStore, err := staging.NewValkeySessionStoreWithTTL(cfg.Staging.ValkeyAddr, sessionTTL)
-	if err != nil {
-		return fail(fmt.Errorf("create session store: %w", err))
-	}
-	store := staging.New(blobStore, sessionStore, generatePushID)
-
-	// Promotion queue, dialled here rather than beside the worker below because the
-	// handler is now built ONCE from a validated config and needs its promoter at
-	// construction. The worker still starts after the dashboard block, which is where
-	// the ordering actually matters (see there). Moving the dial earlier changes no
-	// error the caller can observe: it hits the same Valkey the session store above
-	// has already reached, so an unreachable Valkey is still reported as "session
-	// store", and an unreachable ClickHouse is still reported as "audit writer".
-	promQueue, err := promote.NewValkeyQueueAtAddr(cfg.Staging.ValkeyAddr, promote.DefaultKeyPrefix)
-	if err != nil {
-		return fail(fmt.Errorf("create promote queue: %w", err))
-	}
-
-	// Audit: ClickHouse writer + auditor + reader
-	// IMPORTANT: Writer must be constructed first — it bootstraps the schema (CREATE DATABASE + tables).
-	auditWriter, err := audit.NewClickHouseWriter(cfg.Audit.ClickHouseDSN, cfg.Audit.RetentionDays)
-	if err != nil {
-		return fail(fmt.Errorf("create audit writer: %w", err))
-	}
-	// Track writer for cleanup (cast to access Close method)
-	writerCloser, ok := auditWriter.(interface{ Close() error })
-	if ok {
-		closers = append(closers, func() { writerCloser.Close() })
-	}
-
-	auditor := audit.NewAuditor(auditWriter, cfg.Audit.QueueSize, func(d audit.Decision, err error) {
-		// A dropped decision means a scan ran but its audit record was lost — the
-		// report endpoint will then have nothing to serve for that image. Log which
-		// image was affected so this is diagnosable instead of silently invisible.
-		log.Printf("audit drop: decision NOT recorded for %s/%s (push_id=%s passed=%t): %v",
-			d.Repo, d.Tag, d.PushID, d.Passed, err)
-	})
-	closers = append(closers, func() { auditor.Close() })
-
-	reportsReader, err := audit.NewClickHouseReader(cfg.Audit.ClickHouseDSN)
-	if err != nil {
-		return fail(fmt.Errorf("create audit reader: %w", err))
-	}
-	closers = append(closers, func() { reportsReader.Close() })
-
-	// Metrics are constructed BEFORE the policies: the grype policy is the only
-	// component that sees the scanner DB's build date, so it holds the age observer.
-	reg := prometheus.NewRegistry()
-	metrics := observability.NewMetrics(reg)
-
-	// Policies + engine
-	runner, err := grypeRunner(cfg)
+	authc, err := buildAuth(bctx, cfg)
 	if err != nil {
 		return fail(err)
 	}
-	grypePolicy := grype.New(runner, cfg.Grype.SeverityThreshold, grypeOptions(cfg, metrics)...)
-	basePolicy := baseimage.New(cfg.BaseImage.AllowedIDs)
-	def, per := imageAgeRules(cfg)
-	agePolicy := imageage.New(def, per)
-	engine := policy.NewEngine(grypePolicy, basePolicy, agePolicy)
+	store, err := buildStaging(cfg)
+	if err != nil {
+		return fail(err)
+	}
+	promQueue, err := buildPromotion(cfg)
+	if err != nil {
+		return fail(err)
+	}
+	auditc, closeAudit, err := buildAudit(cfg)
+	if err != nil {
+		return fail(err)
+	}
+	closers.push(closeAudit)
 
-	// Router + pool
+	reg, metrics := newMetrics()
+	engine, err := buildPolicyEngine(cfg, metrics)
+	if err != nil {
+		return fail(err)
+	}
 	rt := router.New(engine)
-	pool := router.NewPool(rt, cfg.Staging.ScanPoolSize)
 
-	// Docker ingress handler with real backends. The per-request tenant pusher is
-	// supplied to Outcome.Apply by the handler, so Outcome holds no Pusher.
-	outcome := &dockeringress.Outcome{
-		ReportBaseURL: "/reports",
-		Recorder:      auditor,
-		IDGen:         generatePushID,
-	}
-	if cfg.Staging.ScratchDir != "" {
-		// Reclaim scratch dirs stranded by a previous crash. Assembly cleanup is
-		// deferred, and a SIGKILL (OOMKill) runs no defers, so those dirs are
-		// unreferenced and would otherwise accumulate until the volume fills — 15.7G
-		// had built up this way. Startup is the safe moment: no assembly is in flight
-		// yet. Non-fatal — a sweep failure must not stop the gate from serving.
-		if n, err := staging.SweepScratch(cfg.Staging.ScratchDir, staging.DefaultScratchMaxAge); err != nil {
-			log.Printf("scratch sweep failed for %s: %v", cfg.Staging.ScratchDir, err)
-		} else if n > 0 {
-			log.Printf("scratch sweep: reclaimed %d abandoned scratch dir(s) under %s", n, cfg.Staging.ScratchDir)
-		}
-	}
+	// The dashboard is built BEFORE the outcome because it decides what records gate
+	// decisions: with the dashboard live they are teed into its feed. Building it first
+	// means the outcome — and therefore the handler and the promotion worker — is
+	// complete at construction instead of patched afterwards.
+	dashSrv, recorder := buildDashboard(cfg, reg, auditc.Reports, auditc.Auditor)
+	outcome := buildOutcome(recorder, metrics, generatePushID)
 
-	// Metrics (registry built above, with the policies).
-	outcome.Metrics = metrics // observe push decisions, ACR pushes, scan latency
+	sweepScratchAtStartup(cfg)
 
-	// The handler is built ONCE, from a config New validates. Every field here used to
-	// be a setter call on a handler that was already constructible without it, so a
-	// knob whose precondition was unmet silently did nothing.
-	handler, err := dockeringress.New(dockeringress.HandlerConfig{
-		Resolver: resolver,
-		Router:   rt,
-		Outcome:  outcome,
-		Store:    store,
-		Reports:  reportsReader,
-		// Count requests answered before a decision exists (401, 404, shed 503).
-		Requests: metrics,
-		Pool:     pool,
-		// Budgets the slot wait and the scan separately, one gateTimeout each.
-		GateTimeout:    gateTimeout,
-		MaxUploadBytes: cfg.Server.MaxUploadBytes,
-		// Bound concurrent upload memory. Separate from the scan pool above: that one
-		// is sized for Grype CPU, while this caps how many pushes may buffer blob bytes
-		// at once (staging re-reads the accumulated upload on every chunk, so the
-		// resident cost is a multiple of max_upload_bytes per in-flight upload).
-		UploadConcurrency: cfg.Server.UploadConcurrency,
-		ScratchBaseDir:    cfg.Staging.ScratchDir,
-		// Registry auth: verify Merlin's own token on /v2/, and point the challenge at
-		// the /token endpoint the TokenHandler below serves.
-		RegistryIssuer: issuer,
-		TokenRealm:     cfg.Server.ExternalURL + "/token",
-		Service:        cfg.Auth.Service,
-		TokenHandler:   &dockeringress.TokenHandler{Resolver: resolver, ClientCreds: cc, Issuer: issuer},
-		// Deferred ACR publication. Both push clients hardcode a 30s
-		// ResponseHeaderTimeout that no flag can raise, so the manifest PUT cannot be
-		// held across the ACR push: the scan stays synchronous (the verdict must remain
-		// in the push exit code) and only publication moves to the durable queue.
-		Promoter: promote.QueuePromoter{Queue: promQueue},
-		// Bound the backlog. The 201 goes out while the job is still queued, so nothing
-		// but the worker's drain rate limits how much scratch the pending layouts hold —
-		// and scratch is a per-pod emptyDir.
-		MaxPendingPromotions: dockeringress.DefaultMaxPendingPromotions,
+	// The handler is built ONCE, from a config New validates. Every field used to be a
+	// setter call on a handler that was already constructible without it, so a knob
+	// whose precondition was unmet silently did nothing.
+	handler, err := buildIngress(cfg, ingressDeps{
+		Auth:        authc,
+		Store:       store,
+		Reports:     auditc.Reports,
+		Router:      rt,
+		Outcome:     outcome,
+		Requests:    metrics,
+		Queue:       promQueue,
+		GateTimeout: gateTimeout,
 	})
 	if err != nil {
 		return fail(err)
 	}
 
-	mainSrv := &http.Server{Addr: cfg.Server.Addr, Handler: handler}
-	metricsSrv := &http.Server{Addr: cfg.Server.MetricsAddr, Handler: metrics.Handler()}
+	startPromoteWorker(bctx, cfg, promQueue, store, authc.Tenants, outcome.Recorder, metrics)
+	startSamplers(bctx, cfg, promQueue, metrics)
 
-	// Dashboard server: on by default, built unless dashboard_addr is "off".
-	var dashSrv *http.Server
-	if !strings.EqualFold(cfg.Server.DashboardAddr, "off") && cfg.Server.DashboardAddr != "" {
-		broadcaster := dashboard.NewBroadcaster(64)
-		// Tee gate decisions into the live feed without changing the audit path.
-		outcome.Recorder = dashboard.NewTeeRecorder(auditor, broadcaster)
-
-		rnd, derr := dashboard.NewRenderer()
-		if derr != nil {
-			// Log and continue: the dashboard must never fail the process.
-			log.Printf("dashboard disabled: renderer: %v", derr)
-		} else {
-			svc := dashboard.NewService(reportsReader, reg, nil)
-			dashSrv = &http.Server{
-				Addr:    cfg.Server.DashboardAddr,
-				Handler: dashboard.NewServer(svc, rnd, broadcaster, nil),
-			}
-		}
-	}
-
-	// The promotion WORKER is started after the dashboard block on purpose:
-	// outcome.Recorder is whatever is actually recording by now (the tee recorder when
-	// the dashboard is on, the bare auditor otherwise). Reusing it means an abandoned
-	// promotion appears on exactly the same surfaces as a synchronous failure, rather
-	// than skipping the live feed. The queue itself is dialled far above, where the
-	// handler's config needs it.
-	worker := &promote.Worker{
-		Queue: promQueue,
-		// Resolve by tenant PREFIX, from the same map that built the resolver. A repo
-		// name does not identify a tenant: two tenants may host the same repo against
-		// different registries, so keying on repo could publish to the wrong ACR.
-		Pushers: func(prefix string) (acr.Pusher, error) {
-			t, ok := tenants[prefix]
-			if !ok {
-				return nil, fmt.Errorf("unknown tenant prefix %q", prefix)
-			}
-			return t.Pusher, nil
-		},
-		Recorder: promote.AuditFinalizer{Recorder: outcome.Recorder},
-		// Rebuild the OCI layout when this pod is not the one that assembled it. The
-		// chart mounts scratch as an emptyDir (per pod) while the queue is one shared
-		// Valkey list and replicaCount is 2, so roughly half of all jobs are claimed by
-		// the wrong pod. The blobs are still reachable — they live in the shared blob
-		// store and their ref-counts are released by Cleanup, which has not run yet —
-		// so re-assembling locally is all that is needed.
-		Localize: func(ctx context.Context, j promote.Job) (string, string, error) {
-			dir, err := os.MkdirTemp(cfg.Staging.ScratchDir, "merlin-promote-*")
-			if err != nil {
-				return "", "", fmt.Errorf("create promote scratch dir: %w", err)
-			}
-			img, err := store.Assemble(ctx, staging.ManifestRef{
-				Repo: j.Repo, Ref: j.Ref, Manifest: j.Manifest,
-				ConfigDigest: j.ConfigDig, LayerDigests: j.Layers,
-			}, dir)
-			if err != nil {
-				// Remove the half-built layout: the retry calls Localize again and would
-				// otherwise leave one of these per attempt.
-				os.RemoveAll(dir)
-				return "", "", fmt.Errorf("re-assemble %s: %w", j.Target, err)
-			}
-			log.Printf("promote %s: rebuilt OCI layout locally (assembled on another replica)", j.PushID)
-			return img.OCIPath, dir, nil
-		},
-		Cleanup: func(ctx context.Context, j promote.Job) error {
-			return store.Cleanup(ctx, staging.ManifestRef{
-				Repo: j.Repo, Ref: j.Ref, ConfigDigest: j.ConfigDig, LayerDigests: j.Layers,
-			}, j.ScratchDir)
-		},
-		Metrics: metrics,
-	}
-	go worker.Run(bctx)
-
-	// Sample the two levels deferred promotion made load-bearing, and keep sweeping.
-	//
-	// The startup-only sweep above is no longer sufficient: a cross-pod promotion
-	// rebuilds the layout locally and the ORIGIN pod's merlin-assemble-* dir becomes
-	// unreachable by any running code (its owner is on the other replica), so scratch
-	// now leaks during NORMAL operation rather than only after a crash.
-	go func() {
-		t := time.NewTicker(promoteSampleInterval)
-		defer t.Stop()
-		sweepAt := time.Now().Add(scratchSweepInterval)
-		for {
-			if depth, derr := promQueue.Depth(bctx); derr == nil {
-				metrics.SetPendingPromotions(depth)
-			}
-			if bytes, berr := staging.ScratchBytes(cfg.Staging.ScratchDir); berr == nil {
-				metrics.SetScratchBytes(bytes)
-			}
-			if !time.Now().Before(sweepAt) {
-				sweepAt = time.Now().Add(scratchSweepInterval)
-				if n, serr := staging.SweepScratch(cfg.Staging.ScratchDir, staging.DefaultScratchMaxAge); serr != nil {
-					log.Printf("scratch sweep failed for %s: %v", cfg.Staging.ScratchDir, serr)
-				} else if n > 0 {
-					log.Printf("scratch sweep: reclaimed %d abandoned scratch dir(s) under %s", n, cfg.Staging.ScratchDir)
-				}
-			}
-			select {
-			case <-t.C:
-			case <-bctx.Done():
-				return
-			}
-		}
-	}()
-
-	// Alerter: polls the audit table and posts findings to Slack. Started last because
-	// it only reads, so nothing above depends on it — and fatal if it is configured but
-	// cannot connect, since a deployment that believes it is watched and is not is
-	// worse than one that knows it isn't.
+	// The alerter polls the audit table and posts findings to Slack. Started last
+	// because it only reads, so nothing above depends on it — and fatal if it is
+	// configured but cannot connect, since a deployment that believes it is watched and
+	// is not is worse than one that knows it isn't.
 	alertCloser, err := startAlerter(bctx, cfg)
 	if err != nil {
 		return fail(fmt.Errorf("start alerter: %w", err))
 	}
-	if alertCloser != nil {
-		closers = append(closers, alertCloser)
-	}
+	closers.push(alertCloser)
 
-	return Servers{
-		Gate:      mainSrv,
-		Metrics:   metricsSrv,
-		Dashboard: dashSrv,
-		// Cancel the JWKS context and the goroutines started above, then close
-		// every resource in reverse order of acquisition.
-		Close: func() {
-			cancel()
-			for i := len(closers) - 1; i >= 0; i-- {
-				closers[i]()
-			}
-		},
-	}, nil
+	return buildServers(cfg, handler, metrics, dashSrv, func() {
+		// Cancel the goroutines first, then release every resource in reverse order of
+		// acquisition: a sampler still reading the queue must stop before the queue does.
+		cancel()
+		closers.closeAll()
+	}), nil
 }
 
 // generatePushID creates a random 16-byte hex ID for tracking push sessions.

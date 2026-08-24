@@ -121,7 +121,8 @@ test reaching into handler internals would have to be rewritten by the very refa
 guards — which by ground rule 1 would prove it was never a refactor.
 
 **Three things the item asked for are NOT asserted, and pretending otherwise would be the
-decoration this plan warns about:**
+decoration this plan warns about:** *(two of the three were made in R1 commit 3, 2026-08-24 —
+see `TestCloserStackRunsInReverseOrder` and `TestOutcomeMetricsAlsoCountACRPushes`.)*
 
 - **Closers run in reverse order.** The `closers` slice is private and `cleanup()` returns
   nothing, so order is unobservable from outside the package. What IS asserted: `cleanup()`
@@ -182,11 +183,11 @@ catch, caught by it.
    validate required fields once in the constructor. The setters stayed as thin deprecated
    wrappers for one commit so the ~90 test call sites migrated separately rather than in the
    same diff as the constructor; commit 2b deleted them.
-3. **Decompose `BuildWithBackends`** into per-concern helpers (`buildStaging`,
-   `buildAudit`, `buildPromotion`, `buildAuth`, `buildServers`), each returning its
-   component plus a closer. `Build` then becomes a thin call into the same helpers with
-   backends stubbed — which is what makes the divergence *visible in one place* instead of
-   duplicated across two functions.
+3. **Decompose `BuildWithBackends`** ✅ **DONE 2026-08-24** (see below) into per-concern
+   helpers (`buildStaging`, `buildAudit`, `buildPromotion`, `buildAuth`, `buildServers`),
+   each returning its component plus a closer. `Build` then becomes a thin call into the same
+   helpers with backends stubbed — which is what makes the divergence *visible in one place*
+   instead of duplicated across two functions.
 
 **Explicitly preserved:** `Build`'s hermetic contract (no live backends, no goroutines, no
 alerter). The goal is to make that contract legible, not to remove it. Record it as a
@@ -336,6 +337,79 @@ for Grype CPU, and sharing it would make uploads and scans starve each other"
 on both packages; `mage integration` green across all five. The dated plan and spec records
 under `docs/` still name the deleted setters on purpose — they are records of what was true
 when written, not live documentation.
+
+### Commit 3 — `BuildWithBackends` decomposed (landed 2026-08-24)
+
+`BuildWithBackends` went **331 → 92 lines** and `Build` **→ 49**; the extracted helpers live
+in the new `internal/app/components.go`. The remaining body is the *sequence* and nothing
+else: validate, then one call per concern, each owning its own resources and its own closer.
+
+| Helper | Owns |
+|---|---|
+| `validateProductionConfig` | the 8 required-field checks, order preserved exactly |
+| `buildAuth` | per-tenant JWKS authenticators + refreshers, resolver, registry-token issuer, client creds |
+| `buildStaging` | the session store (no closer — neither client exposes one) |
+| `buildPromotion` | the Valkey promotion queue |
+| `buildAudit` | ClickHouse writer, auditor, report reader (+ one closer for all three) |
+| `newMetrics` / `buildPolicyEngine` / `buildOutcome` | registry and sinks, the policy engine, the decision outcome |
+| `buildIngress` | the `HandlerConfig` literal and `docker.New` |
+| `buildDashboard` | the dashboard server **and the decision recorder** |
+| `sweepScratchAtStartup` / `startPromoteWorker` / `startSamplers` | the startup sweep and the three goroutines |
+| `buildServers` | the three `http.Server` values and the composed `Close` |
+
+**The last construction-by-mutation in this package is gone.** `outcome.Recorder` used to be
+patched *after* the outcome was built, because whether decisions are teed into the dashboard
+feed is only known once the dashboard exists. `buildDashboard` now **returns** the recorder
+and is called *before* `buildOutcome`, so the outcome — and therefore the handler and the
+promotion worker — is complete at construction. Behaviour-equivalent because `dashboard.New*`
+neither dials nor fails fatally, and the mutation happened before any request was served.
+`TestBuildDashboardReturnsTheRecorderInUse` pins the three cases (`off`, `""`, a real addr).
+
+**Both assertions R0 recorded as impossible are now made — and mutation-checked.**
+
+1. `TestCloserStackRunsInReverseOrder`. The closers were a local slice inside a 331-line
+   function and `cleanup()` returned nothing, so the order was unobservable. It is
+   load-bearing, not cosmetic: the auditor drains its queue into the ClickHouse writer on
+   `Close`, so a writer released first silently discards every buffered decision — scans that
+   ran and left no record. Reversing `closeAll`'s loop fails with
+   `close order = [writer auditor reader], want [reader auditor writer]`.
+2. `TestOutcomeMetricsAlsoCountACRPushes`. `Handler.acrPushObserver` reaches the ACR push
+   counter by **type assertion** on `outcome.Metrics`, so a sink implementing only
+   `MetricsObserver` compiles, wires, passes every push test, and silently stops writing
+   `merlin_acr_push_total`. The test asserts the assertion succeeds *and* scrapes the series
+   back, because a sink wired to a different registry would pass the assertion alone.
+   Wrapping `outcome.Metrics` in a `MetricsObserver`-only type fails with
+   `outcome.Metrics (app.onlyPushMetrics) is not an ACRPushObserver`.
+
+**One divergence was documented rather than fixed.** `Build` passes no `IDGen`, so pushes get
+`docker.generatePushID`, which degrades to a timestamp when `crypto/rand` fails;
+`BuildWithBackends` passes this package's, which panics. That is a real difference between the
+paths, but this commit preserves behaviour, so it is enumerated on `Build`'s doc comment and
+pinned by `TestBuildOutcomeIDGenIsTheCallersChoice` — the reconciliation stays a decision
+instead of becoming drift.
+
+**Verification, run rather than asserted:**
+
+- **`helm template` byte-identical** (working tree vs `git stash`).
+- **Production-path startup logs identical.** The earlier probes booted `Build`, not
+  `BuildWithBackends` — `cmd/merlin` selects the production path on `MERLIN_MODE=production`,
+  and without it the probe verified the hermetic path only. Re-run properly: the live
+  ConfigMap with the three ports retargeted and `staging.valkey_addr` / `audit.clickhouse_dsn`
+  pointed at throwaway containers (the same cluster-mode Valkey and version-pinned ClickHouse
+  `mage testAppWiring` provisions), plus a dummy `AZURE_FEDERATED_TOKEN_FILE` so the ACR
+  credential constructs off-cluster. Both binaries then reach a **fully wired production
+  boot** — all five startup lines, all three listeners bound. Sorted and with timestamps
+  stripped, the diff is empty. The three `listening on` lines interleave nondeterministically
+  *within* each binary across repeat runs (three runs of each showed two different orders per
+  binary), so raw-order equality is not the property to assert here.
+- **Registered metric set identical**, scraped from `/metrics` on both binaries: the same 7
+  series. This is the check that would catch a `newMetrics` extraction that registered
+  collectors on a registry nothing serves.
+- `go test -race ./...` clean; `mage integration` green across all five packages.
+
+App coverage: **80.4% → 80.5%** live (`mage testAppWiring`), **39.3% → 44.3%** hermetic. The
+hermetic jump is the point — helpers reachable without live backends are now testable
+individually, which is what `components_test.go` exercises.
 
 ---
 
@@ -495,5 +569,5 @@ Named so nobody "fixes" them later:
 | ~~1~~ | ~~R3 (promote coverage)~~ **DONE** | net in place; reliability step 1 is unblocked |
 | ~~2~~ | ~~R2 + reliability step 2~~ **DONE** | `a440b59` refactor + `92edcac` behaviour; live verification still owed |
 | ~~3~~ | ~~R0 (app coverage)~~ **DONE** | 82.1% live / 39.3% hermetic; R1 unblocked |
-| 4 | R1 (one constructor) | **in progress** — commits 1 (`Servers`), 2 (`HandlerConfig`) and 2b (setters deleted) landed; next is decomposing `BuildWithBackends`; assert closer ORDER and the ACR push observer reaching `outcome` once helpers own their closers |
+| ~~4~~ | ~~R1 (one constructor)~~ **DONE** | all four commits landed: 1 (`Servers`), 2 (`HandlerConfig`), 2b (setters deleted), 3 (`BuildWithBackends` decomposed). Both R0-deferred assertions — closer ORDER and the ACR push observer reaching `outcome` — are now made and mutation-checked. 80.5% live / 44.3% hermetic |
 | 5 | R4 items | any time, independently |
