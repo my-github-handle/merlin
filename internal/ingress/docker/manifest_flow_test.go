@@ -16,28 +16,34 @@ import (
 	"github.com/merlin-gate/merlin/internal/policies/baseimage"
 	"github.com/merlin-gate/merlin/internal/policies/grype"
 	"github.com/merlin-gate/merlin/internal/policy"
+	"github.com/merlin-gate/merlin/internal/promote"
 	"github.com/merlin-gate/merlin/internal/router"
 	"github.com/merlin-gate/merlin/internal/staging"
 )
 
 // buildIntegrationHandler assembles a handler with in-memory staging, pool, and fake ACR.
-func buildIntegrationHandler(t *testing.T, gryReport grype.Report, poolSize int) (*Handler, *acr.FakePusher) {
+//
+// The trailing tweaks are applied to the HandlerConfig just before New sees it, which
+// is how a test asks for a promoter, a shorter gate budget or a backlog bound. They
+// replace the Set* calls the same tests used to make AFTER construction — the
+// difference being that New now gets to check the result.
+func buildIntegrationHandler(t *testing.T, gryReport grype.Report, poolSize int, tweaks ...func(*HandlerConfig)) (*Handler, *acr.FakePusher) {
 	t.Helper()
 	fp := &acr.FakePusher{}
-	return buildIntegrationHandlerWithPusher(t, gryReport, poolSize, fp), fp
+	return buildIntegrationHandlerWithPusher(t, gryReport, poolSize, fp, tweaks...), fp
 }
 
 // buildIntegrationHandlerWithPusher is buildIntegrationHandler with the ACR pusher
 // supplied by the caller, for tests that need a pusher that blocks or fails.
-func buildIntegrationHandlerWithPusher(t *testing.T, gryReport grype.Report, poolSize int, pusher acr.Pusher) *Handler {
+func buildIntegrationHandlerWithPusher(t *testing.T, gryReport grype.Report, poolSize int, pusher acr.Pusher, tweaks ...func(*HandlerConfig)) *Handler {
 	t.Helper()
-	return buildIntegrationHandlerWithRunner(t, staticRunner{report: gryReport}, poolSize, pusher)
+	return buildIntegrationHandlerWithRunner(t, staticRunner{report: gryReport}, poolSize, pusher, tweaks...)
 }
 
 // buildIntegrationHandlerWithRunner is buildIntegrationHandlerWithPusher with the grype
 // runner supplied too, for tests about what happens DURING a scan (a runner that blocks
 // and inspects its own context) rather than about its verdict.
-func buildIntegrationHandlerWithRunner(t *testing.T, runner grype.Runner, poolSize int, pusher acr.Pusher) *Handler {
+func buildIntegrationHandlerWithRunner(t *testing.T, runner grype.Runner, poolSize int, pusher acr.Pusher, tweaks ...func(*HandlerConfig)) *Handler {
 	t.Helper()
 	n := 0
 	st := staging.New(staging.NewMemoryBlobStore(), staging.NewMemorySessionStore(), func() string {
@@ -47,15 +53,38 @@ func buildIntegrationHandlerWithRunner(t *testing.T, runner grype.Runner, poolSi
 	tp := grype.New(runner, "CRITICAL")
 	bp := baseimage.New([]string{"rhel", "wolfi", "chainguard"})
 	rt := router.New(policy.NewEngine(tp, bp))
-	pool := router.NewPool(rt, poolSize)
-	o := &Outcome{ReportBaseURL: "/reports"}
-	h := NewHandler(testResolver("myreg.azurecr.io", pusher, fakeAuth{ok: true}), st, rt, o, nil)
-	h.SetPool(pool)
-	h.SetGateTimeout(5 * time.Second)
-	// Per-test scratch base rather than the shared system temp dir, so a test can
-	// count assemble scratch dirs to detect a leak without seeing other tests'.
-	h.SetScratchBaseDir(t.TempDir())
-	return h
+	cfg := HandlerConfig{
+		Resolver:    testResolver("myreg.azurecr.io", pusher, fakeAuth{ok: true}),
+		Store:       st,
+		Router:      rt,
+		Outcome:     &Outcome{ReportBaseURL: "/reports"},
+		Pool:        router.NewPool(rt, poolSize),
+		GateTimeout: 5 * time.Second,
+		// Per-test scratch base rather than the shared system temp dir, so a test can
+		// count assemble scratch dirs to detect a leak without seeing other tests'.
+		ScratchBaseDir: t.TempDir(),
+	}
+	for _, tweak := range tweaks {
+		tweak(&cfg)
+	}
+	return mustNewHandler(t, cfg)
+}
+
+// withPromoter defers publication to prom.
+func withPromoter(prom promote.Promoter) func(*HandlerConfig) {
+	return func(cfg *HandlerConfig) { cfg.Promoter = prom }
+}
+
+// withMaxPendingPromotions bounds the promotion backlog. New rejects a bound with no
+// Promoter to count, so it is always paired with withPromoter.
+func withMaxPendingPromotions(n int) func(*HandlerConfig) {
+	return func(cfg *HandlerConfig) { cfg.MaxPendingPromotions = n }
+}
+
+// withGateTimeout shortens the per-phase gate budget so a test need not wait out the
+// production one.
+func withGateTimeout(d time.Duration) func(*HandlerConfig) {
+	return func(cfg *HandlerConfig) { cfg.GateTimeout = d }
 }
 
 // uploadLayer uploads a blob layer through the handler's upload path.
@@ -449,9 +478,7 @@ func TestManifestPUTPoolSaturated(t *testing.T) {
 	pool := router.NewPool(rt, 1)
 	fp := &acr.FakePusher{}
 	o := &Outcome{ReportBaseURL: "/reports"}
-	h := NewHandler(testResolver("myreg.azurecr.io", fp, fakeAuth{ok: true}), st, rt, o, nil)
-	h.SetPool(pool)
-	h.SetGateTimeout(5 * time.Second) // long enough for first request to stay alive while blocking
+	h := mustNewHandler(t, HandlerConfig{Resolver: testResolver("myreg.azurecr.io", fp, fakeAuth{ok: true}), Store: st, Router: rt, Outcome: o, Pool: pool, GateTimeout: 5 * time.Second})
 
 	// Upload the first layer
 	layerDigest := uploadLayer(t, h, "app1", layer)

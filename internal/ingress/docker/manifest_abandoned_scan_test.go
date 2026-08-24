@@ -231,8 +231,7 @@ func TestAbandonedScanFailureNamesTheAbandonment(t *testing.T) {
 // when the client is still waiting.
 func TestScanOverBudgetSaysItRanOutOfTime(t *testing.T) {
 	r := newPausingRunner() // never released; only its context can end the scan
-	h := buildIntegrationHandlerWithRunner(t, r, 1, &ctxPusher{})
-	h.SetGateTimeout(80 * time.Millisecond)
+	h := buildIntegrationHandlerWithRunner(t, r, 1, &ctxPusher{}, withGateTimeout(80*time.Millisecond))
 	rec := &spyRecorder{}
 	h.outcome.Recorder = rec
 

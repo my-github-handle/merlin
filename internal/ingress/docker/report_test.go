@@ -62,7 +62,7 @@ func (errReports) HeaderByImageRef(_ context.Context, _, _ string) (audit.Decisi
 
 func TestReportEndpointReturnsFindings(t *testing.T) {
 	rs := &fakeReports{findings: []policy.Finding{{CVE: "CVE-1", Severity: "CRITICAL", Pkg: "openssl"}}}
-	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), nil, nil, nil, rs)
+	h := mustNewHandler(t, HandlerConfig{Resolver: testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), Reports: rs})
 	req := httptest.NewRequest(http.MethodGet, "/reports/push-123", nil)
 	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
@@ -105,7 +105,7 @@ func TestSplitImageRef(t *testing.T) {
 
 func TestReportEndpointByImageTag(t *testing.T) {
 	rs := &fakeReports{findings: []policy.Finding{{CVE: "CVE-X", Severity: "CRITICAL"}}}
-	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), nil, nil, nil, rs)
+	h := mustNewHandler(t, HandlerConfig{Resolver: testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), Reports: rs})
 	req := httptest.NewRequest(http.MethodGet, "/reports/c3aiops:2.13.25-as", nil)
 	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
@@ -122,7 +122,7 @@ func TestReportEndpointByImageTag(t *testing.T) {
 
 func TestReportEndpointByImageDigest(t *testing.T) {
 	rs := &fakeReports{header: audit.DecisionHeader{Found: true}}
-	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), nil, nil, nil, rs)
+	h := mustNewHandler(t, HandlerConfig{Resolver: testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), Reports: rs})
 	req := httptest.NewRequest(http.MethodGet, "/reports/e2e/app@sha256:deadbeef", nil)
 	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
@@ -138,7 +138,7 @@ func TestReportEndpointByImageDigest(t *testing.T) {
 
 func TestReportEndpointByPushIDStillWorks(t *testing.T) {
 	rs := &fakeReports{header: audit.DecisionHeader{Found: true}}
-	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), nil, nil, nil, rs)
+	h := mustNewHandler(t, HandlerConfig{Resolver: testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), Reports: rs})
 	req := httptest.NewRequest(http.MethodGet, "/reports/88824db0a4604bf48aad9ec246144d20", nil)
 	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
@@ -154,7 +154,7 @@ func TestReportEndpointByPushIDStillWorks(t *testing.T) {
 
 func TestReportEndpointRejectsUnauthenticated(t *testing.T) {
 	rs := &fakeReports{}
-	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: false}), nil, nil, nil, rs)
+	h := mustNewHandler(t, HandlerConfig{Resolver: testResolver("myreg.azurecr.io", nil, fakeAuth{ok: false}), Reports: rs})
 	req := httptest.NewRequest(http.MethodGet, "/reports/push-123", nil)
 	req.Host = testTenantHost
 	// no Authorization header
@@ -167,7 +167,7 @@ func TestReportEndpointRejectsUnauthenticated(t *testing.T) {
 
 func TestReportEndpointErrorIs500(t *testing.T) {
 	rs := errReports{} // FindingsByPush returns an error
-	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), nil, nil, nil, rs)
+	h := mustNewHandler(t, HandlerConfig{Resolver: testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), Reports: rs})
 	req := httptest.NewRequest(http.MethodGet, "/reports/push-123", nil)
 	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
@@ -182,7 +182,7 @@ func TestReportEndpointErrorIs500(t *testing.T) {
 // findings array — [] not null, so jq-style consumers can iterate safely.
 func TestReportEndpointEmptyFindingsOK(t *testing.T) {
 	rs := &fakeReports{findings: nil, header: audit.DecisionHeader{Found: true}}
-	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), nil, nil, nil, rs)
+	h := mustNewHandler(t, HandlerConfig{Resolver: testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), Reports: rs})
 	req := httptest.NewRequest(http.MethodGet, "/reports/push-123", nil)
 	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
@@ -204,7 +204,7 @@ func TestReportEndpointEmptyFindingsOK(t *testing.T) {
 // scanned this" must be distinguishable from "we scanned it and found nothing".
 func TestReportEndpointUnknownRefIs404(t *testing.T) {
 	rs := &fakeReports{} // header zero value: Found=false, no findings
-	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), nil, nil, nil, rs)
+	h := mustNewHandler(t, HandlerConfig{Resolver: testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), Reports: rs})
 	req := httptest.NewRequest(http.MethodGet, "/reports/app:never-pushed", nil)
 	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
@@ -221,7 +221,7 @@ func TestReportEnvelopeCarriesInfraError(t *testing.T) {
 	rs := &fakeReports{header: audit.DecisionHeader{
 		Found: true, InfraError: true, ErrorDetail: `policy "grype" could not run: run grype: signal: killed`,
 	}}
-	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), nil, nil, nil, rs)
+	h := mustNewHandler(t, HandlerConfig{Resolver: testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), Reports: rs})
 	req := httptest.NewRequest(http.MethodGet, "/reports/push-123", nil)
 	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
@@ -251,7 +251,7 @@ func TestReportEnvelopeIncludesAge(t *testing.T) {
 			ImageAgeKnown:         true,
 		},
 	}
-	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), nil, nil, nil, rs)
+	h := mustNewHandler(t, HandlerConfig{Resolver: testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), Reports: rs})
 	req := httptest.NewRequest(http.MethodGet, "/reports/app:v1", nil)
 	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")

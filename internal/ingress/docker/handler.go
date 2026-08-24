@@ -55,44 +55,6 @@ type RequestObserver interface {
 	ObserveRequest(method, route, status string)
 }
 
-// SetRequestObserver wires per-request counting. Nil disables it. Safe to call only
-// before the handler starts serving.
-//
-// Deprecated: set HandlerConfig.Requests and call New. Kept only so this
-// package's tests migrate incrementally; removed with the rest of the setters.
-func (h *Handler) SetRequestObserver(o RequestObserver) { h.requests = o }
-
-// SetPromoter defers ACR publication to a durable queue, so the manifest PUT is not
-// held across the push. Nil keeps the synchronous push (hermetic tests,
-// single-binary dev).
-//
-// Deprecated: set HandlerConfig.Promoter and call New. Kept only so this
-// package's tests migrate incrementally; removed with the rest of the setters.
-func (h *Handler) SetPromoter(p promote.Promoter) { h.promoter = p }
-
-// SetMaxPendingPromotions bounds how many promotions may be waiting for the worker
-// before a push is shed with 503 + Retry-After.
-//
-// This is a DISK bound. Deferring publication means the 201 goes out while the job
-// is still queued, so each pending job pins an OCI layout plus an extracted rootfs
-// on the scratch volume — a per-pod emptyDir — and the only thing limiting total
-// scratch is the worker's drain rate. Under a slow ACR that is unbounded. Shedding a
-// push is recoverable (docker retries); filling the volume fails every concurrent
-// push at assemble time.
-//
-// n < 1 disables the check (the zero value, so callers that never configure it are
-// unaffected). Safe to call only before the handler starts serving.
-//
-// Deprecated: set HandlerConfig.MaxPendingPromotions and call New. Kept only so this
-// package's tests migrate incrementally; removed with the rest of the setters.
-func (h *Handler) SetMaxPendingPromotions(n int) {
-	if n < 1 {
-		h.maxPending = 0
-		return
-	}
-	h.maxPending = n
-}
-
 // DefaultMaxPendingPromotions bounds the promotion backlog when the operator has
 // not configured one. Deliberately small: each pending job holds roughly twice the
 // image size on the scratch emptyDir (the OCI layout keeps the compressed blobs, the
@@ -131,21 +93,20 @@ func (h *Handler) pushID() string {
 	return generatePushID()
 }
 
-// HandlerConfig is everything a Handler is built from: the five collaborators
-// NewHandler took positionally, plus the eleven knobs that used to be set one
-// method call at a time after construction.
+// HandlerConfig is everything a Handler is built from: five collaborators and eleven
+// knobs, all supplied in one place.
 //
-// The setters were not merely verbose. A handler was reachable in a partially
-// configured state, every knob's precondition was checked nowhere, and a knob whose
-// precondition was unmet did nothing AT ALL — no error, no log. MaxUploadBytes
-// without slots, a promotion bound with no promoter, a registry issuer with an empty
-// realm: each of those is a value in a ConfigMap that an operator would reasonably
-// believe is in force. New validates the couplings once, up front, where a mistake
-// costs a startup failure instead of a silent gap.
+// It replaced a positional constructor followed by up to eleven setters. That was not
+// merely verbose: the handler was reachable in a partially configured state, no knob's
+// precondition was checked anywhere, and a knob whose precondition was unmet did
+// nothing AT ALL — no error, no log. A promotion bound with no promoter, an upload
+// wait with no slots, a registry issuer with an empty realm: each of those is a value
+// in a ConfigMap that an operator would reasonably believe is in force. New validates
+// the couplings once, up front, where a mistake costs a startup failure instead of a
+// silent gap.
 //
-// The zero value of every optional field is the "unconfigured" behaviour the
-// corresponding setter produced when never called, so a caller that fills in only
-// what it needs gets exactly what NewHandler used to give it.
+// The zero value of every optional field is the unconfigured behaviour, so a caller
+// fills in only what it needs.
 type HandlerConfig struct {
 	// Resolver binds a request Host to its tenant. REQUIRED: this mapping is the
 	// security boundary — it decides which ACR a push may reach and whose Entra
@@ -176,8 +137,15 @@ type HandlerConfig struct {
 	Promoter promote.Promoter
 
 	// MaxPendingPromotions bounds the promotion backlog; a push beyond it is shed
-	// with 503 + Retry-After. This is a DISK bound (each pending job pins an OCI
-	// layout and an extracted rootfs on a per-pod emptyDir), not a fairness one.
+	// with 503 + Retry-After.
+	//
+	// This is a DISK bound, not a fairness one. Deferring publication means the 201
+	// goes out while the job is still queued, so each pending job pins an OCI layout
+	// plus an extracted rootfs on the scratch volume — a per-pod emptyDir — and the
+	// only thing limiting total scratch is the worker's drain rate, which under a slow
+	// ACR is unbounded. Shedding a push is recoverable (docker retries); filling the
+	// volume fails every concurrent push at assemble time.
+	//
 	// Zero means unbounded. Requires Promoter — a bound with nothing to count is
 	// rejected rather than ignored.
 	MaxPendingPromotions int
@@ -186,11 +154,17 @@ type HandlerConfig struct {
 	// defaultMaxUploadBytes.
 	MaxUploadBytes int64
 
-	// UploadConcurrency caps how many blob uploads may buffer bytes at once. This is
-	// a MEMORY bound: staging re-reads the accumulated upload on every chunk, so an
-	// in-flight upload holds a multiple of the chunk size resident, and N concurrent
-	// pushes cost N times that — which is how these pods reached their limit and were
-	// OOMKilled. Zero means unbounded.
+	// UploadConcurrency caps how many blob uploads may buffer bytes at once.
+	//
+	// This is a MEMORY bound, not a fairness one: staging.WriteChunk and CompleteBlob
+	// read the accumulated upload back, append, and re-Put it, so an in-flight upload
+	// holds several times the chunk size resident. Nothing else bounded that — only the
+	// manifest gate acquires the scan Pool — so N concurrent pushes cost N times that,
+	// which is how these pods reached their memory limit and were OOMKilled. The scan
+	// Pool is deliberately NOT reused: it is sized for Grype CPU, and sharing it would
+	// make uploads and scans starve each other.
+	//
+	// Zero means unbounded.
 	UploadConcurrency int
 
 	// UploadWait bounds how long an upload queues for a slot before 503 +
@@ -278,18 +252,6 @@ func New(cfg HandlerConfig) (*Handler, error) {
 	return h, nil
 }
 
-// NewHandler builds the V2 handler. reports backs GET /reports/<push_id>.
-//
-// Deprecated: use New with a HandlerConfig. Kept so the tests in this package
-// migrate off the setters incrementally rather than in the same commit that
-// introduces the replacement; it and the Set* methods go away together.
-func NewHandler(resolver tenant.Resolver, st *staging.Store, r *router.Router, o *Outcome, reports ReportSource) *Handler {
-	h := &Handler{resolver: resolver, store: st, router: r, outcome: o, reports: reports, mux: http.NewServeMux()}
-	h.mux.HandleFunc("/v2/", h.route)
-	h.mux.HandleFunc("/reports/", h.handleReport)
-	return h
-}
-
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 	start := time.Now()
@@ -361,19 +323,11 @@ func queryForLog(raw string) string {
 	return "?" + raw
 }
 
-// SetMaxUploadBytes configures the maximum upload chunk size (default 512 MiB).
-//
-// Deprecated: set HandlerConfig.MaxUploadBytes and call New. Kept only so this
-// package's tests migrate incrementally; removed with the rest of the setters.
-func (h *Handler) SetMaxUploadBytes(n int64) {
-	h.maxUploadBytes = n
-}
-
 // defaultMaxUploadBytes bounds a single upload request body when the operator has
 // not configured a limit. Deliberately far below the pod memory limit: staging
 // buffers the whole chunk AND the accumulated upload in memory, so the resident
 // cost is a multiple of this number, times the number of concurrent uploads (see
-// SetUploadConcurrency). The former 2 GiB default could not be absorbed by any
+// HandlerConfig.UploadConcurrency). The former 2 GiB default could not be absorbed by any
 // limit merlin runs under.
 const defaultMaxUploadBytes = 512 << 20 // 512 MiB
 
@@ -382,38 +336,6 @@ func (h *Handler) getMaxUploadBytes() int64 {
 		return defaultMaxUploadBytes
 	}
 	return h.maxUploadBytes
-}
-
-// SetUploadConcurrency caps how many blob-upload requests may buffer bytes at once.
-//
-// This is a MEMORY bound, not a fairness one: staging.WriteChunk and CompleteBlob
-// read the accumulated upload back, append, and re-Put it, so an in-flight upload
-// holds several times the chunk size resident. Nothing else bounded that — only the
-// manifest gate acquires the scan pool — so N concurrent pushes cost N x that, which
-// is how the pods reached their memory limit and were OOMKilled. The scan pool is
-// deliberately NOT reused: it is sized for Grype CPU, and sharing it would make
-// uploads and scans starve each other.
-//
-// n < 1 disables the limit (the zero value, so callers that never configure it are
-// unaffected). Safe to call only before the handler starts serving.
-//
-// Deprecated: set HandlerConfig.UploadConcurrency and call New. Kept only so this
-// package's tests migrate incrementally; removed with the rest of the setters.
-func (h *Handler) SetUploadConcurrency(n int) {
-	if n < 1 {
-		h.uploadSlots = nil
-		return
-	}
-	h.uploadSlots = make(chan struct{}, n)
-}
-
-// SetUploadWait bounds how long an upload queues for a slot before it is answered
-// with 503 + Retry-After. Zero uses defaultUploadWait.
-//
-// Deprecated: set HandlerConfig.UploadWait and call New. Kept only so this
-// package's tests migrate incrementally; removed with the rest of the setters.
-func (h *Handler) SetUploadWait(d time.Duration) {
-	h.uploadWait = d
 }
 
 // defaultUploadWait keeps a queued upload waiting long enough that a normal push
@@ -447,53 +369,6 @@ func (h *Handler) acquireUploadSlot(w http.ResponseWriter, r *http.Request) (rel
 		// Client gave up while queued; there is no one left to answer.
 		return nil, false
 	}
-}
-
-// SetPool configures the gate pool for concurrent scan limiting.
-//
-// Deprecated: set HandlerConfig.Pool and call New. Kept only so this
-// package's tests migrate incrementally; removed with the rest of the setters.
-func (h *Handler) SetPool(p *router.Pool) {
-	h.pool = p
-}
-
-// SetGateTimeout configures the gate timeout (default 5 minutes when pool is used).
-//
-// Deprecated: set HandlerConfig.GateTimeout and call New. Kept only so this
-// package's tests migrate incrementally; removed with the rest of the setters.
-func (h *Handler) SetGateTimeout(d time.Duration) {
-	h.gateTimeout = d
-}
-
-// SetScratchBaseDir configures the base directory for scratch dirs used during
-// image assembly. When set, scratch dirs are created under this directory (typically
-// a writable emptyDir mount). When empty (default), os.MkdirTemp creates scratch
-// dirs in the system temp location.
-//
-// Deprecated: set HandlerConfig.ScratchBaseDir and call New. Kept only so this
-// package's tests migrate incrementally; removed with the rest of the setters.
-func (h *Handler) SetScratchBaseDir(dir string) {
-	h.scratchBaseDir = dir
-}
-
-// SetRegistryAuth switches /v2/ to verify Merlin's registry token (instead of a
-// raw Entra token) and points the WWW-Authenticate realm at the /token endpoint.
-//
-// Deprecated: set HandlerConfig.RegistryIssuer/TokenRealm/Service and call New. Kept only so this
-// package's tests migrate incrementally; removed with the rest of the setters.
-func (h *Handler) SetRegistryAuth(issuer *auth.RegistryTokenIssuer, tokenRealm, service string) {
-	h.regIssuer = issuer
-	h.tokenRealm = tokenRealm
-	h.service = service
-}
-
-// SetTokenHandler registers the GET /token endpoint.
-//
-// Deprecated: set HandlerConfig.TokenHandler and call New. Kept only so this
-// package's tests migrate incrementally; removed with the rest of the setters.
-func (h *Handler) SetTokenHandler(th *TokenHandler) {
-	h.tokenHandler = th
-	h.mux.HandleFunc("/token", th.ServeHTTP)
 }
 
 func (h *Handler) route(w http.ResponseWriter, r *http.Request) {

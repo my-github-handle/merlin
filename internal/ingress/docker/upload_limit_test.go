@@ -98,8 +98,7 @@ func TestUploadConcurrencyIsBounded(t *testing.T) {
 
 	bs := newBlockingBlobStore(callers)
 	st := staging.New(bs, staging.NewMemorySessionStore(), countingIDGen())
-	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), st, nil, nil, nil)
-	h.SetUploadConcurrency(limit)
+	h := mustNewHandler(t, HandlerConfig{Resolver: testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), Store: st, UploadConcurrency: limit})
 
 	var wg sync.WaitGroup
 	for i := 0; i < callers; i++ {
@@ -134,11 +133,11 @@ func TestUploadConcurrencyIsBounded(t *testing.T) {
 }
 
 // TestUploadConcurrencyUnsetIsUnbounded documents that the limiter is opt-in: with
-// no SetUploadConcurrency call the handler must not gate uploads at all, so tests
+// UploadConcurrency left at zero the handler must not gate uploads at all, so tests
 // and callers that never configure it are unaffected.
 func TestUploadConcurrencyUnsetIsUnbounded(t *testing.T) {
 	st := staging.New(staging.NewMemoryBlobStore(), staging.NewMemorySessionStore(), countingIDGen())
-	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), st, nil, nil, nil)
+	h := mustNewHandler(t, HandlerConfig{Resolver: testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), Store: st})
 
 	if rec := monolithicPush(h, []byte("unbounded")); rec.Code != http.StatusCreated {
 		t.Errorf("status = %d, want 201", rec.Code)
@@ -151,9 +150,7 @@ func TestUploadConcurrencyUnsetIsUnbounded(t *testing.T) {
 func TestUploadSaturationReturns503(t *testing.T) {
 	bs := newBlockingBlobStore(4)
 	st := staging.New(bs, staging.NewMemorySessionStore(), countingIDGen())
-	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), st, nil, nil, nil)
-	h.SetUploadConcurrency(1)
-	h.SetUploadWait(50 * time.Millisecond) // fail fast instead of queueing
+	h := mustNewHandler(t, HandlerConfig{Resolver: testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), Store: st, UploadConcurrency: 1, UploadWait: 50 * time.Millisecond})
 
 	// Occupy the single slot for the rest of the test.
 	go monolithicPush(h, []byte("holder"))
@@ -180,9 +177,7 @@ func TestUploadSaturationReturns503(t *testing.T) {
 func TestBeginUploadNotGated(t *testing.T) {
 	bs := newBlockingBlobStore(4)
 	st := staging.New(bs, staging.NewMemorySessionStore(), countingIDGen())
-	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), st, nil, nil, nil)
-	h.SetUploadConcurrency(1)
-	h.SetUploadWait(50 * time.Millisecond)
+	h := mustNewHandler(t, HandlerConfig{Resolver: testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), Store: st, UploadConcurrency: 1, UploadWait: 50 * time.Millisecond})
 
 	// Hold the only slot with a real blob upload.
 	go monolithicPush(h, []byte("holder"))
@@ -210,7 +205,7 @@ func TestBeginUploadNotGated(t *testing.T) {
 // read-modify-write multiplies it; an oversized layer must fail as a clean 413
 // rather than as an OOMKill that takes every concurrent push with it.
 func TestDefaultMaxUploadBytes(t *testing.T) {
-	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), nil, nil, nil, nil)
+	h := mustNewHandler(t, HandlerConfig{Resolver: testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true})})
 	if got := h.getMaxUploadBytes(); got != 512<<20 {
 		t.Errorf("default max upload bytes = %d, want %d (512 MiB)", got, 512<<20)
 	}

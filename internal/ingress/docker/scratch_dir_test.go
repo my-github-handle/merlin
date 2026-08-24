@@ -19,7 +19,7 @@ import (
 	"github.com/merlin-gate/merlin/internal/staging"
 )
 
-// TestScratchBaseDirRespected tests that when SetScratchBaseDir is called,
+// TestScratchBaseDirRespected tests that when ScratchBaseDir is configured,
 // scratch directories are created under that base path (e.g., a writable emptyDir mount).
 func TestScratchBaseDirRespected(t *testing.T) {
 	// Setup: build handler with in-memory staging
@@ -34,13 +34,9 @@ func TestScratchBaseDirRespected(t *testing.T) {
 	pool := router.NewPool(rt, 2)
 	fp := &acr.FakePusher{}
 	o := &Outcome{ReportBaseURL: "/reports"}
-	h := NewHandler(testResolver("myreg.azurecr.io", fp, fakeAuth{ok: true}), st, rt, o, nil)
-	h.SetPool(pool)
-	h.SetGateTimeout(5 * time.Second)
-
-	// Set scratch base dir to a temporary directory (simulating a writable emptyDir mount)
+	// A temporary directory stands in for the writable emptyDir mount production uses.
 	scratchBase := t.TempDir()
-	h.SetScratchBaseDir(scratchBase)
+	h := mustNewHandler(t, HandlerConfig{Resolver: testResolver("myreg.azurecr.io", fp, fakeAuth{ok: true}), Store: st, Router: rt, Outcome: o, Pool: pool, GateTimeout: 5 * time.Second, ScratchBaseDir: scratchBase})
 
 	// Upload a layer
 	layer := layerWithOSID(t, "rhel")
@@ -76,7 +72,7 @@ func TestScratchBaseDirRespected(t *testing.T) {
 	// - We can't directly inspect the transient scratch dir (it's cleaned up by defer),
 	//   but we can verify the push succeeded, which proves the scratch dir was usable.
 	//
-	// This test verifies the wiring: when SetScratchBaseDir is called, the handler USES it.
+	// This test verifies the wiring: when ScratchBaseDir is configured, the handler USES it.
 	// A full integration test with read-only root filesystem would require a container runtime.
 	if len(fp.Pushed) != 1 {
 		t.Errorf("expected ACR push, got %d pushes", len(fp.Pushed))
@@ -86,7 +82,7 @@ func TestScratchBaseDirRespected(t *testing.T) {
 	// should still work (using system temp). We've already tested that in existing tests.
 }
 
-// TestScratchBaseDirDefaultBehavior tests that when SetScratchBaseDir is NOT called,
+// TestScratchBaseDirDefaultBehavior tests that when ScratchBaseDir is left empty,
 // the handler uses the default system temp location (empty string passed to os.MkdirTemp).
 func TestScratchBaseDirDefaultBehavior(t *testing.T) {
 	// Setup: build handler WITHOUT setting scratch base dir
@@ -100,9 +96,9 @@ func TestScratchBaseDirDefaultBehavior(t *testing.T) {
 	rt := router.New(policy.NewEngine(tp, bp))
 	fp := &acr.FakePusher{}
 	o := &Outcome{ReportBaseURL: "/reports"}
-	h := NewHandler(testResolver("myreg.azurecr.io", fp, fakeAuth{ok: true}), st, rt, o, nil)
+	h := mustNewHandler(t, HandlerConfig{Resolver: testResolver("myreg.azurecr.io", fp, fakeAuth{ok: true}), Store: st, Router: rt, Outcome: o})
 
-	// DO NOT call SetScratchBaseDir — scratchBaseDir should be "" (default)
+	// ScratchBaseDir omitted from the config above — scratchBaseDir should be "" (default)
 
 	// Upload a layer
 	layer := layerWithOSID(t, "rhel")
@@ -165,8 +161,7 @@ func TestScratchBaseDirPathValidation(t *testing.T) {
 	rt := router.New(policy.NewEngine(tp, bp))
 	fp := &acr.FakePusher{}
 	o := &Outcome{ReportBaseURL: "/reports"}
-	h := NewHandler(testResolver("myreg.azurecr.io", fp, fakeAuth{ok: true}), originalStore, rt, o, nil)
-	h.SetScratchBaseDir(scratchBase)
+	h := mustNewHandler(t, HandlerConfig{Resolver: testResolver("myreg.azurecr.io", fp, fakeAuth{ok: true}), Store: originalStore, Router: rt, Outcome: o, ScratchBaseDir: scratchBase})
 
 	// Upload a layer
 	layer := layerWithOSID(t, "rhel")
@@ -216,8 +211,7 @@ func TestScratchBaseDirInvalidPath(t *testing.T) {
 	rt := router.New(policy.NewEngine(tp, bp))
 	fp := &acr.FakePusher{}
 	o := &Outcome{ReportBaseURL: "/reports"}
-	h := NewHandler(testResolver("myreg.azurecr.io", fp, fakeAuth{ok: true}), st, rt, o, nil)
-	h.SetScratchBaseDir(invalidBase)
+	h := mustNewHandler(t, HandlerConfig{Resolver: testResolver("myreg.azurecr.io", fp, fakeAuth{ok: true}), Store: st, Router: rt, Outcome: o, ScratchBaseDir: invalidBase})
 
 	// Upload a layer
 	layer := layerWithOSID(t, "rhel")
@@ -264,8 +258,7 @@ func TestScratchBaseDirActualPathLocation(t *testing.T) {
 	rt := router.New(policy.NewEngine(capturingPolicy))
 	fp := &acr.FakePusher{}
 	o := &Outcome{ReportBaseURL: "/reports"}
-	h := NewHandler(testResolver("myreg.azurecr.io", fp, fakeAuth{ok: true}), st, rt, o, nil)
-	h.SetScratchBaseDir(scratchBase)
+	h := mustNewHandler(t, HandlerConfig{Resolver: testResolver("myreg.azurecr.io", fp, fakeAuth{ok: true}), Store: st, Router: rt, Outcome: o, ScratchBaseDir: scratchBase})
 
 	// Upload a layer
 	layer := layerWithOSID(t, "rhel")

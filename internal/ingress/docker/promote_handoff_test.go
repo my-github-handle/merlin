@@ -105,8 +105,7 @@ func TestManifestRespondsWithoutWaitingForACR(t *testing.T) {
 	slow := &blockingPusher{block: make(chan struct{})}
 	defer close(slow.block)
 	prom := &fakePromoter{}
-	h := buildIntegrationHandlerWithPusher(t, grype.Report{}, 2, slow)
-	h.SetPromoter(prom)
+	h := buildIntegrationHandlerWithPusher(t, grype.Report{}, 2, slow, withPromoter(prom))
 
 	done := make(chan int, 1)
 	go func() { done <- pushManifest(t, h, "app", "v1", "rhel").Code }()
@@ -133,8 +132,7 @@ func TestManifestRespondsWithoutWaitingForACR(t *testing.T) {
 // published without a second verdict.
 func TestRejectedImageIsNeverEnqueued(t *testing.T) {
 	prom := &fakePromoter{}
-	h, fp := buildIntegrationHandler(t, grype.Report{}, 2)
-	h.SetPromoter(prom)
+	h, fp := buildIntegrationHandler(t, grype.Report{}, 2, withPromoter(prom))
 
 	// alpine fails the base-image policy. Chosen over a CRITICAL CVE deliberately:
 	// the vulnerability gate's enforcement is configurable, the base-image allowlist
@@ -159,8 +157,7 @@ func TestRejectedImageIsNeverEnqueued(t *testing.T) {
 // site of the worker.
 func TestPromotionJobCarriesEverythingTheWorkerNeeds(t *testing.T) {
 	prom := &fakePromoter{}
-	h, _ := buildIntegrationHandler(t, grype.Report{}, 2)
-	h.SetPromoter(prom)
+	h, _ := buildIntegrationHandler(t, grype.Report{}, 2, withPromoter(prom))
 
 	if code := pushManifest(t, h, "app", "v1", "rhel").Code; code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201", code)
@@ -212,8 +209,7 @@ func TestPromotionJobCarriesEverythingTheWorkerNeeds(t *testing.T) {
 // worker and every promotion would fail on a missing directory.
 func TestPromotedPushLeavesScratchForTheWorker(t *testing.T) {
 	prom := &fakePromoter{}
-	h, _ := buildIntegrationHandler(t, grype.Report{}, 2)
-	h.SetPromoter(prom)
+	h, _ := buildIntegrationHandler(t, grype.Report{}, 2, withPromoter(prom))
 
 	if code := pushManifest(t, h, "app", "v1", "rhel").Code; code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201", code)
@@ -234,8 +230,7 @@ func TestPromotedPushLeavesScratchForTheWorker(t *testing.T) {
 // exactly this path.
 func TestFailedEnqueueCleansUpAndReports502(t *testing.T) {
 	prom := &fakePromoter{err: errors.New("valkey down")}
-	h, _ := buildIntegrationHandler(t, grype.Report{}, 2)
-	h.SetPromoter(prom)
+	h, _ := buildIntegrationHandler(t, grype.Report{}, 2, withPromoter(prom))
 
 	before := scratchDirCount(t, h)
 	rec := pushManifest(t, h, "app", "v1", "rhel")
@@ -266,9 +261,7 @@ func (c *countingPromoter) Pending(context.Context) (int, error) { return c.dept
 // retryable 503 puts the backpressure back on the client instead.
 func TestSaturatedPromotionQueueShedsLoad(t *testing.T) {
 	prom := &countingPromoter{depth: 4}
-	h, fp := buildIntegrationHandler(t, grype.Report{}, 2)
-	h.SetPromoter(prom)
-	h.SetMaxPendingPromotions(4)
+	h, fp := buildIntegrationHandler(t, grype.Report{}, 2, withPromoter(prom), withMaxPendingPromotions(4))
 
 	before := scratchDirCount(t, h)
 	rec := pushManifest(t, h, "app", "v1", "rhel")
@@ -299,9 +292,7 @@ func TestSaturatedPromotionQueueShedsLoad(t *testing.T) {
 // one flaky read into a full outage of the gate.
 func TestPromotionQueueDepthFailureDoesNotBlockPushes(t *testing.T) {
 	prom := &countingPromoter{err: errors.New("valkey timeout")}
-	h, _ := buildIntegrationHandler(t, grype.Report{}, 2)
-	h.SetPromoter(prom)
-	h.SetMaxPendingPromotions(1)
+	h, _ := buildIntegrationHandler(t, grype.Report{}, 2, withPromoter(prom), withMaxPendingPromotions(1))
 
 	if code := pushManifest(t, h, "app", "v1", "rhel").Code; code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201; an unreadable queue depth must not fail a passing push", code)
@@ -316,8 +307,7 @@ func TestPromotionQueueDepthFailureDoesNotBlockPushes(t *testing.T) {
 // are unaffected.
 func TestUnboundedPromotionQueueAdmitsEverything(t *testing.T) {
 	prom := &countingPromoter{depth: 10_000}
-	h, _ := buildIntegrationHandler(t, grype.Report{}, 2)
-	h.SetPromoter(prom) // no SetMaxPendingPromotions
+	h, _ := buildIntegrationHandler(t, grype.Report{}, 2, withPromoter(prom)) // no bound configured
 
 	if code := pushManifest(t, h, "app", "v1", "rhel").Code; code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201 with no bound configured", code)

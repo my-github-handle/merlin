@@ -48,7 +48,7 @@ func buildGate(t *testing.T, gryReport grype.Report) (*Handler, *acr.FakePusher,
 	rt := router.New(policy.NewEngine(tp, bp))
 	fp := &acr.FakePusher{}
 	o := &Outcome{ReportBaseURL: "/reports"}
-	h := NewHandler(testResolver("myreg.azurecr.io", fp, fakeAuth{ok: true}), st, rt, o, nil)
+	h := mustNewHandler(t, HandlerConfig{Resolver: testResolver("myreg.azurecr.io", fp, fakeAuth{ok: true}), Store: st, Router: rt, Outcome: o})
 	return h, fp, st
 }
 

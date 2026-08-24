@@ -248,7 +248,7 @@ func TestLiveWiringToleratesAnUnreachableJWKSAtBoot(t *testing.T) {
 
 // TestLiveWiringGateChallengeCarriesConfig proves three separate config values reach
 // the wire through the Docker auth challenge: ExternalURL (as the realm), Auth.Service,
-// and the fact that SetRegistryAuth/SetTokenHandler ran at all. A push client reads
+// and the fact that the issuer/realm/token-handler fields were filled at all. A push client reads
 // this header to find the token endpoint, so if it is wrong or absent every `docker
 // push` fails at authentication — and the AppGW health probe, which expects exactly
 // 401 on /v2/, marks the backend unhealthy and returns 502.

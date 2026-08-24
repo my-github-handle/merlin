@@ -152,7 +152,7 @@ func TestHTTPPushUnauthenticated(t *testing.T) {
 	fp := &acr.FakePusher{}
 	o := &Outcome{ReportBaseURL: "/reports"}
 	// Use fakeAuth{ok: false} for unauthenticated test
-	h := NewHandler(testResolver("myreg.azurecr.io", fp, fakeAuth{ok: false}), st, rt, o, nil)
+	h := mustNewHandler(t, HandlerConfig{Resolver: testResolver("myreg.azurecr.io", fp, fakeAuth{ok: false}), Store: st, Router: rt, Outcome: o})
 
 	// Try to access /v2/ without auth
 	req := httptest.NewRequest(http.MethodGet, "/v2/", nil)
@@ -184,9 +184,7 @@ func TestHTTPPushSaturated(t *testing.T) {
 	pool := router.NewPool(rt, 1)
 	fp := &acr.FakePusher{}
 	o := &Outcome{ReportBaseURL: "/reports"}
-	h := NewHandler(testResolver("myreg.azurecr.io", fp, fakeAuth{ok: true}), st, rt, o, nil)
-	h.SetPool(pool)
-	h.SetGateTimeout(5 * time.Second) // long enough for first request to stay alive
+	h := mustNewHandler(t, HandlerConfig{Resolver: testResolver("myreg.azurecr.io", fp, fakeAuth{ok: true}), Store: st, Router: rt, Outcome: o, Pool: pool, GateTimeout: 5 * time.Second})
 
 	// Upload the first layer
 	layerDigest := httpUploadBlob(t, h, "app1", layer)
@@ -264,9 +262,7 @@ func buildHTTPHandler(t *testing.T, gryReport grype.Report, poolSize int) (*Hand
 	pool := router.NewPool(rt, poolSize)
 	fp := &acr.FakePusher{}
 	o := &Outcome{ReportBaseURL: "/reports"}
-	h := NewHandler(testResolver("myreg.azurecr.io", fp, fakeAuth{ok: true}), st, rt, o, nil)
-	h.SetPool(pool)
-	h.SetGateTimeout(5 * time.Second)
+	h := mustNewHandler(t, HandlerConfig{Resolver: testResolver("myreg.azurecr.io", fp, fakeAuth{ok: true}), Store: st, Router: rt, Outcome: o, Pool: pool, GateTimeout: 5 * time.Second})
 	return h, fp
 }
 

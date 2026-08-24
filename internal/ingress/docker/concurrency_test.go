@@ -63,9 +63,7 @@ func TestConcurrentManifestPushesNoRace(t *testing.T) {
 	pool := router.NewPool(rt, 4)
 	fp := &acr.FakePusher{}
 	o := &Outcome{ReportBaseURL: "/reports"}
-	h := NewHandler(testResolver("myreg.azurecr.io", fp, fakeAuth{ok: true}), st, rt, o, nil)
-	h.SetPool(pool)
-	h.SetGateTimeout(10 * time.Second)
+	h := mustNewHandler(t, HandlerConfig{Resolver: testResolver("myreg.azurecr.io", fp, fakeAuth{ok: true}), Store: st, Router: rt, Outcome: o, Pool: pool, GateTimeout: 10 * time.Second})
 
 	const total = 16 // 8 good + 8 bad, interleaved
 	type expect struct {

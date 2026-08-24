@@ -21,7 +21,7 @@ func TestBlobUploadPOSTCreatesSession(t *testing.T) {
 		staging.NewMemorySessionStore(),
 		func() string { return "test-upload-uuid" },
 	)
-	h := NewHandler(testResolver("reg.example.com", nil, fakeAuth{ok: true}), store, nil, nil, nil)
+	h := mustNewHandler(t, HandlerConfig{Resolver: testResolver("reg.example.com", nil, fakeAuth{ok: true}), Store: store})
 
 	req := httptest.NewRequest(http.MethodPost, "/v2/myrepo/blobs/uploads/", nil)
 	req.Host = testTenantHost
@@ -52,7 +52,7 @@ func TestBlobUploadPATCHAppendsChunk(t *testing.T) {
 		staging.NewMemorySessionStore(),
 		func() string { return "upload-1" },
 	)
-	h := NewHandler(testResolver("reg.example.com", nil, fakeAuth{ok: true}), store, nil, nil, nil)
+	h := mustNewHandler(t, HandlerConfig{Resolver: testResolver("reg.example.com", nil, fakeAuth{ok: true}), Store: store})
 
 	// Begin upload
 	uploadID, err := store.BeginUpload(nil, "myrepo")
@@ -87,7 +87,7 @@ func TestBlobUploadPUTCompletesWithCorrectDigest(t *testing.T) {
 		staging.NewMemorySessionStore(),
 		func() string { return "upload-2" },
 	)
-	h := NewHandler(testResolver("reg.example.com", nil, fakeAuth{ok: true}), store, nil, nil, nil)
+	h := mustNewHandler(t, HandlerConfig{Resolver: testResolver("reg.example.com", nil, fakeAuth{ok: true}), Store: store})
 
 	// Begin upload
 	uploadID, err := store.BeginUpload(nil, "myrepo")
@@ -131,7 +131,7 @@ func TestBlobUploadPUTRejectsWrongDigest(t *testing.T) {
 		staging.NewMemorySessionStore(),
 		func() string { return "upload-3" },
 	)
-	h := NewHandler(testResolver("reg.example.com", nil, fakeAuth{ok: true}), store, nil, nil, nil)
+	h := mustNewHandler(t, HandlerConfig{Resolver: testResolver("reg.example.com", nil, fakeAuth{ok: true}), Store: store})
 
 	// Begin upload
 	uploadID, err := store.BeginUpload(nil, "myrepo")
@@ -166,7 +166,7 @@ func TestBlobUploadPATCHRejectsOutOfOrderChunk(t *testing.T) {
 		staging.NewMemorySessionStore(),
 		func() string { return "upload-4" },
 	)
-	h := NewHandler(testResolver("reg.example.com", nil, fakeAuth{ok: true}), store, nil, nil, nil)
+	h := mustNewHandler(t, HandlerConfig{Resolver: testResolver("reg.example.com", nil, fakeAuth{ok: true}), Store: store})
 
 	// Begin upload
 	uploadID, err := store.BeginUpload(nil, "myrepo")
@@ -194,7 +194,7 @@ func TestBlobUploadFullSequence(t *testing.T) {
 		staging.NewMemorySessionStore(),
 		func() string { return "upload-full" },
 	)
-	h := NewHandler(testResolver("reg.example.com", nil, fakeAuth{ok: true}), store, nil, nil, nil)
+	h := mustNewHandler(t, HandlerConfig{Resolver: testResolver("reg.example.com", nil, fakeAuth{ok: true}), Store: store})
 
 	// POST to begin
 	req := httptest.NewRequest(http.MethodPost, "/v2/testapp/blobs/uploads/", nil)
@@ -345,7 +345,7 @@ func TestUploadFailurePathsAbandonSession(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			spy := newClearSpy()
 			st := staging.New(staging.NewMemoryBlobStore(), spy, func() string { return tc.uploadID })
-			h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), st, nil, nil, nil)
+			h := mustNewHandler(t, HandlerConfig{Resolver: testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), Store: st})
 
 			up := tc.do(t, h, st)
 
@@ -365,7 +365,7 @@ func TestUploadFailurePathsAbandonSession(t *testing.T) {
 	t.Run("successful PUT clears session", func(t *testing.T) {
 		spy := newClearSpy()
 		st := staging.New(staging.NewMemoryBlobStore(), spy, func() string { return "u-ok" })
-		h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), st, nil, nil, nil)
+		h := mustNewHandler(t, HandlerConfig{Resolver: testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), Store: st})
 
 		up, err := st.BeginUpload(context.Background(), "app")
 		if err != nil {
@@ -390,7 +390,7 @@ func TestUploadFailurePathsAbandonSession(t *testing.T) {
 
 func TestMonolithicPostUploadPersistsBlob(t *testing.T) {
 	st := staging.New(staging.NewMemoryBlobStore(), staging.NewMemorySessionStore(), func() string { return "u-mono" })
-	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), st, nil, nil, nil)
+	h := mustNewHandler(t, HandlerConfig{Resolver: testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), Store: st})
 	body := []byte("monolithic-blob-bytes")
 	sum := sha256.Sum256(body)
 	dg := "sha256:" + hex.EncodeToString(sum[:])

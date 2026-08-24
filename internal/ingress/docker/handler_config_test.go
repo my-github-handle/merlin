@@ -9,8 +9,10 @@ import (
 	"time"
 
 	"github.com/merlin-gate/merlin/internal/auth"
+	"github.com/merlin-gate/merlin/internal/promote"
 	"github.com/merlin-gate/merlin/internal/router"
 	"github.com/merlin-gate/merlin/internal/staging"
+	"github.com/merlin-gate/merlin/internal/tenant"
 )
 
 // New rejects configs whose knobs would be INERT.
@@ -125,15 +127,13 @@ func TestNewAcceptsPartialButCoherentConfigs(t *testing.T) {
 	}
 }
 
-// New must produce the SAME handler the eleven setters produced.
+// New must WIRE every field of HandlerConfig into the handler.
 //
-// This is the whole behaviour-preservation claim of the change, stated field by
-// field: anything either path writes, both paths must write identically. It exists
-// only for the transition — when NewHandler and the Set* methods are deleted, this
-// test goes with them.
-func TestNewMatchesTheSettersItReplaces(t *testing.T) {
-	// One value per field, all distinct from the zero value so a dropped assignment
-	// shows up as a mismatch rather than as two matching zeroes.
+// A field the config carries and New quietly drops is the exact failure this whole
+// change exists to remove — it looks configured, reads back as configured in the
+// ConfigMap, and does nothing. So populate every field with a value distinct from its
+// zero value and check each one arrives.
+func TestNewWiresEveryConfiguredField(t *testing.T) {
 	var (
 		res       = testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true})
 		st        = staging.New(nil, nil, func() string { return "u1" })
@@ -157,20 +157,7 @@ func TestNewMatchesTheSettersItReplaces(t *testing.T) {
 		maxPending     = 5
 	)
 
-	old := NewHandler(res, st, rt, out, reports)
-	old.SetRequestObserver(requests)
-	old.SetPromoter(promoter)
-	old.SetMaxPendingPromotions(maxPending)
-	old.SetMaxUploadBytes(maxUploadBytes)
-	old.SetUploadConcurrency(uploadConc)
-	old.SetUploadWait(uploadWait)
-	old.SetPool(pool)
-	old.SetGateTimeout(gateTimeout)
-	old.SetScratchBaseDir(scratchDir)
-	old.SetRegistryAuth(iss, realm, service)
-	old.SetTokenHandler(tokenHdlr)
-
-	got, err := New(HandlerConfig{
+	h, err := New(HandlerConfig{
 		Resolver:             res,
 		Store:                st,
 		Router:               rt,
@@ -194,54 +181,48 @@ func TestNewMatchesTheSettersItReplaces(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	// A field added to Handler and wired by only one of the two paths is exactly the
-	// bug this test cannot otherwise see, because the comparison below is written out
-	// by hand (reflect cannot read unexported fields). Fail loudly instead.
+	// A Handler field added without a HandlerConfig field to fill it is invisible to
+	// the hand-written comparison below, and reflect cannot read unexported fields to
+	// find it. Fail loudly instead of passing over a gap.
 	if n := reflect.TypeOf(Handler{}).NumField(); n != 21 {
-		t.Fatalf("Handler has %d fields, not 21: add it to New, to the comparison below, or to the skip list", n)
+		t.Fatalf("Handler has %d fields, not 21: wire it in New and add it below, or note here why it is not configurable", n)
 	}
 
-	// mux is deliberately not compared (distinct instances by construction); the
-	// routes it carries are covered by TestNewRegistersTokenRouteOnlyWhenConfigured
-	// and by every other test in this package that serves /v2/ and /reports/.
-	// indexWait/indexPoll are set by neither path — they are in-package test knobs.
+	// Not compared: mux (built by New, covered by every routing test in this package,
+	// and by TestNewRegistersTokenRouteOnlyWhenConfigured); uploadSlots (a channel —
+	// its capacity is checked below); indexWait/indexPoll (deliberately not in
+	// HandlerConfig, so there is no operator knob to get wrong).
 	checks := []struct {
-		field    string
-		old, got any
+		field     string
+		want, got any
 	}{
-		{"resolver", old.resolver, got.resolver},
-		{"store", old.store, got.store},
-		{"router", old.router, got.router},
-		{"outcome", old.outcome, got.outcome},
-		{"reports", old.reports, got.reports},
-		{"requests", old.requests, got.requests},
-		{"promoter", old.promoter, got.promoter},
-		{"maxPending", old.maxPending, got.maxPending},
-		{"maxUploadBytes", old.maxUploadBytes, got.maxUploadBytes},
-		{"uploadWait", old.uploadWait, got.uploadWait},
-		{"pool", old.pool, got.pool},
-		{"gateTimeout", old.gateTimeout, got.gateTimeout},
-		{"scratchBaseDir", old.scratchBaseDir, got.scratchBaseDir},
-		{"regIssuer", old.regIssuer, got.regIssuer},
-		{"tokenRealm", old.tokenRealm, got.tokenRealm},
-		{"service", old.service, got.service},
-		{"tokenHandler", old.tokenHandler, got.tokenHandler},
-		{"indexWait", old.indexWait, got.indexWait},
-		{"indexPoll", old.indexPoll, got.indexPoll},
+		{"resolver", tenant.Resolver(res), h.resolver},
+		{"store", st, h.store},
+		{"router", rt, h.router},
+		{"outcome", out, h.outcome},
+		{"reports", ReportSource(reports), h.reports},
+		{"requests", RequestObserver(requests), h.requests},
+		{"promoter", promote.Promoter(promoter), h.promoter},
+		{"maxPending", maxPending, h.maxPending},
+		{"maxUploadBytes", maxUploadBytes, h.maxUploadBytes},
+		{"uploadWait", uploadWait, h.uploadWait},
+		{"pool", pool, h.pool},
+		{"gateTimeout", gateTimeout, h.gateTimeout},
+		{"scratchBaseDir", scratchDir, h.scratchBaseDir},
+		{"regIssuer", iss, h.regIssuer},
+		{"tokenRealm", realm, h.tokenRealm},
+		{"service", service, h.service},
+		{"tokenHandler", tokenHdlr, h.tokenHandler},
 	}
 	for _, c := range checks {
-		if c.old != c.got {
-			t.Errorf("%s: setters gave %v, config gave %v", c.field, c.old, c.got)
+		if c.want != c.got {
+			t.Errorf("%s = %v, want %v (the config field was dropped)", c.field, c.got, c.want)
 		}
 	}
 
-	// uploadSlots is a channel: two distinct instances by construction, so compare
-	// what actually governs behaviour — the capacity, which is the memory bound.
-	if cap(old.uploadSlots) != cap(got.uploadSlots) {
-		t.Errorf("uploadSlots cap: setters gave %d, config gave %d", cap(old.uploadSlots), cap(got.uploadSlots))
-	}
-	if (old.uploadSlots == nil) != (got.uploadSlots == nil) {
-		t.Errorf("uploadSlots nil-ness differs: setters %v, config %v", old.uploadSlots == nil, got.uploadSlots == nil)
+	// uploadSlots is the memory bound: what matters is the capacity, not the identity.
+	if cap(h.uploadSlots) != uploadConc {
+		t.Errorf("uploadSlots cap = %d, want %d", cap(h.uploadSlots), uploadConc)
 	}
 }
 
@@ -258,9 +239,9 @@ func TestNewLeavesUploadSlotsNilWhenUnbounded(t *testing.T) {
 	}
 }
 
-// /token exists only when a TokenHandler is configured. Under the setters the route
-// was registered as a side effect of SetTokenHandler, so this pins the equivalent
-// behaviour to the field.
+// /token exists only when a TokenHandler is configured. The route registration is a
+// side effect of the field being set, and nothing else in the package would notice if
+// New stopped doing it, so pin it here.
 func TestNewRegistersTokenRouteOnlyWhenConfigured(t *testing.T) {
 	res := testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true})
 	iss := auth.NewRegistryTokenIssuer([]byte("s"), "merlin", time.Minute)

@@ -65,8 +65,7 @@ func TestRouteClassDropsRepoAndReference(t *testing.T) {
 // this counter, a tenant whose credentials had expired produced a silent gate.
 func TestObservesRequestOnAuthFailure(t *testing.T) {
 	sr := &spyRequests{}
-	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: false}), nil, nil, nil, nil)
-	h.SetRequestObserver(sr)
+	h := mustNewHandler(t, HandlerConfig{Resolver: testResolver("myreg.azurecr.io", nil, fakeAuth{ok: false}), Requests: sr})
 
 	req := httptest.NewRequest(http.MethodGet, "/v2/", nil)
 	req.Host = testTenantHost
@@ -81,8 +80,7 @@ func TestObservesRequestOnAuthFailure(t *testing.T) {
 
 func TestObservesRequestOnSuccess(t *testing.T) {
 	sr := &spyRequests{}
-	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), nil, nil, nil, nil)
-	h.SetRequestObserver(sr)
+	h := mustNewHandler(t, HandlerConfig{Resolver: testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), Requests: sr})
 
 	req := httptest.NewRequest(http.MethodGet, "/v2/", nil)
 	req.Host = testTenantHost
@@ -101,8 +99,7 @@ func TestObservesRequestOnSuccess(t *testing.T) {
 // misconfigured DNS record or an ingress pointed at the wrong service.
 func TestObservesRequestOnUnknownHost(t *testing.T) {
 	sr := &spyRequests{}
-	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), nil, nil, nil, nil)
-	h.SetRequestObserver(sr)
+	h := mustNewHandler(t, HandlerConfig{Resolver: testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), Requests: sr})
 
 	req := httptest.NewRequest(http.MethodPut, "/v2/team/app/manifests/v1", nil)
 	req.Host = "not-a-tenant.example.com"
@@ -116,9 +113,8 @@ func TestObservesRequestOnUnknownHost(t *testing.T) {
 }
 
 func TestNilRequestObserverIsSafe(t *testing.T) {
-	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), nil, nil, nil, nil)
-	// No SetRequestObserver call at all, then an explicit nil.
-	h.SetRequestObserver(nil)
+	h := mustNewHandler(t, HandlerConfig{Resolver: testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), Requests: nil})
+	// Requests omitted from the config entirely, then set to an explicit nil.
 
 	req := httptest.NewRequest(http.MethodGet, "/v2/", nil)
 	req.Host = testTenantHost

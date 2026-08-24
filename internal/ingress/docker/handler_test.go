@@ -22,7 +22,7 @@ func (f fakeAuth) Validate(_ context.Context, bearer string) (auth.Identity, err
 }
 
 func TestV2BaseReturns401WhenUnauthenticated(t *testing.T) {
-	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: false}), nil, nil, nil, nil)
+	h := mustNewHandler(t, HandlerConfig{Resolver: testResolver("myreg.azurecr.io", nil, fakeAuth{ok: false})})
 	req := httptest.NewRequest(http.MethodGet, "/v2/", nil)
 	req.Host = testTenantHost
 	rec := httptest.NewRecorder()
@@ -36,7 +36,7 @@ func TestV2BaseReturns401WhenUnauthenticated(t *testing.T) {
 }
 
 func TestV2BaseReturns200WhenAuthenticated(t *testing.T) {
-	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), nil, nil, nil, nil)
+	h := mustNewHandler(t, HandlerConfig{Resolver: testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true})})
 	req := httptest.NewRequest(http.MethodGet, "/v2/", nil)
 	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
@@ -51,7 +51,7 @@ func TestManifestPathRejectsUnsupportedMethod(t *testing.T) {
 	// GET/HEAD on a manifest is a docker existence check → 404 (see
 	// TestManifestGetHeadReturns404NotMethodNotAllowed). A truly unsupported method
 	// (e.g. DELETE) on the manifest path → 405.
-	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), nil, nil, nil, nil)
+	h := mustNewHandler(t, HandlerConfig{Resolver: testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true})})
 	req := httptest.NewRequest(http.MethodDelete, "/v2/repo/manifests/sha256:abc", nil)
 	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
@@ -63,7 +63,7 @@ func TestManifestPathRejectsUnsupportedMethod(t *testing.T) {
 }
 
 func TestUploadPathRejectsGET(t *testing.T) {
-	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), nil, nil, nil, nil)
+	h := mustNewHandler(t, HandlerConfig{Resolver: testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true})})
 	req := httptest.NewRequest(http.MethodGet, "/v2/repo/blobs/uploads/session-id", nil)
 	req.Host = testTenantHost
 	req.Header.Set("Authorization", "Bearer good")
@@ -76,8 +76,7 @@ func TestUploadPathRejectsGET(t *testing.T) {
 
 func TestV2VerifiesRegistryToken(t *testing.T) {
 	iss := auth.NewRegistryTokenIssuer([]byte("s"), "merlin", time.Minute)
-	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), nil, nil, nil, nil)
-	h.SetRegistryAuth(iss, "https://merlin.example/token", "merlin")
+	h := mustNewHandler(t, HandlerConfig{Resolver: testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), RegistryIssuer: iss, TokenRealm: "https://merlin.example/token", Service: "merlin"})
 
 	// no token -> 401 + realm points at /token
 	req := httptest.NewRequest(http.MethodGet, "/v2/", nil)
@@ -115,8 +114,7 @@ func TestV2VerifiesRegistryToken(t *testing.T) {
 
 func TestValidatedIdentityRegistryMode(t *testing.T) {
 	iss := auth.NewRegistryTokenIssuer([]byte("s"), "merlin", time.Minute)
-	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), nil, nil, nil, nil)
-	h.SetRegistryAuth(iss, "https://merlin.example/token", "merlin")
+	h := mustNewHandler(t, HandlerConfig{Resolver: testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), RegistryIssuer: iss, TokenRealm: "https://merlin.example/token", Service: "merlin"})
 
 	ten := &tenant.Tenant{Prefix: "c3dev", Registry: "myreg.azurecr.io", Authn: fakeAuth{ok: true}}
 	tok, _, _ := iss.Mint("alice@x", "repository:app:push,pull", "c3dev")
@@ -161,8 +159,7 @@ func TestRepoFromV2Path(t *testing.T) {
 
 func TestManifestGetHeadReturns404NotMethodNotAllowed(t *testing.T) {
 	iss := auth.NewRegistryTokenIssuer([]byte("s"), "merlin", time.Minute)
-	h := NewHandler(testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), nil, nil, nil, nil)
-	h.SetRegistryAuth(iss, "https://merlin.example/token", "merlin")
+	h := mustNewHandler(t, HandlerConfig{Resolver: testResolver("myreg.azurecr.io", nil, fakeAuth{ok: true}), RegistryIssuer: iss, TokenRealm: "https://merlin.example/token", Service: "merlin"})
 	tok, _, _ := iss.Mint("u@x", "", "c3dev")
 	for _, m := range []string{http.MethodGet, http.MethodHead} {
 		req := httptest.NewRequest(m, "/v2/app/manifests/v1", nil)

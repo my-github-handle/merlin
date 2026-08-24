@@ -49,9 +49,24 @@ func testResolver(registry string, pusher acr.Pusher, authn auth.Authenticator) 
 	}}
 }
 
+// mustNewHandler builds a handler from cfg and fails the test if New rejects it.
+//
+// Every test in this package builds a handler that is coherent by construction, so
+// New's error is a bug in the test rather than a case under test — the rejections
+// themselves are covered in handler_config_test.go. Wrapping it here keeps ~50 call
+// sites one line each instead of four.
+func mustNewHandler(t *testing.T, cfg HandlerConfig) *Handler {
+	t.Helper()
+	h, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New(%+v): %v", cfg, err)
+	}
+	return h
+}
+
 func TestUnknownHostReturns404(t *testing.T) {
 	res := fakeResolver{t: &tenant.Tenant{Prefix: "c3dev", Registry: "c3devacr.azurecr.io", Authn: fakeAuth{ok: true}}}
-	h := NewHandler(res, nil, nil, nil, nil)
+	h := mustNewHandler(t, HandlerConfig{Resolver: res})
 	req := httptest.NewRequest(http.MethodGet, "/v2/", nil)
 	req.Host = "c3xxx.c3ci.cloud"
 	rec := httptest.NewRecorder()
@@ -64,8 +79,7 @@ func TestUnknownHostReturns404(t *testing.T) {
 func TestCrossPrefixTokenRejected(t *testing.T) {
 	iss := auth.NewRegistryTokenIssuer([]byte("s"), "merlin", time.Minute)
 	res := fakeResolver{t: &tenant.Tenant{Prefix: "c3prod", Registry: "c3prodacr.azurecr.io", Authn: fakeAuth{ok: true}}}
-	h := NewHandler(res, nil, nil, nil, nil)
-	h.SetRegistryAuth(iss, "https://merlin/token", "merlin")
+	h := mustNewHandler(t, HandlerConfig{Resolver: res, RegistryIssuer: iss, TokenRealm: "https://merlin/token", Service: "merlin"})
 
 	// Token minted for c3dev, presented to c3prod host.
 	tok, _, _ := iss.Mint("u", "", "c3dev")
@@ -82,8 +96,7 @@ func TestCrossPrefixTokenRejected(t *testing.T) {
 func TestMatchingPrefixTokenAccepted(t *testing.T) {
 	iss := auth.NewRegistryTokenIssuer([]byte("s"), "merlin", time.Minute)
 	res := fakeResolver{t: &tenant.Tenant{Prefix: "c3prod", Registry: "c3prodacr.azurecr.io", Authn: fakeAuth{ok: true}}}
-	h := NewHandler(res, nil, nil, nil, nil)
-	h.SetRegistryAuth(iss, "https://merlin/token", "merlin")
+	h := mustNewHandler(t, HandlerConfig{Resolver: res, RegistryIssuer: iss, TokenRealm: "https://merlin/token", Service: "merlin"})
 
 	tok, _, _ := iss.Mint("u", "", "c3prod")
 	req := httptest.NewRequest(http.MethodGet, "/v2/", nil)

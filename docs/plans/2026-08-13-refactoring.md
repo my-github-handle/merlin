@@ -61,7 +61,10 @@ the least-tested package, and the worst production bug sits in the second-least-
 
 ## Root cause: objects are constructed by mutation
 
-`internal/ingress/docker/handler.go` exposes **11 setters** — `SetRequestObserver`,
+*(Fixed 2026-08-24 by `HandlerConfig` — commits `ff35f03` and 2b below. The diagnosis is
+kept as written, because it is what the design of `New` answers to.)*
+
+`internal/ingress/docker/handler.go` exposed **11 setters** — `SetRequestObserver`,
 `SetPromoter`, `SetMaxPendingPromotions`, `SetMaxUploadBytes`, `SetUploadConcurrency`,
 `SetUploadWait`, `SetPool`, `SetGateTimeout`, `SetScratchBaseDir`, `SetRegistryAuth`,
 `SetTokenHandler` — invoked ~16 times from `app.go`. A `Handler` is therefore only valid
@@ -174,11 +177,11 @@ catch, caught by it.
    multi-return with
    `type Servers struct { Gate, Metrics, Dashboard *http.Server; Close func() }`. Mechanical,
    compiler-verified, and it removes the port-swap class of bug outright.
-2. **Config struct in place of setters.** ✅ **DONE 2026-08-24** (see below; the setter
-   *deletion* is still outstanding). Give `docker.New` a `HandlerConfig` carrying what
-   the 11 setters set, and validate required fields once in the constructor. Keep the
-   setters as thin deprecated wrappers during the transition so tests migrate incrementally
-   rather than in one commit; delete them in the final commit of this item.
+2. **Config struct in place of setters.** ✅ **DONE 2026-08-24**, in two commits (see
+   below). Give `docker.New` a `HandlerConfig` carrying what the 11 setters set, and
+   validate required fields once in the constructor. The setters stayed as thin deprecated
+   wrappers for one commit so the ~90 test call sites migrated separately rather than in the
+   same diff as the constructor; commit 2b deleted them.
 3. **Decompose `BuildWithBackends`** into per-concern helpers (`buildStaging`,
    `buildAudit`, `buildPromotion`, `buildAuth`, `buildServers`), each returning its
    component plus a closer. `Build` then becomes a thin call into the same helpers with
@@ -289,6 +292,50 @@ App coverage moved 81.9% → **80.4%** (two new error branches in `BuildWithBack
 returning `Servers{}`, not lost assertions); still above the 80% floor.
 `internal/ingress/docker` 87.3% → **87.8%**. `mage integration` green across all five
 packages.
+
+### Commit 2b — the setters deleted (landed 2026-08-24)
+
+`NewHandler` and all 11 `Set*` methods are gone. ~90 call sites across 13 test files in
+`internal/ingress/docker` now build a `HandlerConfig` literal. Two helpers keep that from
+being 90 four-line blocks:
+
+- `mustNewHandler(t, cfg)` — every test in this package builds a config that is coherent by
+  construction, so `New`'s error is a bug in the *test*, not a case under test. The
+  rejections are covered once, in `handler_config_test.go`.
+- `buildIntegrationHandler*` grew `tweaks ...func(*HandlerConfig)` (`withPromoter`,
+  `withMaxPendingPromotions`, `withGateTimeout`). Variadic, so every existing caller is
+  unchanged — the alternative was threading four more parameters through three helper
+  levels.
+
+**Two tests changed subject rather than being deleted.**
+
+`TestNewMatchesTheSettersItReplaces` compared two construction paths; one path no longer
+exists. The useful residue is *"does `New` wire every field the config carries"*, which is
+exactly the failure this whole change targets — a field that reads back as configured in the
+ConfigMap and does nothing. So it became `TestNewWiresEveryConfiguredField`: all 18 fields
+populated with non-zero values, each checked to arrive. It keeps the `NumField() == 21`
+guard, and it was mutation-checked again after the rewrite by dropping
+`scratchBaseDir: cfg.ScratchBaseDir` from `New` — it fails naming that field.
+
+`TestDockerTokenHandshake` passed `TokenRealm: ""` under a comment claiming "realm filled
+below via server URL", which it never did — the test reconstructed the URL itself and so
+never exercised the challenge a docker client actually follows. `New` rejects that now, so
+the test uses `httptest.NewUnstartedServer` (whose listener exists before `Start()`, making
+the address known before the handler is built), asserts the challenge advertises that realm,
+and then **follows the advertised realm** for step 2. A forced change that made the test
+stronger.
+
+Two rationales that lived only in deleted setter comments moved into the `HandlerConfig`
+field docs, since that is now the only place an operator reads: "shedding a push is
+recoverable (docker retries); filling the volume fails every concurrent push at assemble
+time" (`MaxPendingPromotions`) and "the scan `Pool` is deliberately NOT reused: it is sized
+for Grype CPU, and sharing it would make uploads and scans starve each other"
+(`UploadConcurrency`).
+
+`internal/ingress/docker` 87.8% → **88.0%**; app unchanged at 80.4%. `go test -race` clean
+on both packages; `mage integration` green across all five. The dated plan and spec records
+under `docs/` still name the deleted setters on purpose — they are records of what was true
+when written, not live documentation.
 
 ---
 
@@ -448,5 +495,5 @@ Named so nobody "fixes" them later:
 | ~~1~~ | ~~R3 (promote coverage)~~ **DONE** | net in place; reliability step 1 is unblocked |
 | ~~2~~ | ~~R2 + reliability step 2~~ **DONE** | `a440b59` refactor + `92edcac` behaviour; live verification still owed |
 | ~~3~~ | ~~R0 (app coverage)~~ **DONE** | 82.1% live / 39.3% hermetic; R1 unblocked |
-| 4 | R1 (one constructor) | **in progress** — commits 1 (`Servers`) and 2 (`HandlerConfig`) landed; next is migrating this package's tests off the 11 setters and deleting them, then decomposing `BuildWithBackends`; assert closer ORDER once helpers own their closers |
+| 4 | R1 (one constructor) | **in progress** — commits 1 (`Servers`), 2 (`HandlerConfig`) and 2b (setters deleted) landed; next is decomposing `BuildWithBackends`; assert closer ORDER and the ACR push observer reaching `outcome` once helpers own their closers |
 | 5 | R4 items | any time, independently |
