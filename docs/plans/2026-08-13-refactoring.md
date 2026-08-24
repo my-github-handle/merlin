@@ -174,7 +174,8 @@ catch, caught by it.
    multi-return with
    `type Servers struct { Gate, Metrics, Dashboard *http.Server; Close func() }`. Mechanical,
    compiler-verified, and it removes the port-swap class of bug outright.
-2. **Config struct in place of setters.** Give `docker.New` a `HandlerConfig` carrying what
+2. **Config struct in place of setters.** ✅ **DONE 2026-08-24** (see below; the setter
+   *deletion* is still outstanding). Give `docker.New` a `HandlerConfig` carrying what
    the 11 setters set, and validate required fields once in the constructor. Keep the
    setters as thin deprecated wrappers during the transition so tests migrate incrementally
    rather than in one commit; delete them in the final commit of this item.
@@ -237,6 +238,57 @@ number is here to catch.
 hermetic `Build`. A caller forced to ask which constructor produced its `Servers` before it
 can release them has gained nothing over the positional return. `main` lost its
 `cleanup = func() {}` branch as a result.
+
+### Commit 2 — `HandlerConfig` (landed 2026-08-24)
+
+`docker.New(HandlerConfig) (*Handler, error)` now builds the handler in one call. Both
+`Build` and `BuildWithBackends` use it; the 11 setters remain as `Deprecated:` wrappers so
+this package's ~10 test files migrate in a separate commit.
+
+**This commit is NOT purely behaviour-preserving, and that is the point of it.** `New`
+*adds* four validations that had no equivalent anywhere:
+
+| Rejected config | What it silently did before |
+|---|---|
+| no `Resolver` | nil-deref on the first request — the host→tenant map is the security boundary |
+| `RegistryIssuer` without `TokenRealm` or `Service` | `WWW-Authenticate` advertised an empty realm, so the client had nowhere to fetch a token and the push stopped with **no error logged anywhere in Merlin** |
+| `MaxPendingPromotions` without `Promoter` | `promotionBacklogFull` returns false when `promoter == nil` — the disk bound was inert |
+| `UploadWait` without `UploadConcurrency` | `acquireUploadSlot` returns immediately when `uploadSlots == nil` — the wait budget was inert |
+
+Each of those is a value an operator can put in the ConfigMap and reasonably believe is in
+force. Startup is the cheapest place to learn otherwise, so all four are now startup
+failures rather than gaps.
+
+The couplings are **one-directional**: only the dependent half is rejected. `Promoter`
+without a bound, `UploadConcurrency` without a wait, `GateTimeout` without a `Pool`
+(`runScan`/`gateBudget` use it pool or no pool), and `RegistryIssuer` without a
+`TokenHandler` (`TokenRealm` is an absolute URL — another process may serve it) all stay
+legal. `TestNewAcceptsPartialButCoherentConfigs` pins that, so a later tightening cannot
+quietly reject a working production config.
+
+**New tests** in `handler_config_test.go`, covering behaviour that did not exist before:
+`TestNewRejectsIncoherentConfigs` (the four rules, each asserting the error *names* the
+field), `TestNewAcceptsPartialButCoherentConfigs`, `TestNewLeavesUploadSlotsNilWhenUnbounded`
+(a cap-0 channel blocks forever, so getting this wrong turns "unbounded" into "shed every
+upload"), `TestNewRegistersTokenRouteOnlyWhenConfigured`, and
+`TestNewMatchesTheSettersItReplaces` — a field-by-field comparison of a handler built both
+ways. That last one is the whole equivalence claim: it was mutation-checked by dropping
+`scratchBaseDir` from `New` and confirming it fails with the field name. It carries a
+`NumField() == 21` guard, because `reflect` cannot read unexported fields and a field wired
+by only one of the two paths is precisely the bug the hand-written comparison would miss.
+It deletes itself when the setters go.
+
+**One ordering move in `app.go`.** Building the handler once requires its promoter at
+construction, but `promote.NewValkeyQueueAtAddr` was dialled ~100 lines later. Only that
+dial moved — up beside the session store, not the whole tail. Error precedence is unchanged
+and was checked against the `wiring_live_test.go` failure table: it hits the same Valkey the
+session store has already reached, so an unreachable Valkey still surfaces as
+`"session store"` and an unreachable ClickHouse still as `"audit writer"`.
+
+App coverage moved 81.9% → **80.4%** (two new error branches in `BuildWithBackends`
+returning `Servers{}`, not lost assertions); still above the 80% floor.
+`internal/ingress/docker` 87.3% → **87.8%**. `mage integration` green across all five
+packages.
 
 ---
 
@@ -396,5 +448,5 @@ Named so nobody "fixes" them later:
 | ~~1~~ | ~~R3 (promote coverage)~~ **DONE** | net in place; reliability step 1 is unblocked |
 | ~~2~~ | ~~R2 + reliability step 2~~ **DONE** | `a440b59` refactor + `92edcac` behaviour; live verification still owed |
 | ~~3~~ | ~~R0 (app coverage)~~ **DONE** | 82.1% live / 39.3% hermetic; R1 unblocked |
-| 4 | R1 (one constructor) | **in progress** — commit 1 (`Servers`) landed; next is `HandlerConfig` for the 11 setters, then decomposing `BuildWithBackends`; assert closer ORDER once helpers own their closers |
+| 4 | R1 (one constructor) | **in progress** — commits 1 (`Servers`) and 2 (`HandlerConfig`) landed; next is migrating this package's tests off the 11 setters and deleting them, then decomposing `BuildWithBackends`; assert closer ORDER once helpers own their closers |
 | 5 | R4 items | any time, independently |

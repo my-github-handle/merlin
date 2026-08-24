@@ -155,11 +155,20 @@ func Build(cfg config.Config) (Servers, error) {
 	outcome := &dockeringress.Outcome{
 		ReportBaseURL: "/reports",
 	}
-	handler := dockeringress.NewHandler(resolver, nil, rt, outcome, nil)
-
 	// Metrics (registry built above, with the policies).
-	outcome.Metrics = metrics           // observe push decisions, ACR pushes, scan latency
-	handler.SetRequestObserver(metrics) // count requests answered before a decision exists
+	outcome.Metrics = metrics // observe push decisions, ACR pushes, scan latency
+
+	// No Store and no Reports: that absence IS the hermetic contract, and stating it
+	// as two omitted fields rather than two positional nils is the point of the config.
+	handler, err := dockeringress.New(dockeringress.HandlerConfig{
+		Resolver: resolver,
+		Router:   rt,
+		Outcome:  outcome,
+		Requests: metrics, // count requests answered before a decision exists
+	})
+	if err != nil {
+		return Servers{}, err
+	}
 
 	// Close is a no-op rather than nil: Build opens nothing, but a caller that has
 	// to check which build produced its Servers before releasing them has gained
@@ -279,6 +288,18 @@ func BuildWithBackends(ctx context.Context, cfg config.Config) (Servers, error) 
 	}
 	store := staging.New(blobStore, sessionStore, generatePushID)
 
+	// Promotion queue, dialled here rather than beside the worker below because the
+	// handler is now built ONCE from a validated config and needs its promoter at
+	// construction. The worker still starts after the dashboard block, which is where
+	// the ordering actually matters (see there). Moving the dial earlier changes no
+	// error the caller can observe: it hits the same Valkey the session store above
+	// has already reached, so an unreachable Valkey is still reported as "session
+	// store", and an unreachable ClickHouse is still reported as "audit writer".
+	promQueue, err := promote.NewValkeyQueueAtAddr(cfg.Staging.ValkeyAddr, promote.DefaultKeyPrefix)
+	if err != nil {
+		return fail(fmt.Errorf("create promote queue: %w", err))
+	}
+
 	// Audit: ClickHouse writer + auditor + reader
 	// IMPORTANT: Writer must be constructed first — it bootstraps the schema (CREATE DATABASE + tables).
 	auditWriter, err := audit.NewClickHouseWriter(cfg.Audit.ClickHouseDSN, cfg.Audit.RetentionDays)
@@ -333,17 +354,7 @@ func BuildWithBackends(ctx context.Context, cfg config.Config) (Servers, error) 
 		Recorder:      auditor,
 		IDGen:         generatePushID,
 	}
-	handler := dockeringress.NewHandler(resolver, store, rt, outcome, reportsReader)
-	handler.SetPool(pool)
-	handler.SetGateTimeout(gateTimeout)
-	handler.SetMaxUploadBytes(cfg.Server.MaxUploadBytes)
-	// Bound concurrent upload memory. Separate from the scan pool above: that one is
-	// sized for Grype CPU, while this caps how many pushes may buffer blob bytes at
-	// once (staging re-reads the accumulated upload on every chunk, so the resident
-	// cost is a multiple of max_upload_bytes per in-flight upload).
-	handler.SetUploadConcurrency(cfg.Server.UploadConcurrency)
 	if cfg.Staging.ScratchDir != "" {
-		handler.SetScratchBaseDir(cfg.Staging.ScratchDir)
 		// Reclaim scratch dirs stranded by a previous crash. Assembly cleanup is
 		// deferred, and a SIGKILL (OOMKill) runs no defers, so those dirs are
 		// unreferenced and would otherwise accumulate until the volume fills — 15.7G
@@ -356,14 +367,49 @@ func BuildWithBackends(ctx context.Context, cfg config.Config) (Servers, error) 
 		}
 	}
 
-	// Wire Docker registry auth: token endpoint + challenge
-	th := &dockeringress.TokenHandler{Resolver: resolver, ClientCreds: cc, Issuer: issuer}
-	handler.SetRegistryAuth(issuer, cfg.Server.ExternalURL+"/token", cfg.Auth.Service)
-	handler.SetTokenHandler(th)
-
 	// Metrics (registry built above, with the policies).
-	outcome.Metrics = metrics           // observe push decisions, ACR pushes, scan latency
-	handler.SetRequestObserver(metrics) // count requests answered before a decision exists
+	outcome.Metrics = metrics // observe push decisions, ACR pushes, scan latency
+
+	// The handler is built ONCE, from a config New validates. Every field here used to
+	// be a setter call on a handler that was already constructible without it, so a
+	// knob whose precondition was unmet silently did nothing.
+	handler, err := dockeringress.New(dockeringress.HandlerConfig{
+		Resolver: resolver,
+		Router:   rt,
+		Outcome:  outcome,
+		Store:    store,
+		Reports:  reportsReader,
+		// Count requests answered before a decision exists (401, 404, shed 503).
+		Requests: metrics,
+		Pool:     pool,
+		// Budgets the slot wait and the scan separately, one gateTimeout each.
+		GateTimeout:    gateTimeout,
+		MaxUploadBytes: cfg.Server.MaxUploadBytes,
+		// Bound concurrent upload memory. Separate from the scan pool above: that one
+		// is sized for Grype CPU, while this caps how many pushes may buffer blob bytes
+		// at once (staging re-reads the accumulated upload on every chunk, so the
+		// resident cost is a multiple of max_upload_bytes per in-flight upload).
+		UploadConcurrency: cfg.Server.UploadConcurrency,
+		ScratchBaseDir:    cfg.Staging.ScratchDir,
+		// Registry auth: verify Merlin's own token on /v2/, and point the challenge at
+		// the /token endpoint the TokenHandler below serves.
+		RegistryIssuer: issuer,
+		TokenRealm:     cfg.Server.ExternalURL + "/token",
+		Service:        cfg.Auth.Service,
+		TokenHandler:   &dockeringress.TokenHandler{Resolver: resolver, ClientCreds: cc, Issuer: issuer},
+		// Deferred ACR publication. Both push clients hardcode a 30s
+		// ResponseHeaderTimeout that no flag can raise, so the manifest PUT cannot be
+		// held across the ACR push: the scan stays synchronous (the verdict must remain
+		// in the push exit code) and only publication moves to the durable queue.
+		Promoter: promote.QueuePromoter{Queue: promQueue},
+		// Bound the backlog. The 201 goes out while the job is still queued, so nothing
+		// but the worker's drain rate limits how much scratch the pending layouts hold —
+		// and scratch is a per-pod emptyDir.
+		MaxPendingPromotions: dockeringress.DefaultMaxPendingPromotions,
+	})
+	if err != nil {
+		return fail(err)
+	}
 
 	mainSrv := &http.Server{Addr: cfg.Server.Addr, Handler: handler}
 	metricsSrv := &http.Server{Addr: cfg.Server.MetricsAddr, Handler: metrics.Handler()}
@@ -388,19 +434,12 @@ func BuildWithBackends(ctx context.Context, cfg config.Config) (Servers, error) 
 		}
 	}
 
-	// Deferred ACR promotion. Both push clients hardcode a 30s ResponseHeaderTimeout
-	// that no flag can raise, so the manifest PUT cannot be held across the ACR push.
-	// The scan stays synchronous (the verdict must remain in the push exit code);
-	// only publication moves to a durable queue.
-	//
-	// Wired AFTER the dashboard block on purpose: outcome.Recorder is whatever is
-	// actually recording by now (the tee recorder when the dashboard is on, the bare
-	// auditor otherwise). Reusing it means an abandoned promotion appears on exactly
-	// the same surfaces as a synchronous failure, rather than skipping the live feed.
-	promQueue, err := promote.NewValkeyQueueAtAddr(cfg.Staging.ValkeyAddr, promote.DefaultKeyPrefix)
-	if err != nil {
-		return fail(fmt.Errorf("create promote queue: %w", err))
-	}
+	// The promotion WORKER is started after the dashboard block on purpose:
+	// outcome.Recorder is whatever is actually recording by now (the tee recorder when
+	// the dashboard is on, the bare auditor otherwise). Reusing it means an abandoned
+	// promotion appears on exactly the same surfaces as a synchronous failure, rather
+	// than skipping the live feed. The queue itself is dialled far above, where the
+	// handler's config needs it.
 	worker := &promote.Worker{
 		Queue: promQueue,
 		// Resolve by tenant PREFIX, from the same map that built the resolver. A repo
@@ -446,12 +485,6 @@ func BuildWithBackends(ctx context.Context, cfg config.Config) (Servers, error) 
 		Metrics: metrics,
 	}
 	go worker.Run(bctx)
-	promoter := promote.QueuePromoter{Queue: promQueue}
-	handler.SetPromoter(promoter)
-	// Bound the backlog. The 201 now goes out while the job is still queued, so
-	// nothing but the worker's drain rate limits how much scratch the pending layouts
-	// hold — and scratch is a per-pod emptyDir.
-	handler.SetMaxPendingPromotions(dockeringress.DefaultMaxPendingPromotions)
 
 	// Sample the two levels deferred promotion made load-bearing, and keep sweeping.
 	//

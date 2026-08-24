@@ -57,11 +57,17 @@ type RequestObserver interface {
 
 // SetRequestObserver wires per-request counting. Nil disables it. Safe to call only
 // before the handler starts serving.
+//
+// Deprecated: set HandlerConfig.Requests and call New. Kept only so this
+// package's tests migrate incrementally; removed with the rest of the setters.
 func (h *Handler) SetRequestObserver(o RequestObserver) { h.requests = o }
 
 // SetPromoter defers ACR publication to a durable queue, so the manifest PUT is not
 // held across the push. Nil keeps the synchronous push (hermetic tests,
 // single-binary dev).
+//
+// Deprecated: set HandlerConfig.Promoter and call New. Kept only so this
+// package's tests migrate incrementally; removed with the rest of the setters.
 func (h *Handler) SetPromoter(p promote.Promoter) { h.promoter = p }
 
 // SetMaxPendingPromotions bounds how many promotions may be waiting for the worker
@@ -76,6 +82,9 @@ func (h *Handler) SetPromoter(p promote.Promoter) { h.promoter = p }
 //
 // n < 1 disables the check (the zero value, so callers that never configure it are
 // unaffected). Safe to call only before the handler starts serving.
+//
+// Deprecated: set HandlerConfig.MaxPendingPromotions and call New. Kept only so this
+// package's tests migrate incrementally; removed with the rest of the setters.
 func (h *Handler) SetMaxPendingPromotions(n int) {
 	if n < 1 {
 		h.maxPending = 0
@@ -122,7 +131,158 @@ func (h *Handler) pushID() string {
 	return generatePushID()
 }
 
+// HandlerConfig is everything a Handler is built from: the five collaborators
+// NewHandler took positionally, plus the eleven knobs that used to be set one
+// method call at a time after construction.
+//
+// The setters were not merely verbose. A handler was reachable in a partially
+// configured state, every knob's precondition was checked nowhere, and a knob whose
+// precondition was unmet did nothing AT ALL — no error, no log. MaxUploadBytes
+// without slots, a promotion bound with no promoter, a registry issuer with an empty
+// realm: each of those is a value in a ConfigMap that an operator would reasonably
+// believe is in force. New validates the couplings once, up front, where a mistake
+// costs a startup failure instead of a silent gap.
+//
+// The zero value of every optional field is the "unconfigured" behaviour the
+// corresponding setter produced when never called, so a caller that fills in only
+// what it needs gets exactly what NewHandler used to give it.
+type HandlerConfig struct {
+	// Resolver binds a request Host to its tenant. REQUIRED: this mapping is the
+	// security boundary — it decides which ACR a push may reach and whose Entra
+	// surface authenticates it.
+	Resolver tenant.Resolver
+
+	// Router runs the policy gate. Nil is legal (the report-only and auth-only
+	// surfaces never reach it) but a manifest PUT without one cannot be gated.
+	Router *router.Router
+
+	// Outcome turns a gate result into a response, an audit row and a report URL.
+	Outcome *Outcome
+
+	// Store holds staged blobs. Nil is the hermetic wiring: no push can complete.
+	Store *staging.Store
+
+	// Reports backs GET /reports/<push_id>. Nil serves 404 there.
+	Reports ReportSource
+
+	// Requests receives per-request telemetry. Nil disables it — which is what the
+	// hermetic build wants and what production must never have, since requests
+	// answered before a decision exists (401, 404, shed 503) are counted nowhere
+	// else.
+	Requests RequestObserver
+
+	// Promoter defers ACR publication to a durable queue. Nil keeps the synchronous
+	// push, which holds the manifest PUT across the ACR upload.
+	Promoter promote.Promoter
+
+	// MaxPendingPromotions bounds the promotion backlog; a push beyond it is shed
+	// with 503 + Retry-After. This is a DISK bound (each pending job pins an OCI
+	// layout and an extracted rootfs on a per-pod emptyDir), not a fairness one.
+	// Zero means unbounded. Requires Promoter — a bound with nothing to count is
+	// rejected rather than ignored.
+	MaxPendingPromotions int
+
+	// MaxUploadBytes caps one upload request body. Zero uses
+	// defaultMaxUploadBytes.
+	MaxUploadBytes int64
+
+	// UploadConcurrency caps how many blob uploads may buffer bytes at once. This is
+	// a MEMORY bound: staging re-reads the accumulated upload on every chunk, so an
+	// in-flight upload holds a multiple of the chunk size resident, and N concurrent
+	// pushes cost N times that — which is how these pods reached their limit and were
+	// OOMKilled. Zero means unbounded.
+	UploadConcurrency int
+
+	// UploadWait bounds how long an upload queues for a slot before 503 +
+	// Retry-After. Zero uses defaultUploadWait. Requires UploadConcurrency: without
+	// slots there is no queue, so a wait budget would be inert.
+	UploadWait time.Duration
+
+	// Pool bounds concurrent scans. Nil gates on Router directly, with no limit.
+	Pool *router.Pool
+
+	// GateTimeout budgets ONE phase of the gate — the slot wait and the scan get this
+	// budget each, so a slot that frees late still gets a full scan window. Zero uses
+	// defaultGateTimeout. Independent of Pool: it bounds the scan even with no pool.
+	GateTimeout time.Duration
+
+	// ScratchBaseDir is where assembly scratch dirs are created. Empty uses the
+	// system temp dir, which in this deployment is not the volume sized for it.
+	ScratchBaseDir string
+
+	// RegistryIssuer switches /v2/ from validating a raw Entra token to verifying
+	// Merlin's own registry token. Setting it REQUIRES TokenRealm and Service: they
+	// are what the WWW-Authenticate challenge advertises, and a client that receives
+	// an empty realm has nowhere to fetch a token from, so the whole push flow stops
+	// with no error anywhere in Merlin.
+	RegistryIssuer *auth.RegistryTokenIssuer
+
+	// TokenRealm is the absolute URL the challenge points at. It need not be served
+	// by this handler — that is why a nil TokenHandler alongside a RegistryIssuer is
+	// allowed rather than rejected.
+	TokenRealm string
+
+	// Service is the Docker auth `service` value in the challenge.
+	Service string
+
+	// TokenHandler registers GET /token on this handler's mux. Nil leaves the route
+	// unregistered.
+	TokenHandler *TokenHandler
+}
+
+// New builds the V2 handler from a validated config.
+func New(cfg HandlerConfig) (*Handler, error) {
+	if cfg.Resolver == nil {
+		return nil, fmt.Errorf("docker handler: Resolver is required (host->tenant resolution is the security boundary)")
+	}
+	if cfg.RegistryIssuer != nil && (cfg.TokenRealm == "" || cfg.Service == "") {
+		return nil, fmt.Errorf("docker handler: RegistryIssuer set with TokenRealm=%q Service=%q — the WWW-Authenticate challenge would tell clients nowhere to get a token", cfg.TokenRealm, cfg.Service)
+	}
+	if cfg.MaxPendingPromotions > 0 && cfg.Promoter == nil {
+		return nil, fmt.Errorf("docker handler: MaxPendingPromotions=%d with no Promoter — the backlog bound would be inert", cfg.MaxPendingPromotions)
+	}
+	if cfg.UploadWait > 0 && cfg.UploadConcurrency < 1 {
+		return nil, fmt.Errorf("docker handler: UploadWait=%s with no UploadConcurrency — there is no queue to wait in, so the budget would be inert", cfg.UploadWait)
+	}
+
+	h := &Handler{
+		resolver:       cfg.Resolver,
+		store:          cfg.Store,
+		router:         cfg.Router,
+		outcome:        cfg.Outcome,
+		reports:        cfg.Reports,
+		mux:            http.NewServeMux(),
+		requests:       cfg.Requests,
+		promoter:       cfg.Promoter,
+		maxUploadBytes: cfg.MaxUploadBytes,
+		uploadWait:     cfg.UploadWait,
+		pool:           cfg.Pool,
+		gateTimeout:    cfg.GateTimeout,
+		scratchBaseDir: cfg.ScratchBaseDir,
+		regIssuer:      cfg.RegistryIssuer,
+		tokenRealm:     cfg.TokenRealm,
+		service:        cfg.Service,
+		tokenHandler:   cfg.TokenHandler,
+	}
+	if cfg.MaxPendingPromotions > 0 {
+		h.maxPending = cfg.MaxPendingPromotions
+	}
+	if cfg.UploadConcurrency > 0 {
+		h.uploadSlots = make(chan struct{}, cfg.UploadConcurrency)
+	}
+	h.mux.HandleFunc("/v2/", h.route)
+	h.mux.HandleFunc("/reports/", h.handleReport)
+	if cfg.TokenHandler != nil {
+		h.mux.HandleFunc("/token", cfg.TokenHandler.ServeHTTP)
+	}
+	return h, nil
+}
+
 // NewHandler builds the V2 handler. reports backs GET /reports/<push_id>.
+//
+// Deprecated: use New with a HandlerConfig. Kept so the tests in this package
+// migrate off the setters incrementally rather than in the same commit that
+// introduces the replacement; it and the Set* methods go away together.
 func NewHandler(resolver tenant.Resolver, st *staging.Store, r *router.Router, o *Outcome, reports ReportSource) *Handler {
 	h := &Handler{resolver: resolver, store: st, router: r, outcome: o, reports: reports, mux: http.NewServeMux()}
 	h.mux.HandleFunc("/v2/", h.route)
@@ -202,6 +362,9 @@ func queryForLog(raw string) string {
 }
 
 // SetMaxUploadBytes configures the maximum upload chunk size (default 512 MiB).
+//
+// Deprecated: set HandlerConfig.MaxUploadBytes and call New. Kept only so this
+// package's tests migrate incrementally; removed with the rest of the setters.
 func (h *Handler) SetMaxUploadBytes(n int64) {
 	h.maxUploadBytes = n
 }
@@ -233,6 +396,9 @@ func (h *Handler) getMaxUploadBytes() int64 {
 //
 // n < 1 disables the limit (the zero value, so callers that never configure it are
 // unaffected). Safe to call only before the handler starts serving.
+//
+// Deprecated: set HandlerConfig.UploadConcurrency and call New. Kept only so this
+// package's tests migrate incrementally; removed with the rest of the setters.
 func (h *Handler) SetUploadConcurrency(n int) {
 	if n < 1 {
 		h.uploadSlots = nil
@@ -243,6 +409,9 @@ func (h *Handler) SetUploadConcurrency(n int) {
 
 // SetUploadWait bounds how long an upload queues for a slot before it is answered
 // with 503 + Retry-After. Zero uses defaultUploadWait.
+//
+// Deprecated: set HandlerConfig.UploadWait and call New. Kept only so this
+// package's tests migrate incrementally; removed with the rest of the setters.
 func (h *Handler) SetUploadWait(d time.Duration) {
 	h.uploadWait = d
 }
@@ -281,11 +450,17 @@ func (h *Handler) acquireUploadSlot(w http.ResponseWriter, r *http.Request) (rel
 }
 
 // SetPool configures the gate pool for concurrent scan limiting.
+//
+// Deprecated: set HandlerConfig.Pool and call New. Kept only so this
+// package's tests migrate incrementally; removed with the rest of the setters.
 func (h *Handler) SetPool(p *router.Pool) {
 	h.pool = p
 }
 
 // SetGateTimeout configures the gate timeout (default 5 minutes when pool is used).
+//
+// Deprecated: set HandlerConfig.GateTimeout and call New. Kept only so this
+// package's tests migrate incrementally; removed with the rest of the setters.
 func (h *Handler) SetGateTimeout(d time.Duration) {
 	h.gateTimeout = d
 }
@@ -294,12 +469,18 @@ func (h *Handler) SetGateTimeout(d time.Duration) {
 // image assembly. When set, scratch dirs are created under this directory (typically
 // a writable emptyDir mount). When empty (default), os.MkdirTemp creates scratch
 // dirs in the system temp location.
+//
+// Deprecated: set HandlerConfig.ScratchBaseDir and call New. Kept only so this
+// package's tests migrate incrementally; removed with the rest of the setters.
 func (h *Handler) SetScratchBaseDir(dir string) {
 	h.scratchBaseDir = dir
 }
 
 // SetRegistryAuth switches /v2/ to verify Merlin's registry token (instead of a
 // raw Entra token) and points the WWW-Authenticate realm at the /token endpoint.
+//
+// Deprecated: set HandlerConfig.RegistryIssuer/TokenRealm/Service and call New. Kept only so this
+// package's tests migrate incrementally; removed with the rest of the setters.
 func (h *Handler) SetRegistryAuth(issuer *auth.RegistryTokenIssuer, tokenRealm, service string) {
 	h.regIssuer = issuer
 	h.tokenRealm = tokenRealm
@@ -307,6 +488,9 @@ func (h *Handler) SetRegistryAuth(issuer *auth.RegistryTokenIssuer, tokenRealm, 
 }
 
 // SetTokenHandler registers the GET /token endpoint.
+//
+// Deprecated: set HandlerConfig.TokenHandler and call New. Kept only so this
+// package's tests migrate incrementally; removed with the rest of the setters.
 func (h *Handler) SetTokenHandler(th *TokenHandler) {
 	h.tokenHandler = th
 	h.mux.HandleFunc("/token", th.ServeHTTP)
