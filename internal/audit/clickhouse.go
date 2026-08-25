@@ -47,54 +47,72 @@ func NewClickHouseWriter(dsn string, retentionDays int) (Writer, error) {
 	return &clickhouseWriter{conn: conn}, nil
 }
 
-// bootstrapSchema creates the target database and schema tables idempotently.
-// Uses a separate connection to the "default" database to execute CREATE DATABASE,
-// then applies the embedded schema.sql statements. This is safe to call repeatedly.
+// bootstrapSchema creates the target database and schema tables idempotently, and is safe
+// to call repeatedly — which matters, because it runs on every writer construction and so
+// on every pod start.
+//
+// Its body is only the part that needs a ClickHouse: which connection runs what. WHICH
+// statements run, and in what order, is decided by databaseGroup and schemaGroups below,
+// which are pure and hermetically testable.
 func bootstrapSchema(opts *clickhouse.Options, retentionDays int) error {
-	ctx := context.Background()
 	targetDB := opts.Auth.Database
 	if targetDB == "" {
 		return fmt.Errorf("target database not specified in DSN")
 	}
-
-	// Create a connection to the "default" database to run CREATE DATABASE.
-	// This avoids the issue of connecting to a database that doesn't exist yet.
+	// CREATE DATABASE cannot run on a connection scoped to the database it creates:
+	// opening one fails with "Database <db> does not exist". So it goes through a
+	// connection scoped to "default", and everything after it through the target.
 	bootstrapOpts := *opts
 	bootstrapOpts.Auth.Database = "default"
-	bootstrapConn, err := clickhouse.Open(&bootstrapOpts)
-	if err != nil {
-		return fmt.Errorf("open bootstrap connection: %w", err)
+	if err := execGroups(&bootstrapOpts, "bootstrap", databaseGroup(targetDB)); err != nil {
+		return err
 	}
-	defer bootstrapConn.Close()
+	return execGroups(opts, "target", schemaGroups(retentionDays)...)
+}
 
-	// Create the target database if it doesn't exist
-	createDB := fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", targetDB)
-	if err := bootstrapConn.Exec(ctx, createDB); err != nil {
-		return fmt.Errorf("create database %q: %w", targetDB, err)
+// bootstrapGroup is a run of statements that share an error label, so a failure still names
+// which phase of the bootstrap produced it rather than just "a statement failed".
+type bootstrapGroup struct {
+	label string
+	stmts []string
+}
+
+// databaseGroup is the one statement that cannot run on a connection scoped to the target
+// database, because it is the statement that creates it.
+func databaseGroup(targetDB string) bootstrapGroup {
+	return bootstrapGroup{
+		label: fmt.Sprintf("create database %q", targetDB),
+		stmts: []string{fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", targetDB)},
 	}
+}
 
-	// Now connect to the target database and apply the schema
+// schemaGroups is the DDL applied to the target database, in the order it must run: the
+// embedded schema first, then the retention TTLs, which are ALTERs and so need the tables
+// the embedded schema creates to exist already.
+func schemaGroups(retentionDays int) []bootstrapGroup {
+	return []bootstrapGroup{
+		{label: "exec schema statement", stmts: splitStatements(schemaSQL)},
+		{label: "exec ttl statement", stmts: ttlStatements(retentionDays)},
+	}
+}
+
+// execGroups opens ONE connection with opts, runs every group's statements on it in order,
+// and closes it. scope names the connection in an open failure ("bootstrap", "target").
+func execGroups(opts *clickhouse.Options, scope string, groups ...bootstrapGroup) error {
 	conn, err := clickhouse.Open(opts)
 	if err != nil {
-		return fmt.Errorf("open target connection: %w", err)
+		return fmt.Errorf("open %s connection: %w", scope, err)
 	}
 	defer conn.Close()
 
-	// Split schema.sql into individual statements and execute each
-	statements := splitStatements(schemaSQL)
-	for _, stmt := range statements {
-		if err := conn.Exec(ctx, stmt); err != nil {
-			return fmt.Errorf("exec schema statement: %w", err)
+	ctx := context.Background()
+	for _, g := range groups {
+		for _, stmt := range g.stmts {
+			if err := conn.Exec(ctx, stmt); err != nil {
+				return fmt.Errorf("%s: %w", g.label, err)
+			}
 		}
 	}
-
-	// Apply retention TTL idempotently (after tables exist).
-	for _, stmt := range ttlStatements(retentionDays) {
-		if err := conn.Exec(ctx, stmt); err != nil {
-			return fmt.Errorf("exec ttl statement: %w", err)
-		}
-	}
-
 	return nil
 }
 
