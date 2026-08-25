@@ -198,3 +198,112 @@ Audit queries: the table is `merlin.gate_decisions` (not `push_decisions`), Clic
 that is not the secret key). Columns are `image_repo`/`image_tag`; there is no `image_ref`. Note
 that the label `app.kubernetes.io/name=merlin` **also** matches the ClickHouse pod, so target gate
 pods by name or you will exec into ClickHouse.
+
+---
+
+## Appendix: deploy records recovered from pruned commits
+
+Seven commits touched *only* the untracked values file, so removing that file from history
+pruned them entirely. They contained no code, but their messages were the deploy log. They are
+reproduced here so the record survives, oldest first.
+
+> **One of these is wrong and was corrected later.** `368f934` concluded that the
+> `azplatdevops` Prometheus "will not scrape merlin" and that the namespace-local
+> `opscenter-kube-prometheus-prometheus` was the scraper. The opposite is true, as verified
+> afterwards by querying the running Prometheus: `opscenter` is scaled to **zero** and consumes
+> nothing, while the `azplatdevops` CR has empty **maps** for both selectors, which the operator
+> reads as *all* ServiceMonitors in *all* namespaces. See the ServiceMonitor section above. It is
+> kept here unedited because the mistake — reading an empty map as "own namespace only" — is the
+> easy one to repeat.
+
+### `0ce1e90` — deploy: merlin 91be825 (observability metrics fix, rev 7)
+
+No body. This is the commit that first introduced the values file, and with it the Entra
+identifiers.
+
+### `7e780e1` — deploy: merlin d615c54 (ACR refresh-token cache fix, rev 9)
+
+Ship `a15447d` — cache the ACR refresh token by its own expiry rather than the AAD token's — to
+the c3-opsadmin release. Fixes the intermittent 502s on long-running pods. helm rev 9, both
+replicas READY on `d615c54`.
+
+### `5713bd2` — deploy(opsadmin): bound upload memory, pin image, fix drifted values
+
+`maxUploadBytes` 15 GiB → 2 GiB and `uploadConcurrency` 2. Sized from measurement, not guesswork:
+the largest layer across all 36 repos in the tenant registry is 0.899 GiB, so 2 GiB keeps >2x
+headroom while the 2 × ~3 × 0.9 GiB worst case (~5.4Gi) fits under the 10Gi limit. The old 15 GiB
+with no concurrency bound is what OOMKilled both replicas (exit 137, 2026-08-06). Not lowered to
+the 512Mi chart default, which is sized for the chart's 2Gi limit and would 413 the 0.899 GiB
+layer.
+
+Two pre-existing drifts caught by `helm diff` against the live release:
+
+- `pullPolicy` was unset, so the chart default `IfNotPresent` would have replaced the live
+  `Always`. Tags are git SHAs that get rebuilt during iteration, so `IfNotPresent` can run a stale
+  cached layer.
+- `clickhouse.storage.dataSize` said 5Gi while the live PVC is 20Gi. PVCs cannot shrink, so an
+  upgrade would request an invalid downsize.
+
+Image tag → `05ba6ba` (staging leak fixes + bounded upload memory).
+
+### `c8ec505` — deploy(opsadmin): merlin 29992b1 (async promotion + non-enforcing grype)
+
+Image tag `05ba6ba` → `29992b1`. Carries two changes: async ACR promotion off the manifest-PUT
+path, plus the multi-replica Localize fix and the pending-promotion bound (`48ab72d`); and
+`grype.enforce=false` with `grype.memory_limit=2Gi` (`29992b1`).
+
+`helm diff` against live rev 18 was exactly the image tag plus `enforce: false`,
+`memory_limit: "2Gi"` and `scan_pool_size` 4 → 2. No config drift this time.
+
+Built with `--build-arg RUNTIME_BASE=<dev-registry>/merlin:05ba6ba` rather than the default
+`cgr.dev/chainguard/wolfi-base`: the cgr.dev credential helper deadlocks under buildkit (headless
+prompt with no readable stdout) and the local token cache is stale. `05ba6ba` **is** that same
+wolfi base plus the two binaries this build overwrites, so the content is equivalent — verified on
+the pushed image: `/etc/os-release` still reports `ID=chainguard`, so the base-image policy is
+unaffected.
+
+### `2d14eb2` — deploy(opsadmin): roll forward to 23593c2 after rev 19 rollback
+
+Rev 19 (`29992b1`) was rolled back after seven minutes. It carried two independent faults that
+only surface against live infrastructure:
+
+- The memory-bounded scan could not exec grype. The trampoline reaches the child through
+  `syscall.Exec`, which does no PATH lookup, and the caller passes a bare name. Because the gate is
+  fail-closed, a scan that cannot run is a rejected push: **140 consecutive 500s**, zero successful
+  pushes from 23:13 to 23:19.
+- `Claim` spanned Redis hash slots. The deployed Valkey runs `cluster_enabled:1`, which rejects a
+  multi-key EVAL whose keys hash differently, so no replica could drain the promote queue. With the
+  201 now preceding promotion, that silently reproduced "approved but never published".
+
+Both fixed in `23593c2` and verified end to end against the live cluster with the image that
+OOM-killed grype 11 times that day: scan completed in 61s under the 2 GiB bound, promotion was
+claimed across replicas, and the byte-identical digest landed in ACR.
+
+### `368f934` — deploy(opsadmin): roll to 767a66d, confirm the Prometheus selector accepts us
+
+*(Contains the reversed conclusion flagged above.)*
+
+Pins the image to `767a66d` (built amd64 on the same `chainguard-base-fips` base as the running
+`23593c2` — verified by comparing `/etc/os-release` and the fips apk set inside both, since the
+Dockerfile's default `RUNTIME_BASE` is public wolfi and would have silently dropped FIPS).
+
+Observability only. The ACR-push counter moves to the real push sites, request and scanner-DB-age
+metrics appear, and the ServiceMonitor is created. The Slack alerter ships but stays OFF: no
+webhook is configured here, and the webhook is the switch. No gate-path behaviour changes.
+
+Also resolves the UNVERIFIED note left on `metrics.serviceMonitor.labels`. Checked live:
+`opscenter-kube-prometheus-prometheus` has `serviceMonitorSelector={}` and a `namespaceSelector`
+matching c3-opsadmin, so `{}` is right and no release label is needed. The other CR,
+`app-prometheus`, has an empty `namespaceSelector`, which the operator reads as its own namespace
+only — it will not scrape merlin. **← this last sentence is the error; see above.**
+
+Recorded the exact build command in the values comment. The FIPS base is the kind of detail that is
+invisible in a diff and expensive to discover from a running pod.
+
+### `b93ee88` — deploy(opsadmin): pin 52d1751 (promote recovery + terminal 404 + index wait)
+
+Rolled to c3-opsadmin and verified live: a fixture push that failed 400 with
+`MANIFEST_BLOB_UNKNOWN` on `d982de6` now succeeds, the index forward absorbing the race in 6
+attempts over 3.07s, with the tag landing on the index digest in ACR. The gate decision is a single
+`passed` row where this push shape previously wrote one pass plus six contradictory `infra_error`
+rows.
