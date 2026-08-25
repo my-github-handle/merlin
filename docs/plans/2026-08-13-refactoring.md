@@ -524,7 +524,7 @@ Each is a self-contained afternoon; none blocks anything else. Ordered by value.
 
 | Item | Change | Note |
 |---|---|---|
-| `main` (99 lines) | Move orchestration into `app.Run(ctx, cfg)`; leave flag parsing + exit codes in `main` | Makes the startup path testable at all |
+| ~~`main` (99 lines)~~ ✅ **DONE 2026-08-25** | Move orchestration into `app.Run(ctx, cfg)`; leave flag parsing + exit codes in `main` | `main` 114 → 75 lines, all of it env + exit codes. `Run(ctx, cfg, Builder)` takes the builder as a parameter — the mode strings stay in `main`, and injecting it is what makes the lifecycle testable. 7 new tests in `run_test.go` covering the drain, which had **no test at any level** before. Three deltas, each deliberate and pinned: the drain budget is parsed **before** the build (a bad `shutdown_timeout` no longer opens ClickHouse, Valkey, Blob and the JWKS refreshers first); a dead gate/metrics listener is **returned** instead of `log.Fatalf`-ed from inside a goroutine, so the audit buffer is flushed on the way out; and `Close` runs **once**, not twice. Mutation-checked: deriving the drain context from the already-cancelled signal context, parsing the budget late, and dropping the deferred `Close` each fail a test. Live SIGTERM against the production path drains and exits 0 with logs identical to `HEAD`'s |
 | `PassRate` (82) | Split the aggregation from the presentation arithmetic | `dashboard` at 76% — add cases while splitting |
 | `NewMetrics` (81) | Table-driven registration | Cosmetic; declarative already. Lowest value here — do it only if touching the file anyway |
 | `bootstrapSchema` (53) | Read the DDL per statement from the embedded `schema.sql` rather than in-function | Removes the second place schema lives |
