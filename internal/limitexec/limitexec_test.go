@@ -111,15 +111,37 @@ func onPathBinary(t *testing.T) pathBinary {
 // The hard address-space ceiling must sit above the budget, not on it: a Go
 // child's virtual footprint exceeds its live heap, so RLIMIT_AS == budget would
 // fail scans that never exceeded the budget.
+//
+// The factor was 2x, and 2x was measured to be too tight. 115 audit rows across
+// two c3.ai/opensearch-dashboards-fips tags died with a live heap of 2.52-2.72
+// GiB under a 2Gi budget: the heap itself was inside 2x (4 GiB), but the
+// runtime's arena and stack reservations on top of it cleared the ceiling, so
+// RLIMIT_AS killed scans that GOMEMLIMIT was still controlling. That inverts the
+// intended roles — GOMEMLIMIT is the control, RLIMIT_AS only catches runaways.
 func TestAddressSpaceLimitExceedsBudget(t *testing.T) {
-	budget := uint64(2 << 30)
-	got := addressSpaceLimit(budget)
-	if got <= budget {
-		t.Errorf("addressSpaceLimit(%d) = %d, want > budget", budget, got)
+	const observedHeapAtOOM = 2920 << 20 // 2.72 GiB live + the 232 MiB block that failed
+
+	for _, tc := range []struct {
+		name   string
+		budget uint64
+		want   uint64
+	}{
+		{"1Gi", 1 << 30, 4 << 30},
+		{"2Gi", 2 << 30, 8 << 30},
+		{"4Gi production budget", 4 << 30, 16 << 30},
+	} {
+		if got := addressSpaceLimit(tc.budget); got != tc.want {
+			t.Errorf("addressSpaceLimit(%s) = %d, want %d", tc.name, got, tc.want)
+		}
 	}
-	if got != 4<<30 {
-		t.Errorf("addressSpaceLimit(%d) = %d, want %d", budget, got, uint64(4<<30))
+
+	// The regression that motivated the change: the ceiling derived from the
+	// production budget must clear the largest heap ever observed, with room for
+	// the runtime reservations that are not counted in that figure.
+	if got := addressSpaceLimit(4 << 30); got <= observedHeapAtOOM {
+		t.Errorf("addressSpaceLimit(4Gi) = %d, want > largest observed heap %d", got, uint64(observedHeapAtOOM))
 	}
+
 	// Saturate instead of wrapping: a wrapped value would be a tiny limit that
 	// fails every scan, which is worse than an ineffective one.
 	if got := addressSpaceLimit(^uint64(0) - 1); got != ^uint64(0) {

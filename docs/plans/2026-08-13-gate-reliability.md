@@ -37,8 +37,8 @@ independently verifiable; none depends on a later one.
 | # | Step | Effort | Why this order |
 |---|---|---|---|
 | ~~1~~ | ~~**Stop losing published images**~~ **DONE, soak met 2026-08-14** (`d982de6`+`6b94784`) | ~1–2 days | Silent data loss: the gate says pass, the image never reaches ACR. The only class where the client is told everything is fine. 439-push peak, zero `BlobNotFound` |
-| ~~2~~ | ~~**Stop killing in-flight scans**~~ **CODE DONE `92edcac`, not yet deployed** | ~2h | ~10 lines. Stops throwing away 30–120s of completed scan work per abandoned push. Publication had to detach too, or the surviving scan is discarded at the last step |
-| 3 | **Make scans fast again** — retune the memory bound | ~half day + a soak | The root cause upstream of step 2. Needs a capacity decision, so it is not a pure code change |
+| ~~2~~ | ~~**Stop killing in-flight scans**~~ **DONE, deployed `46f0ce5`, closed at 0.7% 2026-08-24** | ~2h | ~10 lines. Stops throwing away 30–120s of completed scan work per abandoned push. Publication had to detach too, or the surviving scan is discarded at the last step |
+| ~~3~~ | ~~**Make scans fast again**~~ **CODE + CAPACITY DONE, awaiting deploy + soak** | ~half day + a soak | The root cause upstream of step 2. Needs a capacity decision, so it is not a pure code change |
 | 4 | **Reuse a completed decision on retry** | ~1 day | What converts steps 2+3 into a *client-visible* fix rather than only less wasted work |
 | 5 | **Un-blind the alerter** — floor-OR-factor, ref normalization, kill attribution | ~half day | Cheap, but worthless before 1–4: it would just page about a known 50% |
 
@@ -388,6 +388,40 @@ not guessed — this is the same mistake as the old 15 GiB `maxUploadBytes`.
 
 **Verify.** Zero `out of memory` rows; median scan duration back under 30s; no pod
 `OOMKilled` at the new limit under peak load.
+
+---
+
+### Step 3 outcome (2026-08-25): measured, then chosen
+
+**The measurement the plan asked for came out of the audit table, not a new harness.** Every OOM
+row records the live heap at the moment of death, so the budget was fitted rather than guessed:
+
+| | heap at OOM |
+|---|---|
+| p50 | 2.52 GiB |
+| p90 | 2.66 GiB |
+| p99 | 2.71 GiB |
+| max | 2.72 GiB |
+
+115 rows, and **all of them are one repo** — `c3.ai/opensearch-dashboards-fips`, tags
+`3.7.0-r20-202608102251` (32) and `v3.7.0-r6-202607191059` (83) — averaging 112s per attempt. The
+failed allocation on top of that heap was 232–512 MiB, so true need is **≥ ~2.95 GiB**: 2Gi was
+never going to fit, and because `GOMEMLIMIT` is soft it did not fail fast, it GC-thrashed first.
+
+**Chose A** (`memoryLimit: 4Gi`, `scanPoolSize` unchanged at 2, `resources.limits.memory`
+10Gi → 16Gi). The measurement strengthens the plan's original reasoning for A: since only one repo
+has ever OOMed, B's serialisation would have imposed queue wait on *every* scan to fix one image.
+The 16Gi ask was checked against the nodes actually hosting the pods (`aks-c3ondemand`, 123.5 GiB
+allocatable, 38–47% memory requests, 47–59% limits) — ~13% of a node, and `requests` stays 1Gi so
+scheduling is unaffected.
+
+`addressSpaceFactor` 2 → 4 shipped in the same change. At 2 the backstop was doing the control's
+job: a 2.72 GiB heap sits *inside* a 4 GiB ceiling, but the runtime's arena and stack reservations
+on top of it do not, which is why 13 scans died outright rather than merely slowly.
+
+**Not yet verified** — this is a code + values change only. The soak that closes step 3 needs a
+`c3.ai/opensearch-dashboards-fips` push after the roll: expect it to *pass* rather than produce an
+`out of memory` row, with no pod `OOMKilled` at 16Gi.
 
 ---
 

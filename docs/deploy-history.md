@@ -104,30 +104,43 @@ A kill is no longer the client's doing, so the rows say which:
 
 Merlin buffers whole blobs in memory during staging (`WriteChunk`/`CompleteBlob` `io.ReadAll`), and
 staging re-reads the accumulated upload on every write, so resident cost is ~3x the body per
-in-flight upload. Budget against `resources.limits.memory` (10Gi):
+in-flight upload. Budget against `resources.limits.memory` (16Gi):
 
 ```
 uploads: maxUploadBytes 2Gi x ~3 x uploadConcurrency 2  ~= 5.4Gi
-scans:   memoryLimit 2Gi x scanPoolSize 2               ~= 4.0Gi
-total                                                   ~= 9.4Gi < 10Gi
+scans:   memoryLimit 4Gi x scanPoolSize 2               ~= 8.0Gi
+total                                                   ~= 13.4Gi < 16Gi
 ```
 
 Both worst cases coinciding leaves little for merlin itself, so raising either factor needs the
-limit raised with it.
+limit raised with it. Only `limits` carries this; `requests` stays at 1Gi, so the ceiling is not a
+reservation and scheduling is unaffected — but it must still fit the hosting nodes, which are
+`aks-c3ondemand` boxes with 123.5 GiB allocatable at 38-47% memory requests, making 16Gi ~13% of one
+node.
 
 - `maxUploadBytes: 2Gi` was **measured, not guessed**: the largest layer across all 36 repos in the
   tenant registry is 0.899 GiB, so 2 GiB leaves >2x headroom. The former 15 GiB was far above any
   real layer and, unbounded, let concurrent pushes OOMKill the pod (both replicas, exit 137).
   Do **not** lower it to the 512Mi chart default, which is sized for the chart's 2Gi limit and
   would reject the 0.899 GiB layer with a 413.
-- `scanPoolSize` was lowered 4 → 2: 4 × 2Gi does not fit alongside the upload budget. At the
-  observed push rate, scan concurrency was never the throughput constraint; scan memory was.
+- `scanPoolSize` stays **2**. It was lowered 4 → 2 when the budget was 2Gi per scan; dropping it to
+  1 was the alternative to raising the container limit for step 3, and was rejected — only one repo
+  has ever OOMed, so serialising every scan to fix one image trades a rare failure for queue wait on
+  all of them, straight back into the client's ~30s ceiling at the observed 169–226 pushes/hour.
 - `grype.memoryLimit` is applied as `GOMEMLIMIT` on the grype child with a derived `RLIMIT_AS`
   backstop (see `internal/limitexec`). `GOMEMLIMIT` is a *soft* ceiling: exceeding the budget makes
   grype GC harder and scan slower rather than fail, which is the right failure mode for a
   fail-closed gate. Before it was set, grype was the only unbounded memory consumer in the pod —
   279 kernel kills in three weeks, ~14/day — and the killer does not have to pick grype, so a scan
   could take the merlin parent with it and fail every concurrent push.
+- **Raised 2Gi → 4Gi for step 3, fitted to measurement.** The audit rows carry the live heap at the
+  moment of death, so the budget did not have to be guessed: across 115 OOM rows (all of them
+  `c3.ai/opensearch-dashboards-fips`, two tags) the heap was p50 2.52 / p90 2.66 / p99 2.71 /
+  max 2.72 GiB, plus the 232–512 MiB allocation that failed — so real need is ≥ ~2.95 GiB and 2Gi
+  could never have fit it. Because `GOMEMLIMIT` is soft, those scans did not fail fast; they
+  GC-thrashed to a 112s average first. `addressSpaceFactor` went 2 → 4 in the same change, because
+  at 2 the *backstop* was doing the control's job: a 2.72 GiB heap sits inside a 4 GiB ceiling but
+  the runtime's arena and stack reservations on top of it do not.
 
 ## ServiceMonitor: verified, and not by the Prometheus you would expect
 

@@ -91,9 +91,10 @@ merlin:
     # registry. Delete the key to enforce (the Go default is true).
     enforce: false
     # Per-scan memory bound, applied as GOMEMLIMIT on the grype child with an RLIMIT_AS
-    # backstop. Raising this does NOT fit the budget on its own — see the arithmetic in
-    # docs/deploy-history.md.
-    memoryLimit: 2Gi
+    # backstop. Fitted to the measured p99 grype heap, and it does NOT stand alone:
+    # memoryLimit x scanPoolSize plus the upload budget must stay under
+    # resources.limits.memory. See the arithmetic in docs/deploy-history.md.
+    memoryLimit: 4Gi
   staging:
     blobAccountURL: "https://<storage-account>.blob.core.windows.net"
     blobContainer: merlin-staging
@@ -113,6 +114,9 @@ clickhouse:
   storage: { dataSize: 20Gi, logSize: 1Gi, storageClassName: <storage-class> }
 hpa:
   enabled: true
+# Only `limits` carries the scan+upload budget; `requests` stays small, so this is a
+# ceiling rather than a reservation and does not affect scheduling. Check it against the
+# hosting nodes' allocatable memory before raising.
 resources:
   requests: { cpu: 500m, memory: 1Gi }
-  limits: { cpu: "2", memory: 10Gi }
+  limits: { cpu: "2", memory: 16Gi }

@@ -94,9 +94,16 @@ func parseRequest(args []string) (request, error) {
 // child's virtual footprint exceeds its live heap by the runtime's arena and
 // stack reservations — on the order of a gigabyte before the program allocates
 // anything — so the hard limit has to sit well above the budget to only catch
-// genuine runaway allocation. 2x is deliberately loose: RLIMIT_AS is the
-// backstop, GOMEMLIMIT is the control.
-const addressSpaceFactor = 2
+// genuine runaway allocation. RLIMIT_AS is the backstop, GOMEMLIMIT is the
+// control.
+//
+// This was 2, and 2 was measured to be too tight: 115 scans of
+// c3.ai/opensearch-dashboards-fips died at a 2.52-2.72 GiB live heap under a 2Gi
+// budget. The heap was inside the 4 GiB ceiling; the reservations on top of it
+// were not. RLIMIT_AS was therefore doing GOMEMLIMIT's job, killing scans that
+// were still being controlled rather than catching runaways. 4 restores the
+// separation — see docs/plans/2026-08-13-gate-reliability.md §3.
+const addressSpaceFactor = 4
 
 // addressSpaceLimit derives the RLIMIT_AS ceiling from a memory budget,
 // saturating rather than wrapping so an absurd budget degrades to "unlimited in
