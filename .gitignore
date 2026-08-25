@@ -21,3 +21,4 @@ vendor/
 values.smoke.yaml
 values.opsadmin.yaml
 watch_*
+.DS_Store
