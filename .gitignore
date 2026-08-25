@@ -22,3 +22,10 @@ values.smoke.yaml
 values.opsadmin.yaml
 watch_*
 .DS_Store
+
+# Deploy values for a specific cluster: carries Entra tenant/client/audience IDs.
+# See values.opsadmin.multiacr.example.yaml and docs/deploy-history.md.
+values.opsadmin.multiacr.yaml
+
+# IDE
+.idea/

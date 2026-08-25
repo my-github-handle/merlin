@@ -1,0 +1,118 @@
+# Example of the untracked values.opsadmin.multiacr.yaml.
+#
+# The real file is gitignored (like values.opsadmin.yaml) because it carries Entra
+# tenant/client/audience identifiers for a specific cluster. Copy this, fill in the
+# placeholders, and keep it out of git.
+#
+# The operational rationale behind these numbers — memory budget arithmetic, the rollback
+# floor, why serviceMonitor.labels is empty, what the reliability work measured — is in
+# docs/deploy-history.md. Read that before changing any limit here.
+image:
+  repository: <dev-registry>/merlin
+  tag: "<git-sha>"
+  # Always, not IfNotPresent: tags here are git SHAs that get rebuilt and re-pushed during
+  # iteration, so IfNotPresent would silently run a stale cached layer on a node that
+  # already has the tag.
+  pullPolicy: Always
+  pullSecrets: [<pull-secret-name>]
+serviceAccount:
+  create: false          # reuse the existing SA managed by another release — do NOT recreate
+  name: <service-account>
+  workloadIdentityClientID: "<workload-identity-client-id>"  # informational; SA already annotated
+ingress:
+  enabled: true
+  className: cloud-native
+  # In the multi-tenant model the GATE host is derived per tenant as
+  # <prefix>.<merlin.acr.baseDomain>. This `host` only feeds the dashboard ingress fallback.
+  host: merlin.<base-domain>
+  tlsSecretName: merlin-tls
+  annotations:
+    kubernetes.io/ingress.class: cloud-native
+    appgw.ingress.kubernetes.io/backend-protocol: "http"
+    appgw.ingress.kubernetes.io/ssl-redirect: "true"
+    appgw.ingress.kubernetes.io/request-timeout: "3600"
+    appgw.ingress.kubernetes.io/health-probe-path: "/v2/"
+    appgw.ingress.kubernetes.io/health-probe-status-codes: "401"
+    appgw.ingress.kubernetes.io/health-probe-protocol: "HTTP"
+    appgw.ingress.kubernetes.io/health-probe-interval: "30"
+    appgw.ingress.kubernetes.io/health-probe-timeout: "10"
+    appgw.ingress.kubernetes.io/health-probe-unhealthy-threshold: "2"
+  # The dashboard (:8080) needs its OWN probe: path "/", expecting 200. Without this the
+  # AppGW inherits the gate's /v2/-401 probe and marks the dashboard backend unhealthy -> 502.
+  dashboardAnnotations:
+    kubernetes.io/ingress.class: cloud-native
+    appgw.ingress.kubernetes.io/backend-protocol: "http"
+    appgw.ingress.kubernetes.io/ssl-redirect: "true"
+    appgw.ingress.kubernetes.io/request-timeout: "3600"
+    appgw.ingress.kubernetes.io/health-probe-path: "/"
+    appgw.ingress.kubernetes.io/health-probe-status-codes: "200"
+    appgw.ingress.kubernetes.io/health-probe-protocol: "HTTP"
+    appgw.ingress.kubernetes.io/health-probe-interval: "30"
+    appgw.ingress.kubernetes.io/health-probe-timeout: "10"
+    appgw.ingress.kubernetes.io/health-probe-unhealthy-threshold: "2"
+  dashboardPathRouting: true
+externalSecrets:
+  enabled: false
+metrics:
+  serviceMonitor:
+    enabled: true
+    # {} is correct — no release label is needed — but the reason is subtle and easy to get
+    # backwards. See docs/deploy-history.md ("ServiceMonitor: verified, and not by the
+    # Prometheus you would expect") before adding labels here.
+    labels: {}
+merlin:
+  # Alerter left OFF: enabling it needs the webhook patched into the pre-existing
+  # merlin-secrets Secret FIRST, because a pod that renders ${SLACK_WEBHOOK_URL} without
+  # the key fails closed at startup.
+  # alerts:
+  #   slackWebhookFromSecret: true
+  #   environment: <environment-name>
+  acr:
+    registryTemplate: "{prefix}.azurecr.io"
+    baseDomain: <base-domain>
+  # Image-age gate: images whose OCI config `created` is older than thresholdDays are
+  # rejected (400). Fail-closed — an image whose `created` cannot be read is also rejected.
+  imageAge:
+    enabled: true
+    thresholdDays: 60
+  tenants:
+    - prefix: <acr-prefix>
+      acrClientId: "<workload-identity-client-id>"   # needs AcrPush on that registry
+      auth:
+        issuer: "https://login.microsoftonline.com/<tenant-id>/v2.0"
+        audience: "<audience-app-id>"
+        jwksUrl: "https://login.microsoftonline.com/<tenant-id>/discovery/v2.0/keys"
+        tenantId: "<tenant-id>"
+  auth:
+    service: "merlin"
+  grype:
+    severityThreshold: CRITICAL
+    # enforce: false reports without blocking — an image with Critical CVEs reaches the
+    # registry. Delete the key to enforce (the Go default is true).
+    enforce: false
+    # Per-scan memory bound, applied as GOMEMLIMIT on the grype child with an RLIMIT_AS
+    # backstop. Raising this does NOT fit the budget on its own — see the arithmetic in
+    # docs/deploy-history.md.
+    memoryLimit: 2Gi
+  staging:
+    blobAccountURL: "https://<storage-account>.blob.core.windows.net"
+    blobContainer: merlin-staging
+    scratchDir: /tmp/merlin
+    scanPoolSize: 2
+  server:
+    externalURL: "https://<acr-prefix>.<base-domain>"
+    maxUploadBytes: 2147483648    # 2 GiB — measured against the largest real layer, not guessed
+    uploadConcurrency: 2
+valkey:
+  enabled: true
+clickhouse:
+  enabled: true
+  passwordSecret: merlin-secrets
+  # Must match the LIVE PVC size. PVCs cannot shrink, so a smaller value here is an
+  # invalid downsize request on upgrade.
+  storage: { dataSize: 20Gi, logSize: 1Gi, storageClassName: <storage-class> }
+hpa:
+  enabled: true
+resources:
+  requests: { cpu: 500m, memory: 1Gi }
+  limits: { cpu: "2", memory: 10Gi }
