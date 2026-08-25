@@ -24,14 +24,6 @@ func ParseRange(s string, now time.Time) (Range, time.Time) {
 	}
 }
 
-// PassRate returns passed/total as a percentage (0 when total is 0).
-func PassRate(passed, total uint64) float64 {
-	if total == 0 {
-		return 0
-	}
-	return float64(passed) / float64(total) * 100
-}
-
 // StatsVM is the computed health/stat summary shared by tabs.
 type StatsVM struct {
 	Total, Passed, Rejected uint64

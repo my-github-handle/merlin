@@ -3,8 +3,6 @@ package dashboard
 
 import (
 	"context"
-	"sort"
-	"strings"
 	"time"
 
 	"github.com/merlin-gate/merlin/internal/audit"
@@ -41,99 +39,43 @@ func (s *Service) sinceFor(rng Range) time.Time {
 	}
 }
 
-func toStatsVM(st audit.DecisionStats) StatsVM {
-	vm := StatsVM{
-		Total: st.Total, Passed: st.Passed, Rejected: st.Rejected,
-		PassRate: PassRate(st.Passed, st.Total),
-		P50:      st.Latency.P50, P95: st.Latency.P95, P99: st.Latency.P99,
-	}
-	for _, rr := range st.RejectReasons {
-		pct := 0.0
-		if st.Rejected > 0 {
-			pct = float64(rr.Count) / float64(st.Rejected) * 100
-		}
-		vm.RejectReasons = append(vm.RejectReasons, LabeledVM{Label: rr.Label, Count: rr.Count, Pct: pct})
-	}
-	return vm
-}
-
 // Report builds the per-image scan report. Provide either pushID, or repo+ref.
+//
+// The three outcomes are distinct on purpose and the caller renders each differently: an
+// error is retryable ("report unavailable"), !Found is settled ("no scan exists"), and a
+// found report is the report.
 func (s *Service) Report(ctx context.Context, repo, ref, pushID string) (ReportVM, error) {
-	var (
-		hdr      audit.DecisionHeader
-		findings []policy.Finding
-		err      error
-	)
-	if pushID != "" {
-		hdr, err = s.r.DecisionHeaderByPush(ctx, pushID)
-		if err == nil && hdr.Found {
-			findings, err = s.r.FindingsByPush(ctx, hdr.PushID)
-		}
-	} else {
-		hdr, err = s.r.DecisionHeaderByRef(ctx, repo, ref)
-		if err == nil && hdr.Found {
-			findings, err = s.r.FindingsByImageRef(ctx, repo, ref)
-		}
-	}
+	hdr, findings, err := s.fetchReport(ctx, repo, ref, pushID)
 	if err != nil {
 		return ReportVM{}, err
 	}
 	if !hdr.Found {
 		return ReportVM{Found: false}, nil
 	}
-	vm := ReportVM{
-		Found: true, PushID: hdr.PushID, Repo: hdr.Repo, Tag: hdr.Tag, Digest: hdr.Digest,
-		Identity: hdr.Identity, Passed: hdr.Passed, FailedPolicies: hdr.FailedPolicies,
-		Reasons: hdr.Reasons, BaseImageID: hdr.BaseImageID, ScannerDBVersion: hdr.ScannerDBVersion, Ts: hdr.Ts,
-		InfraError: hdr.InfraError, ErrorDetail: hdr.ErrorDetail,
-	}
-	vm.ImageAgeKnown = hdr.ImageAgeKnown
-	if vm.ImageAgeKnown {
-		vm.ImageCreated = hdr.ImageCreated
-		vm.ImageAgeDays = int(hdr.ImageAgeDays)
-		vm.AgeThreshold = int(hdr.ImageAgeThresholdDays)
-		vm.AgeCompliant = int(hdr.ImageAgeDays) <= int(hdr.ImageAgeThresholdDays)
-	}
-	for _, f := range findings {
-		vm.Findings = append(vm.Findings, FindingVM{
-			CVE: f.CVE, Severity: f.Severity, Pkg: f.Pkg, Version: f.Version, FixedVersion: f.FixedVersion})
-		switch strings.ToUpper(f.Severity) {
-		case "CRITICAL":
-			vm.Counts.Critical++
-		case "HIGH":
-			vm.Counts.High++
-		case "MEDIUM":
-			vm.Counts.Medium++
-		case "LOW":
-			vm.Counts.Low++
-		default:
-			vm.Counts.Unknown++
-		}
-	}
-	// Stable order: severity desc, then CVE.
-	sort.SliceStable(vm.Findings, func(i, j int) bool {
-		si, sj := sevRank(vm.Findings[i].Severity), sevRank(vm.Findings[j].Severity)
-		if si != sj {
-			return si > sj
-		}
-		return vm.Findings[i].CVE < vm.Findings[j].CVE
-	})
-	return vm, nil
+	return newReportVM(hdr, findings), nil
 }
 
-func sevRank(s string) int {
-	switch strings.ToUpper(s) {
-	case "CRITICAL":
-		return 4
-	case "HIGH":
-		return 3
-	case "MEDIUM":
-		return 2
-	case "LOW":
-		return 1
-	default:
-		return 0
+// fetchReport resolves a report by push ID, or by repo+ref when no push ID is given.
+//
+// Findings are only fetched for a header that exists: by-ref lookups arrive from
+// user-supplied query strings, and a second query for a repo:tag nobody ever pushed is a
+// full-scan of the findings table on a miss.
+func (s *Service) fetchReport(ctx context.Context, repo, ref, pushID string) (audit.DecisionHeader, []policy.Finding, error) {
+	if pushID != "" {
+		hdr, err := s.r.DecisionHeaderByPush(ctx, pushID)
+		if err != nil || !hdr.Found {
+			return hdr, nil, err
+		}
+		// By hdr.PushID, not the argument: the header is the authority on its own ID.
+		findings, err := s.r.FindingsByPush(ctx, hdr.PushID)
+		return hdr, findings, err
 	}
+	hdr, err := s.r.DecisionHeaderByRef(ctx, repo, ref)
+	if err != nil || !hdr.Found {
+		return hdr, nil, err
+	}
+	findings, err := s.r.FindingsByImageRef(ctx, repo, ref)
+	return hdr, findings, err
 }
 
 // gaugeValue reads the newest sample of a gauge metric family (0 if absent).
@@ -155,31 +97,14 @@ func (s *Service) gaugeValue(name string) float64 {
 	return 0
 }
 
-// counterValue reads a counter with a matching label pair (0 if absent).
-func (s *Service) counterValue(name, label, value string) float64 {
-	mfs, err := s.g.Gather()
-	if err != nil {
-		return 0
-	}
-	for _, mf := range mfs {
-		if mf.GetName() != name {
-			continue
-		}
-		for _, m := range mf.GetMetric() {
-			if matchLabel(m, label, value) {
-				if c := m.GetCounter(); c != nil {
-					return c.GetValue()
-				}
-			}
-		}
-	}
-	return 0
-}
-
 // counterSumWhere totals every series of a counter whose label equals value
-// (equal=true) or differs from it (equal=false). Unlike counterValue it does not
-// stop at the first match, so it stays correct for counters that carry a
-// dimension the caller is not selecting on — e.g. summing across registries.
+// (equal=true) or differs from it (equal=false). It does not stop at the first match, so
+// it stays correct for counters that carry a dimension the caller is not selecting on —
+// e.g. summing across registries.
+//
+// It replaced a counterValue helper that returned only the FIRST matching series, which
+// reported one tenant's registry as if it were the fleet. That helper is gone; nothing
+// called it after the fix.
 func (s *Service) counterSumWhere(name, label, value string, equal bool) float64 {
 	mfs, err := s.g.Gather()
 	if err != nil {
@@ -238,16 +163,13 @@ func (s *Service) Overview(ctx context.Context, rng Range) (OverviewVM, error) {
 		vm.Stats = toStatsVM(st)
 	}
 	vm.ScannerDBAgeDays = s.gaugeValue("merlin_scanner_db_age_days")
-	// Sum across registries, and treat every non-"ok" result as a failure. Both
-	// matter since merlin_acr_push_total gained a registry label and split its
-	// failures into causes: counterValue returns the FIRST matching series, so it
-	// would report one tenant's pushes as if they were all of them, and there is no
-	// longer any series labelled result="error" to find.
+	// Sum across registries, and treat every non-"ok" result as a failure. Both matter
+	// since merlin_acr_push_total gained a registry label and split its failures into
+	// causes: reading a single series would report one tenant's pushes as if they were all
+	// of them, and there is no longer any series labelled result="error" to find.
 	ok := s.counterSumWhere("merlin_acr_push_total", "result", "ok", true)
-	errc := s.counterSumWhere("merlin_acr_push_total", "result", "ok", false)
-	if ok+errc > 0 {
-		vm.ACRPushSuccess = ok / (ok + errc) * 100
-	}
+	failed := s.counterSumWhere("merlin_acr_push_total", "result", "ok", false)
+	vm.ACRPushSuccess = pct(ok, ok+failed)
 	img, _ := s.Images(ctx, rng, audit.ImageFilter{}, 1)
 	if img.Errored {
 		vm.Errored = true
