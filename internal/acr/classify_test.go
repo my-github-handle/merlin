@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"syscall"
 	"testing"
 
@@ -59,6 +60,92 @@ func TestClassifyPushError(t *testing.T) {
 		if got := ClassifyPushError(tt.err); got != tt.want {
 			t.Errorf("%s: ClassifyPushError = %q, want %q", tt.name, got, tt.want)
 		}
+	}
+}
+
+// ClassifyPushError is an ORDERED chain, and the order is the part that carries meaning:
+// several of these errors match more than one arm, and which arm wins decides which system
+// an operator goes and looks at. Each case below produces a DIFFERENT class if its arm is
+// moved, so these pin the order rather than just the mapping.
+func TestClassifyPushErrorPrecedence(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want PushErrorClass
+		why  string
+	}{
+		{
+			// *url.Error implements Timeout()/Temporary(), so it satisfies net.Error itself.
+			// Every wrapped error below is therefore matched by the net.Error arm too.
+			name: "cancellation beats net.Error",
+			err:  &url.Error{Op: "Post", URL: "https://x", Err: context.Canceled},
+			want: PushErrTimeout,
+			why:  "classified as network, an abandoned push looks like an ACR outage",
+		},
+		{
+			name: "http status beats net.Error",
+			err:  &url.Error{Op: "Post", URL: "https://x", Err: &transport.Error{StatusCode: 500}},
+			want: PushErrOther,
+			why:  "ACR answered; calling it network points at the wrong system",
+		},
+		{
+			name: "auth status beats net.Error",
+			err:  &url.Error{Op: "Post", URL: "https://x", Err: &transport.Error{StatusCode: 401}},
+			want: PushErrAuth,
+			why:  "this is the PR 2431 shape: a 401 inside a url.Error must stay auth",
+		},
+		{
+			// The one branch inside the net.Error arm: timed-out net errors are timeouts, so
+			// a slow ACR does not hide in the network bucket.
+			name: "net.Error that timed out",
+			err:  &net.DNSError{Err: "i/o timeout", IsTimeout: true},
+			want: PushErrTimeout,
+			why:  "a slow resolver is a timeout, not a connectivity failure",
+		},
+		{
+			name: "os deadline exceeded is a timing-out net.Error",
+			err:  fmt.Errorf("read blob: %w", os.ErrDeadlineExceeded),
+			want: PushErrTimeout,
+			why:  "a socket deadline is the same incident as a gate deadline",
+		},
+		{
+			name: "net.Error that did not time out",
+			err:  &net.DNSError{Err: "no such host", IsNotFound: true},
+			want: PushErrNetwork,
+			why:  "an unresolvable host is connectivity, not slowness",
+		},
+		{
+			name: "closed connection",
+			err:  fmt.Errorf("write blob: %w", net.ErrClosed),
+			want: PushErrNetwork,
+			why:  "a torn-down connection is connectivity",
+		},
+	}
+	for _, tt := range tests {
+		if got := ClassifyPushError(tt.err); got != tt.want {
+			t.Errorf("%s: ClassifyPushError = %q, want %q — %s", tt.name, got, tt.want, tt.why)
+		}
+	}
+}
+
+// isClosedOnly reports Is(net.ErrClosed) without satisfying net.Error. Nothing in the
+// standard library has this shape — net.ErrClosed is poll.errNetClosing, which has
+// Timeout() and Temporary() and so is matched by the net.Error arm before the ErrClosed
+// check is ever reached. This type is the only way to reach that check, which is the
+// evidence that it is otherwise unreachable; it is kept because removing it would change
+// behaviour for exactly this shape.
+type isClosedOnly struct{}
+
+func (isClosedOnly) Error() string        { return "conn closed by peer" }
+func (isClosedOnly) Is(target error) bool { return target == net.ErrClosed }
+
+func TestClassifyPushErrorCatchesAClosedErrorThatIsNotANetError(t *testing.T) {
+	var nerr net.Error
+	if errors.As(error(isClosedOnly{}), &nerr) {
+		t.Fatal("isClosedOnly satisfies net.Error, so it no longer reaches the ErrClosed arm")
+	}
+	if got := ClassifyPushError(isClosedOnly{}); got != PushErrNetwork {
+		t.Errorf("ClassifyPushError = %q, want %q", got, PushErrNetwork)
 	}
 }
 
