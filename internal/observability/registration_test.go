@@ -100,6 +100,7 @@ func TestRegisteredMetricNamesAndLabels(t *testing.T) {
 		"merlin_scratch_bytes":             nil,
 		"merlin_acr_push_total":            {"registry", "result"},
 		"merlin_requests_total":            {"method", "route", "status"},
+		"merlin_scan_cache_total":          {"result"},
 	}
 
 	got := map[string][]string{}

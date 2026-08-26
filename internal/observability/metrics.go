@@ -22,6 +22,7 @@ type Metrics struct {
 	scratchBytes     prometheus.Gauge
 	acrPush          *prometheus.CounterVec
 	requestsTotal    *prometheus.CounterVec
+	scanCache        *prometheus.CounterVec
 }
 
 // NewMetrics registers and returns Merlin's metrics on reg.
@@ -56,6 +57,17 @@ func (m *Metrics) initDecisions(reg prometheus.Registerer) {
 		Name: "merlin_push_decisions_total",
 		Help: "Total push gate decisions by outcome.",
 	}, []string{"outcome"}))
+	m.scanCache = registered(reg, prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "merlin_scan_cache_total",
+		Help: "Scan-cache lookups by outcome: a hit reused a previous scan of the same manifest digest.",
+	}, []string{"result"}))
+	// Pre-create both series. A CounterVec label value with no observations is an
+	// ABSENT series, not a zero one — the mistake already made with
+	// merlin_acr_push_total, where result="error" simply did not exist until
+	// something failed. A hit rate of hits/(hits+misses) has to be evaluable on a
+	// pod that has only ever missed.
+	m.scanCache.WithLabelValues("hit")
+	m.scanCache.WithLabelValues("miss")
 }
 
 // initPhaseDurations creates the histograms that decompose the window a client's manifest
@@ -155,7 +167,21 @@ func (m *Metrics) ObservePush(passed bool) {
 func (m *Metrics) ObservePushError() { m.pushTotal.WithLabelValues("error").Inc() }
 
 func (m *Metrics) ObserveScanDuration(seconds float64) { m.scanDuration.Observe(seconds) }
-func (m *Metrics) SetScannerDBAgeDays(days float64)    { m.scannerDBAge.Set(days) }
+
+// ObserveScanCache counts one scan-cache lookup.
+//
+// This is the only direct evidence that reuse is happening. A hit still runs the
+// gate and still records a scan duration, so merlin_scan_duration_seconds_count
+// keeps rising either way and a falling median would be an inference rather than a
+// measurement.
+func (m *Metrics) ObserveScanCache(hit bool) {
+	result := "miss"
+	if hit {
+		result = "hit"
+	}
+	m.scanCache.WithLabelValues(result).Inc()
+}
+func (m *Metrics) SetScannerDBAgeDays(days float64) { m.scannerDBAge.Set(days) }
 
 // The three observers below cover the phases of the blocked manifest-PUT window
 // that scan duration excludes: image assembly, the wait for a scan slot, and the

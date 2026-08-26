@@ -248,3 +248,44 @@ func TestRequestsAreCountedByMethodRouteStatus(t *testing.T) {
 		}
 	}
 }
+
+// TestScanCacheHitsAndMissesAreCounted pins the only direct evidence that scan
+// reuse is happening.
+//
+// It cannot be inferred from merlin_scan_duration_seconds: a cache hit still runs
+// the gate and still records a (near-zero) scan duration, so the histogram's count
+// keeps rising either way. Without this counter, "reuse is working" would be an
+// argument from a falling median rather than a measurement, and a cache that had
+// silently stopped hitting would look identical to one that was never needed.
+func TestScanCacheHitsAndMissesAreCounted(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := NewMetrics(reg)
+	m.ObserveScanCache(true)
+	m.ObserveScanCache(true)
+	m.ObserveScanCache(false)
+
+	got := labelledCounters(t, reg, "merlin_scan_cache_total")
+	for key, want := range map[string]float64{
+		"result=hit":  2,
+		"result=miss": 1,
+	} {
+		if got[key] != want {
+			t.Errorf("merlin_scan_cache_total{%s} = %v, want %v (all: %v)", key, got[key], want, got)
+		}
+	}
+}
+
+// TestScanCacheMissSeriesExistsBeforeAnyHit guards the trap that made the ACR push
+// counter misread: a label value with no observations is an ABSENT series, not a
+// zero one. A ratio like hits/(hits+misses) evaluated before the first hit must not
+// break, so both label values are pre-created at registration.
+func TestScanCacheBothSeriesExistBeforeAnyObservation(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	NewMetrics(reg)
+	got := labelledCounters(t, reg, "merlin_scan_cache_total")
+	for _, key := range []string{"result=hit", "result=miss"} {
+		if _, ok := got[key]; !ok {
+			t.Errorf("merlin_scan_cache_total{%s} should exist at zero before any push (all: %v)", key, got)
+		}
+	}
+}
