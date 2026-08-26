@@ -43,6 +43,64 @@ type GrypeConfig struct {
 	// RLIMIT_AS plus GOMEMLIMIT on the child — see internal/limitexec for why the
 	// value needs headroom over the expected peak rather than tracking it.
 	MemoryLimit string `yaml:"memory_limit"`
+	// ScanCache reuses a completed scan when the same manifest digest is pushed
+	// again. See ScanCacheConfig.
+	ScanCache ScanCacheConfig `yaml:"scan_cache"`
+}
+
+// ScanCacheConfig configures reuse of a completed scan for an identical manifest
+// digest, so re-pushing the same image does not re-run grype.
+//
+// Enabled is a plain bool, not a pointer, precisely so its zero value is OFF. Every
+// other gate knob defaults to its safe/strict setting, and for this one that is
+// "don't reuse": admitting an image on the strength of an earlier scan is a change
+// in what a fail-closed gate does, so it has to be an explicit per-environment
+// decision rather than something a chart default switches on under every existing
+// install.
+type ScanCacheConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// MaxDBAge is how old the vulnerability DB behind a cached report may be before
+	// the report is discarded and the image re-scanned. It is a bound on the DB, not
+	// on the entry: what makes a stored report untrustworthy is a newer CVE feed, not
+	// elapsed time as such.
+	//
+	// Anchore rebuilds the DB daily (measured: exactly one version per day in this
+	// cluster, built 06:14Z-06:40Z, with no two consecutive versions' windows
+	// overlapping), so the default of one day means a report is reused at most until
+	// its DB is superseded.
+	MaxDBAge string `yaml:"max_db_age"`
+}
+
+// defaultScanCacheMaxDBAge matches the DB rebuild period. Kept as the literal the
+// yaml would carry so a values file and a defaulted config read identically;
+// grype.DefaultScanCacheMaxDBAge is where the same period is enforced on reads.
+const defaultScanCacheMaxDBAge = "24h"
+
+// maxScanCacheDBAge caps the configurable window at two rebuild periods: enough
+// slack to survive one missed Anchore build, and short enough that a report can
+// never be reused across two of them. Past this the cache would be admitting images
+// on a superseded CVE feed, and silently — nothing else in the system reports it.
+const maxScanCacheDBAge = 48 * time.Hour
+
+// MaxDBAgeDuration parses MaxDBAge, treating an empty value as the default so a
+// hand-built Config behaves like a loaded one. The same call validates at startup
+// and configures the policy at wiring time, so the two cannot disagree.
+func (s ScanCacheConfig) MaxDBAgeDuration() (time.Duration, error) {
+	v := s.MaxDBAge
+	if v == "" {
+		v = defaultScanCacheMaxDBAge
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("grype.scan_cache.max_db_age %q is not a duration (e.g. 24h, 90m): %w", v, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("grype.scan_cache.max_db_age must be > 0, got %s", v)
+	}
+	if d > maxScanCacheDBAge {
+		return 0, fmt.Errorf("grype.scan_cache.max_db_age %s exceeds the %s maximum; the vulnerability DB is rebuilt daily, so a longer window would keep admitting images on a superseded feed", v, maxScanCacheDBAge)
+	}
+	return d, nil
 }
 
 type BaseImageConfig struct {
@@ -208,6 +266,9 @@ func (c *Config) applyDefaults() {
 		enforce := true
 		c.Grype.Enforce = &enforce
 	}
+	if c.Grype.ScanCache.MaxDBAge == "" {
+		c.Grype.ScanCache.MaxDBAge = defaultScanCacheMaxDBAge
+	}
 	if c.ImageAge.ThresholdDays == 0 {
 		c.ImageAge.ThresholdDays = 60
 	}
@@ -322,8 +383,30 @@ func (c *Config) validate() error {
 			return fmt.Errorf("config: tenants[%d] (%s) image_age.threshold_days must be >= 0", i, t.Prefix)
 		}
 	}
+	if err := c.validateScanCache(); err != nil {
+		return err
+	}
 	if err := c.validateAlerts(); err != nil {
 		return err
+	}
+	return nil
+}
+
+// validateScanCache checks the scan cache's config, but ONLY when it is enabled —
+// the validateAlerts convention: a leftover setting under a switched-off feature
+// must not stop the gate from starting.
+func (c *Config) validateScanCache() error {
+	if !c.Grype.ScanCache.Enabled {
+		return nil
+	}
+	if _, err := c.Grype.ScanCache.MaxDBAgeDuration(); err != nil {
+		return fmt.Errorf("config: %w", err)
+	}
+	// The store is shared across replicas; without an address there is nowhere to put
+	// entries. Failing here beats every pod scanning everything while the config says
+	// caching is on — a silent no-op is the failure mode this check exists to remove.
+	if c.Staging.ValkeyAddr == "" {
+		return fmt.Errorf("config: grype.scan_cache.enabled is true but staging.valkey_addr is empty; the scan cache is shared across replicas")
 	}
 	return nil
 }

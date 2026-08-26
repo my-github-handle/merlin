@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func writeTemp(t *testing.T, contents string) string {
@@ -726,4 +727,158 @@ alerts:
 	if err == nil {
 		t.Fatal("accepted a zero cooldown")
 	}
+}
+
+// The scan cache is OFF unless a deployment asks for it. It changes what a
+// fail-closed security gate does — admitting an image on the strength of an
+// earlier scan — so it must be an explicit per-environment decision, not
+// something a chart default turns on for every existing install.
+func TestScanCacheIsOffByDefault(t *testing.T) {
+	c := Config{}
+	c.applyDefaults()
+	if c.Grype.ScanCache.Enabled {
+		t.Error("grype.scan_cache.enabled must default to false")
+	}
+}
+
+func TestScanCacheMaxDBAgeDefaultsToTheDBRebuildPeriod(t *testing.T) {
+	c := Config{}
+	c.applyDefaults()
+	if c.Grype.ScanCache.MaxDBAge != "24h" {
+		t.Errorf("grype.scan_cache.max_db_age = %q, want 24h", c.Grype.ScanCache.MaxDBAge)
+	}
+}
+
+func TestScanCacheMaxDBAgeMustBeAValidPositiveDuration(t *testing.T) {
+	for _, tc := range []struct {
+		name, value, wantIn string
+	}{
+		{"garbage", "yesterday", "not a duration"},
+		{"zero", "0s", "must be > 0"},
+		{"negative", "-1h", "must be > 0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := validScanCacheConfig()
+			c.Grype.ScanCache.MaxDBAge = tc.value
+			err := c.validate()
+			if err == nil {
+				t.Fatalf("max_db_age %q should be rejected", tc.value)
+			}
+			if !strings.Contains(err.Error(), tc.wantIn) {
+				t.Errorf("error %q should mention %q", err, tc.wantIn)
+			}
+		})
+	}
+}
+
+// An over-long reuse window is refused rather than clamped. Anchore rebuilds the
+// vulnerability DB daily, so a window well past that would keep admitting images
+// on a superseded DB — and silently, since nothing else in the system would report
+// it. A typo of "240h" for "24h" must fail at startup, not weaken the gate.
+func TestScanCacheMaxDBAgeBeyondTheHardCapIsRejected(t *testing.T) {
+	c := validScanCacheConfig()
+	c.Grype.ScanCache.MaxDBAge = "240h"
+	err := c.validate()
+	if err == nil {
+		t.Fatal("a 240h reuse window should be rejected")
+	}
+	if !strings.Contains(err.Error(), "max_db_age") {
+		t.Errorf("error should name the field, got %q", err)
+	}
+}
+
+func TestScanCacheMaxDBAgeIsNotValidatedWhenDisabled(t *testing.T) {
+	// An unused value must not block startup: an operator turning the cache off
+	// should not also have to clean up its settings.
+	c := validScanCacheConfig()
+	c.Grype.ScanCache.Enabled = false
+	c.Grype.ScanCache.MaxDBAge = "not-a-duration"
+	if err := c.validate(); err != nil {
+		t.Errorf("a disabled scan cache should not validate its window: %v", err)
+	}
+}
+
+func TestScanCacheRequiresAValkeyAddress(t *testing.T) {
+	// The store is shared across replicas, so an enabled cache with nowhere to put
+	// entries is a misconfiguration. Failing at startup beats every pod silently
+	// scanning everything while the dashboard claims caching is on.
+	c := validScanCacheConfig()
+	c.Staging.ValkeyAddr = ""
+	err := c.validate()
+	if err == nil {
+		t.Fatal("an enabled scan cache with no valkey address should be rejected")
+	}
+	if !strings.Contains(err.Error(), "valkey") {
+		t.Errorf("error should point at the valkey address, got %q", err)
+	}
+}
+
+func TestValidScanCacheConfigPasses(t *testing.T) {
+	if err := validScanCacheConfig().validate(); err != nil {
+		t.Errorf("expected a valid config to pass: %v", err)
+	}
+}
+
+func TestScanCacheIsReadFromYAML(t *testing.T) {
+	// The tests above build a Config in Go, so they would all still pass with a
+	// misspelled yaml tag — and the symptom would be a values file that appears to
+	// enable the cache while every pod keeps scanning. Go through Load instead.
+	cfg, err := Load(writeTemp(t, minimalConfig(`
+staging:
+  valkey_addr: merlin-valkey:6379
+grype:
+  scan_cache:
+    enabled: true
+    max_db_age: "12h"
+`)))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !cfg.Grype.ScanCache.Enabled {
+		t.Error("grype.scan_cache.enabled did not survive the yaml round trip")
+	}
+	got, err := cfg.Grype.ScanCache.MaxDBAgeDuration()
+	if err != nil {
+		t.Fatalf("MaxDBAgeDuration: %v", err)
+	}
+	if got != 12*time.Hour {
+		t.Errorf("max_db_age = %v, want 12h", got)
+	}
+}
+
+func TestScanCacheMaxDBAgeDurationFallsBackToTheDefault(t *testing.T) {
+	// An empty value must read as the default rather than zero: in the policy a
+	// non-positive window would be applied as "the DB is always too old", silently
+	// turning an enabled cache into a permanent miss.
+	got, err := ScanCacheConfig{Enabled: true}.MaxDBAgeDuration()
+	if err != nil {
+		t.Fatalf("MaxDBAgeDuration: %v", err)
+	}
+	if got != 24*time.Hour {
+		t.Errorf("empty max_db_age = %v, want the 24h default", got)
+	}
+}
+
+// validScanCacheConfig is the smallest config that both enables the scan cache and
+// passes validation, so each test above can break exactly one field and know that
+// field is why validate() complained.
+func validScanCacheConfig() *Config {
+	c := &Config{
+		ACR:       ACRConfig{RegistryTemplate: "{prefix}acr.azurecr.io", BaseDomain: "c3ci.cloud"},
+		BaseImage: BaseImageConfig{AllowedIDs: []string{"rhel"}},
+		Tenants: []TenantConfig{{
+			Prefix:      "c3dev",
+			ACRClientID: "cid",
+			Auth: TenantAuthConfig{
+				Issuer:   "https://login/dev/v2.0",
+				Audience: "api://merlin-dev",
+				JWKSURL:  "https://login/dev/keys",
+				TenantID: "dev-tenant",
+			},
+		}},
+		Staging: StagingConfig{ValkeyAddr: "merlin-valkey:6379"},
+	}
+	c.applyDefaults()
+	c.Grype.ScanCache.Enabled = true
+	return c
 }
