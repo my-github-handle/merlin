@@ -206,6 +206,47 @@ merlin:
 
 **Note**: If you disable the operators, ensure the external services are reachable from the cluster and credentials are configured.
 
+### Scan reuse (`merlin.grype.scanCache`)
+
+When the same manifest digest is pushed again, Merlin can serve the earlier Grype
+report instead of re-scanning. On the opsadmin deployment 75.8% of scans in a day
+(197 of 260) were re-scans of a digest already scanned, worth 104 minutes of Grype CPU.
+
+```yaml
+merlin:
+  grype:
+    scanCache:
+      enabled: true
+      maxDBAge: "24h"   # default; values above 48h are rejected at startup
+```
+
+It is **off by default**, and turning it on is a deliberate decision: it admits an
+image on the strength of an earlier scan, which changes what a fail-closed gate does.
+Reuse requires a Valkey — the same `merlin.staging.valkeyAddr` used for staging state
+— and an enabled cache with no address fails at startup rather than starting up and
+scanning everything.
+
+`maxDBAge` bounds the **vulnerability database** behind a reused report, not the
+entry's own age: a report stops being trustworthy when the CVE feed moves, not when
+time passes. Anchore rebuilds the DB daily, so the 24h default means a report is
+reused at most until its DB is superseded. A report whose DB build time is unknown is
+never reused.
+
+Reuse is safe against config changes because the **report** is cached, not the
+verdict: `severityThreshold`, `enforce` and the image-age gate are re-applied to a
+reused report on every push. A cache fault at request time costs a scan and nothing
+else — the gate never fails because the cache is broken.
+
+Verify with:
+
+```promql
+rate(merlin_scan_cache_total{result="hit"}[15m]) / rate(merlin_scan_cache_total[15m])
+```
+
+Note that `merlin_scan_duration_seconds_count` keeps climbing on hits: a reused report
+still runs the gate and still records a (near-zero) duration. The counter above is the
+direct evidence.
+
 ## Monitoring
 
 Merlin exposes Prometheus metrics at `:9090/metrics` (cluster-internal). The metrics port is exposed via the Service but NOT via the Ingress.

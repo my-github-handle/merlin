@@ -265,7 +265,8 @@ ACR client ID. Behind an interface so tests use a fake registry
 Prometheus metrics (served on the metrics port, default `:9090`) and structured
 logging: `merlin_push_decisions_total`, `merlin_scan_duration_seconds`,
 `merlin_scanner_db_age_days` (from each scan's reported DB version),
-`merlin_acr_push_total`. OTel traces are designed-for but deferred.
+`merlin_acr_push_total`, `merlin_scan_cache_total` (scan-reuse hit/miss). OTel traces
+are designed-for but deferred.
 
 ### `audit`
 

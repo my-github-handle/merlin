@@ -174,7 +174,8 @@ See [specs.md §9](./specs.md) for the full scalability & concurrency model.
 
 - **Metrics** (Prometheus `/metrics` on `:9090`, exportable to Azure Monitor):
   `merlin_push_decisions_total`, `merlin_scan_duration_seconds`,
-  `merlin_scanner_db_age_days`, `merlin_acr_push_total`.
+  `merlin_scanner_db_age_days`, `merlin_acr_push_total`,
+  `merlin_scan_cache_total` (reuse hit/miss; both series always present).
 - **Logs** (structured JSON): operational events, collected by the platform pipeline.
 - **Dashboard** (`:8080`): read-only overview + per-push report UI, JSON API, and an
   SSE live feed of gate decisions.

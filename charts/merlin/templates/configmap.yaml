@@ -16,6 +16,19 @@ data:
       {{- with .Values.merlin.grype.memoryLimit }}
       memory_limit: {{ . | quote }}
       {{- end }}
+      {{- with .Values.merlin.grype.scanCache }}
+      scan_cache:
+        {{- /* hasKey for the same reason as enforce above: `with` would drop an
+               explicit `enabled: false`. Here that renders identically to the
+               default, but only by luck, and the next value flipped this way
+               would not be. */}}
+        {{- if hasKey . "enabled" }}
+        enabled: {{ .enabled }}
+        {{- end }}
+        {{- with .maxDBAge }}
+        max_db_age: {{ . | quote }}
+        {{- end }}
+      {{- end }}
     base_image:
       allowed_ids: {{ toJson .Values.merlin.baseImage.allowedIDs }}
     {{- with .Values.merlin.imageAge }}

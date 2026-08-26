@@ -91,6 +91,23 @@ merlin:
     # docs/deploy-history.md for a worked example on a 16Gi limit, and
     # values.opsadmin.multiacr.example.yaml for the shape.
     # memoryLimit: 4Gi
+    #
+    # Scan reuse: when the same manifest digest is pushed again, serve the earlier
+    # grype report instead of re-scanning. Measured on the opsadmin deployment,
+    # 75.8% of scans in a day were re-scans of a digest already scanned.
+    #
+    # OFF by default, and left off here on purpose. It changes what a fail-closed
+    # gate does — admitting an image on the strength of an earlier scan — so it is a
+    # per-environment decision, not something a chart default turns on under every
+    # existing install. It also needs a Valkey (the same one staging uses).
+    #
+    # maxDBAge bounds the vulnerability DB behind a reused report, not the entry's
+    # age: a report stops being trustworthy when the CVE feed moves, not when time
+    # passes. Anchore rebuilds daily, so 24h means a report is reused at most until
+    # its DB is superseded. Values above 48h are REJECTED at startup rather than
+    # clamped, so a "240h" typo fails visibly instead of weakening the gate.
+    #
+    # scanCache: { enabled: true, maxDBAge: "24h" }
   baseImage: { allowedIDs: [rhel, wolfi, chainguard] }
   # Image-age gate: rejects images whose OCI config `created` is older than
   # thresholdDays. Omit this block to use the built-in defaults (enabled, 60 days).
