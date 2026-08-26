@@ -92,13 +92,17 @@ func grypeRunner(cfg config.Config) (grype.Runner, error) {
 //     tenant whose pusher uses the anonymous keychain and never reaches ACR.
 //   - No Store and no Reports on the handler: that absence IS the hermetic contract.
 //   - No Pool, so scans run unpooled; no promoter, so publication is synchronous.
+//   - No scan cache, so every push scans even where grype.scan_cache is enabled: the
+//     store is a live Valkey, and dialling one is exactly what this path avoids.
 //   - No audit recorder, and no IDGen — which means the docker package's own
 //     generator is used. It differs from this package's: on a crypto/rand failure
 //     docker's falls back to a timestamp while ours panics. Left as-is here because
 //     this commit preserves behaviour; worth reconciling separately.
 func Build(cfg config.Config) (Servers, error) {
 	_, metrics := newMetrics()
-	engine, err := buildPolicyEngine(cfg, metrics)
+	// No ScanCache: it is a live Valkey dependency, and this path has no backends. An
+	// enabled scan_cache in the config is therefore ignored here, not dialled.
+	engine, err := buildPolicyEngine(cfg, policyDeps{DBAge: metrics, CacheObs: metrics})
 	if err != nil {
 		return Servers{}, err
 	}
@@ -200,7 +204,16 @@ func BuildWithBackends(ctx context.Context, cfg config.Config) (Servers, error) 
 	closers.push(closeAudit)
 
 	reg, metrics := newMetrics()
-	engine, err := buildPolicyEngine(cfg, metrics)
+	scanCache, closeScanCache, err := buildScanCache(cfg)
+	if err != nil {
+		return fail(err)
+	}
+	closers.push(closeScanCache)
+	engine, err := buildPolicyEngine(cfg, policyDeps{
+		DBAge:     metrics,
+		ScanCache: scanCache,
+		CacheObs:  metrics,
+	})
 	if err != nil {
 		return fail(err)
 	}
@@ -262,19 +275,45 @@ func generatePushID() string {
 	return hex.EncodeToString(b)
 }
 
-// grypeOptions derives the Grype policy options from config. A nil Enforce means
-// the config was built in code rather than parsed (applyDefaults sets it), so it
-// is treated as enforcing — the fail-safe direction.
+// policyDeps are the sinks and stores the policies attach to. Every field is
+// optional, and each nil is a documented degradation rather than a failure — the
+// hermetic path supplies none of them.
+type policyDeps struct {
+	// DBAge receives the scanner DB's age after every scan. Nil leaves the gauge unset.
+	DBAge grype.DBAgeObserver
+	// ScanCache holds reusable scan reports. Nil means every push scans, which is what
+	// every deployment did before the cache existed and still does by default.
+	ScanCache grype.ReportStore
+	// CacheObs counts cache hits and misses. Nil leaves the hit rate unreported;
+	// reuse still happens.
+	CacheObs grype.ScanCacheObserver
+}
+
+// grypeOptions derives the Grype policy options from config and deps. A nil Enforce
+// means the config was built in code rather than parsed (applyDefaults sets it), so
+// it is treated as enforcing — the fail-safe direction.
 //
 // Non-enforcement is logged loudly at every startup on purpose: it publishes
 // images with Critical CVEs, so it needs to be visible in the pod logs of every
 // restart rather than discoverable only by reading values.yaml.
-// grypeOptions derives the grype policy options from config, and wires the
-// scanner-DB-age observer. dbAge may be nil (no metrics).
-func grypeOptions(cfg config.Config, dbAge grype.DBAgeObserver) []grype.Option {
-	// Reported on every scan: the DB is refreshed out-of-band by rebuilding the
-	// image, so a scan is the only moment Merlin can learn how old it is.
-	opts := []grype.Option{grype.WithDBAgeObserver(dbAge)}
+func grypeOptions(cfg config.Config, deps policyDeps) []grype.Option {
+	// Reported on every evaluation: the DB is downloaded at runtime and auto-updates,
+	// so grype's own output is the only place Merlin can learn how old it is.
+	opts := []grype.Option{grype.WithDBAgeObserver(deps.DBAge)}
+	if deps.ScanCache != nil {
+		// buildScanCache parsed this before deciding to hand over a store at all, so an
+		// error here means the config changed underneath us. Skip the cache rather than
+		// pass a zero window, which the policy would apply as "every entry is stale":
+		// reuse silently off is recoverable, a wrong freshness bound is not.
+		if maxDBAge, err := cfg.Grype.ScanCache.MaxDBAgeDuration(); err != nil {
+			log.Printf("WARNING: scan cache disabled: %v", err)
+		} else {
+			opts = append(opts,
+				grype.WithReportCache(deps.ScanCache, maxDBAge),
+				grype.WithScanCacheObserver(deps.CacheObs),
+			)
+		}
+	}
 	if cfg.Grype.Enforce == nil || *cfg.Grype.Enforce {
 		return opts
 	}

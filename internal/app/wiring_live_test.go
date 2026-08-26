@@ -416,6 +416,45 @@ func TestLiveWiringParentContextCancelStopsWorkers(t *testing.T) {
 	}
 }
 
+// TestLiveWiringScanCacheOpensAndClosesAgainstTheRealValkey builds with the scan cache
+// ENABLED, which is the only path that dials the store. The hermetic tests cover the
+// disabled default and the fail-fast; what only a real server can show is that the
+// address the gate already uses for staging is usable for the cache too, and that the
+// extra client is released on Close rather than leaking a connection per restart.
+func TestLiveWiringScanCacheOpensAndClosesAgainstTheRealValkey(t *testing.T) {
+	cfg := liveConfig(t, "merlin_wiring_scancache")
+	cfg.Grype.ScanCache = config.ScanCacheConfig{Enabled: true, MaxDBAge: "24h"}
+
+	// Asserted directly, because a buildScanCache that returned (nil, nil, nil) for an
+	// enabled cache would pass every other test here: the build succeeds, Close works,
+	// and reuse is simply never wired. That is the exact silent no-op the fail-fast
+	// exists to prevent, so the non-nil store is the assertion.
+	store, closeStore, err := buildScanCache(cfg)
+	if err != nil {
+		t.Fatalf("buildScanCache: %v", err)
+	}
+	if store == nil {
+		t.Fatal("an enabled scan cache returned no store; reuse would be silently off")
+	}
+	if closeStore == nil {
+		t.Error("an enabled scan cache returned no closer; its client would leak per restart")
+	} else {
+		closeStore()
+	}
+
+	built, err := BuildWithBackends(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("build with the scan cache enabled: %v", err)
+	}
+	done := make(chan struct{})
+	go func() { defer close(done); built.Close() }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Close did not return within 10s — the scan cache client is blocking shutdown")
+	}
+}
+
 // TestLiveWiringBackendFailuresAreNamed covers the fail() paths. Each one closes what
 // was already opened and returns a wrapped error; the wrapping is the whole diagnostic
 // surface for a pod that will not start, and an unwrapped error here means an operator
@@ -462,6 +501,17 @@ func TestLiveWiringBackendFailuresAreNamed(t *testing.T) {
 			name:   "unparseable grype memory limit",
 			mutate: func(c *config.Config) { c.Grype.MemoryLimit = "two gigs" },
 			want:   "grype.memory_limit",
+		},
+		{
+			// Reaches buildScanCache rather than config.validate(): this Config was
+			// built in code. An enabled cache with a window the policy cannot use must
+			// stop the build, because the alternative is a pod that reports caching on
+			// and reuses nothing.
+			name: "unparseable scan cache window",
+			mutate: func(c *config.Config) {
+				c.Grype.ScanCache = config.ScanCacheConfig{Enabled: true, MaxDBAge: "one day"}
+			},
+			want: "scan cache",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

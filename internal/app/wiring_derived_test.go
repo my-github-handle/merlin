@@ -95,7 +95,7 @@ func TestGrypeOptionsEnforcement(t *testing.T) {
 	// wired unconditionally because a scan is the only moment Merlin learns the
 	// scanner DB's build date. Dropping it blinds scanner_db_age_seconds, the metric
 	// that says whether the gate is scanning against a stale vulnerability database.
-	base := len(grypeOptions(config.Config{Grype: config.GrypeConfig{Enforce: boolPtr(true)}}, nil))
+	base := len(grypeOptions(config.Config{Grype: config.GrypeConfig{Enforce: boolPtr(true)}}, policyDeps{}))
 	if base != 1 {
 		t.Fatalf("enforcing options = %d, want exactly 1 (the always-present DB-age observer)", base)
 	}
@@ -110,7 +110,7 @@ func TestGrypeOptionsEnforcement(t *testing.T) {
 		{"explicit false adds Observe()", boolPtr(false), 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := grypeOptions(config.Config{Grype: config.GrypeConfig{Enforce: tc.enforce, SeverityThreshold: "CRITICAL"}}, nil)
+			got := grypeOptions(config.Config{Grype: config.GrypeConfig{Enforce: tc.enforce, SeverityThreshold: "CRITICAL"}}, policyDeps{})
 			if len(got) != base+tc.extra {
 				t.Errorf("option count = %d, want %d", len(got), base+tc.extra)
 			}

@@ -24,6 +24,7 @@ import (
 	"github.com/merlin-gate/merlin/internal/policy"
 	"github.com/merlin-gate/merlin/internal/promote"
 	"github.com/merlin-gate/merlin/internal/router"
+	"github.com/merlin-gate/merlin/internal/scancache"
 	"github.com/merlin-gate/merlin/internal/staging"
 	"github.com/merlin-gate/merlin/internal/tenant"
 )
@@ -250,15 +251,44 @@ func newMetrics() (*prometheus.Registry, *observability.Metrics) {
 // Both build paths call this, and that is the point: the hermetic and production
 // wirings used to contain the same five lines twice, so a policy added to one and
 // not the other diverged silently. There is now one place to add a policy.
-func buildPolicyEngine(cfg config.Config, dbAge grype.DBAgeObserver) (*policy.Engine, error) {
+func buildPolicyEngine(cfg config.Config, deps policyDeps) (*policy.Engine, error) {
 	runner, err := grypeRunner(cfg)
 	if err != nil {
 		return nil, err
 	}
-	grypePolicy := grype.New(runner, cfg.Grype.SeverityThreshold, grypeOptions(cfg, dbAge)...)
+	grypePolicy := grype.New(runner, cfg.Grype.SeverityThreshold, grypeOptions(cfg, deps)...)
 	basePolicy := baseimage.New(cfg.BaseImage.AllowedIDs)
 	def, per := imageAgeRules(cfg)
+	// imageage stays OUTSIDE the cached report on purpose. Its verdict depends on the
+	// wall clock, so a cached decision would keep passing an image that crossed
+	// threshold_days overnight. Only the scan is reused; every policy still runs.
 	return policy.NewEngine(grypePolicy, basePolicy, imageage.New(def, per)), nil
+}
+
+// buildScanCache builds the shared store that lets an identical manifest digest skip
+// a re-scan. Returns (nil, nil, nil) when the cache is off, which is the default.
+//
+// A misconfigured-but-enabled cache is fatal rather than degraded. The failure it
+// prevents is quiet: a pod that came up with a dead store would scan everything while
+// the config says reuse is on, and the hit-rate panel would sit at 0% with nothing to
+// say why. Once running, every cache fault IS degraded — see internal/scancache.
+func buildScanCache(cfg config.Config) (grype.ReportStore, func(), error) {
+	if !cfg.Grype.ScanCache.Enabled {
+		return nil, nil, nil
+	}
+	// Parsed here as well as in config.validate() because a Config built in code never
+	// went through validate, and a bad window must not reach the policy as a zero.
+	if _, err := cfg.Grype.ScanCache.MaxDBAgeDuration(); err != nil {
+		return nil, nil, fmt.Errorf("scan cache: %w", err)
+	}
+	if cfg.Staging.ValkeyAddr == "" {
+		return nil, nil, fmt.Errorf("scan cache: staging.valkey_addr is empty; the store is shared across replicas")
+	}
+	store, err := scancache.NewValkeyStoreAtAddr(cfg.Staging.ValkeyAddr, scancache.DefaultOpTimeout)
+	if err != nil {
+		return nil, nil, err
+	}
+	return store, func() { _ = store.Close() }, nil
 }
 
 // buildOutcome builds the Docker outcome adapter — what turns a gate verdict into an
