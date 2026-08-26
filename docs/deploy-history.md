@@ -65,6 +65,17 @@ to `29992b1` or any earlier async-promote build.
   only the part that needs a ClickHouse. If a roll like this misbehaves, suspect wiring rather than
   logic: `internal/app/components.go` and `internal/ingress/docker/handler.go` are where
   construction now happens.
+- **`fe42f89`** — reliability step 3: the per-scan memory bound refitted to the *measured* p99 grype
+  heap (`memoryLimit` 2Gi → 4Gi, `addressSpaceFactor` 2 → 4, `resources.limits.memory` 10Gi → 16Gi).
+  Verified by pushing the offending image through the live gate instead of waiting for CI to hit it:
+  the tag that had written 32 `out of memory` rows at a 2.92 GB heap **passed** — scan 85.0s,
+  manifest PUT → 201 in 2m0.7s, zero reasons. In the first 15 minutes the HPA happened to scale
+  2 → 10 under real load, giving 80 decisions with **0 `infra_error` and 0 OOM** (20 rejections, all
+  legitimate policy: 16 `imageage` at 61–504d, 2 `baseimage`, 2 both), median scan 6.6s, no restarts.
+  One replica peaked at **11.75 GiB** working set — above the 10Gi limit this replaced — so the
+  container raise was load-bearing rather than precautionary. The "median under 30s" target is met in
+  aggregate but not for the pathological image, which costs 85s when healthy; that is a 3.14 GB image
+  and the target was the wrong shape for it.
 
 ## Reliability step 2: closed at 0.7%
 
@@ -84,10 +95,9 @@ alone never could:
 
 So the residual 0.7% is one pathological tag, not a systemic shortfall.
 
-**Open trade, deliberately not taken:** raising `memoryLimit` does not fit the budget. At 3Gi ×
-`scanPoolSize: 2` plus the ~5.4Gi upload worst case, the total exceeds the 10Gi container limit, so
-it needs `resources.limits.memory` raised or `scanPoolSize` dropped to 1. That is a throughput
-decision, not a refactor detail.
+**That trade was subsequently taken, in `fe42f89` (step 3).** Raising `memoryLimit` did not fit the
+10Gi budget, so `resources.limits.memory` went to 16Gi rather than `scanPoolSize` dropping to 1 —
+see the memory budget arithmetic below for why, and the step 3 record for what it measured.
 
 ## Interpreting `error_detail` on a kill
 
@@ -206,9 +216,30 @@ az account get-access-token --resource api://<audience-app-id> --query accessTok
 docker push <prefix>.<baseDomain>/e2e/gatecheck:<tag>
 ```
 
+**Driving a soak yourself instead of waiting for CI.** If a fix targets one pathological image, push
+that image through the gate rather than waiting for CI to hit it again. Two things make this possible
+even when Azure auth is half-broken:
+
+- The gate login and the ACR login use **different** credentials. `az account get-access-token
+  --resource api://<audience-app-id>` can be valid while `az acr login` fails `AADSTS9002313` (it
+  needs an ARM-scoped token and an interactive re-login). The gate push only needs the former.
+- `<dev-registry>` mirrors the tenant registry's `c3.ai/*` images, so the image itself can be pulled
+  from there with the pull-secret credential when direct ACR access is unavailable.
+
+Re-tag into the fixture repo (`e2e/gatecheck:<descriptive-tag>`) rather than the real repo, so the
+soak does not touch a production tag. Check two things before pushing, or the run proves nothing:
+the largest **layer** against `maxUploadBytes` (the on-disk image size is irrelevant — a 3.14 GB
+image had a 0.440 GiB largest layer), and the OCI `created` date against `imageAge.thresholdDays`,
+since an age rejection short-circuits the scan you were trying to exercise.
+
 Audit queries: the table is `merlin.gate_decisions` (not `push_decisions`), ClickHouse user
 `merlin`, password from secret key `clickhouse-password` (the env var is `CLICKHOUSE_PASSWORD`, but
-that is not the secret key). Columns are `image_repo`/`image_tag`; there is no `image_ref`. Note
+that is not the secret key). Columns are `image_repo`/`image_tag`; there is no `image_ref`. The
+timestamp is `ts`, not `decided_at`, and the outcome is two **Bool** columns (`passed`,
+`infra_error`) — there is no `decision` string, so classify with
+`countIf(passed)` / `countIf(infra_error)` / `countIf(NOT passed AND NOT infra_error)`. Aliasing an
+aggregate to an existing column name (`countIf(passed) AS passed`) raises
+`Code: 184 ILLEGAL_AGGREGATION`. Note
 that the label `app.kubernetes.io/name=merlin` **also** matches the ClickHouse pod, so target gate
 pods by name or you will exec into ClickHouse.
 

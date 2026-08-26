@@ -38,7 +38,7 @@ independently verifiable; none depends on a later one.
 |---|---|---|---|
 | ~~1~~ | ~~**Stop losing published images**~~ **DONE, soak met 2026-08-14** (`d982de6`+`6b94784`) | ~1–2 days | Silent data loss: the gate says pass, the image never reaches ACR. The only class where the client is told everything is fine. 439-push peak, zero `BlobNotFound` |
 | ~~2~~ | ~~**Stop killing in-flight scans**~~ **DONE, deployed `46f0ce5`, closed at 0.7% 2026-08-24** | ~2h | ~10 lines. Stops throwing away 30–120s of completed scan work per abandoned push. Publication had to detach too, or the surviving scan is discarded at the last step |
-| ~~3~~ | ~~**Make scans fast again**~~ **CODE + CAPACITY DONE, awaiting deploy + soak** | ~half day + a soak | The root cause upstream of step 2. Needs a capacity decision, so it is not a pure code change |
+| ~~3~~ | ~~**Make scans fast again**~~ **DONE, deployed `fe42f89`, soak met 2026-08-26** | ~half day + a soak | The root cause upstream of step 2. Needed a capacity decision, so it was not a pure code change. The tag that OOMed 32x now passes; 80 decisions, 0 `infra_error`, 0 OOM, and a replica peaked at 11.75 GiB — above the old 10Gi limit |
 | 4 | **Reuse a completed decision on retry** | ~1 day | What converts steps 2+3 into a *client-visible* fix rather than only less wasted work |
 | 5 | **Un-blind the alerter** — floor-OR-factor, ref normalization, kill attribution | ~half day | Cheap, but worthless before 1–4: it would just page about a known 50% |
 
@@ -419,9 +419,42 @@ scheduling is unaffected.
 job: a 2.72 GiB heap sits *inside* a 4 GiB ceiling, but the runtime's arena and stack reservations
 on top of it do not, which is why 13 scans died outright rather than merely slowly.
 
-**Not yet verified** — this is a code + values change only. The soak that closes step 3 needs a
-`c3.ai/opensearch-dashboards-fips` push after the roll: expect it to *pass* rather than produce an
-`out of memory` row, with no pod `OOMKilled` at 16Gi.
+**VERIFIED live 2026-08-26.** Deployed `fe42f89` at 23:56 UTC (helm rev 27), then pushed the
+offending tag through the live gate rather than waiting for CI to hit it: the *same* image that
+wrote 32 `out of memory` rows at a 2.92 GB heap
+(`c3.ai/opensearch-dashboards-fips:3.7.0-r20-202608102251`, re-tagged
+`e2e/gatecheck:oomsoak-dashboards-3.7.0-r20`) **passed** — manifest PUT → 201 in 2m0.7s, scan
+85.0s, `passed=true`, `infra_error=false`, age gate read 15d, zero reasons. Both halves of the
+change are confirmed rendered: `memory_limit: "4Gi"` in the ConfigMap, `limits.memory: 16Gi` on the
+container.
+
+The first ~15 minutes also happened to catch a real load burst — the HPA scaled 2 → 10 (its max) —
+which turned the capacity raise into a *tested* one rather than a precautionary one:
+
+| | first 15 min on `fe42f89` |
+|---|---|
+| decisions | 80 |
+| passed | 60 |
+| `infra_error` | **0** |
+| `out of memory` | **0** |
+| policy rejections | 20 (all legitimate: 16 `imageage` at 61–504d, 2 `baseimage`, 2 both) |
+| median scan | 6.6s |
+| pod restarts / `OOMKilled` | 0 / 0 |
+
+**The 16Gi was load-bearing, not headroom.** One replica peaked at **11.75 GiB** working set during
+the burst, above the 10Gi limit this change replaced, and survived. That is the clearest argument
+for having raised the container limit alongside the scan budget rather than only the latter.
+
+Two honest qualifications:
+
+- The §3 criterion "median scan duration back under 30s" is met **in aggregate** (6.6s) but not for
+  the pathological image, which takes 85s. That is its healthy cost — it is a 3.14 GB image — and it
+  is still an improvement on the 112s average it used to spend GC-thrashing *before dying*. The
+  sub-30s target was the wrong shape for this one repo.
+- ACR-side confirmation of the promoted tag is still **unverified**: `az acr` needs an ARM-scoped
+  interactive re-login (`AADSTS9002313`). Merlin-side evidence stands in — 60 `merlin_acr_push_total{result="ok"}`
+  across the ten replicas with the `result="error"` series absent everywhere — and the promotion was
+  claimed by a different replica than the one that gated it, the documented healthy pattern.
 
 ---
 
