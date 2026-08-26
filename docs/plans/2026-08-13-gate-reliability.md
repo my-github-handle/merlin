@@ -485,6 +485,52 @@ that motivates it.
 `scan_duration` observation. `merlin_scan_duration_seconds_count` should fall relative to
 `merlin_requests_total{route="manifest"}`.
 
+### Step 4 outcome (2026-08-25): landed, and the reason for it changed
+
+**The stated motive no longer holds, and the work is still worth doing.** This step was written
+against a ~50% infra-error rate, where reuse was what made a client's retry succeed. Steps 1–3
+took `infra_error` to **0%**, so there are no retries left to rescue. What the audit table shows
+instead is plain waste: over 24h, **197 of 260 scans (75.8%) re-scanned a manifest digest that had
+already been scanned**, worth **104 minutes** of grype CPU. So this landed as a throughput and cost
+fix, not a reliability one. Sequencing was still right — fixing it before steps 1–3 would have
+cached a 50%-failing gate's results.
+
+**Deviation 1: bound the DB's age, not its version.** The plan asked the lookup to require a
+matching `scanner_db_version`. It requires the DB behind the report to be younger than
+`max_db_age` (24h) instead. Equality on the version string is the stricter rule and it is the wrong
+one here: 14 days of `gate_decisions` show Anchore rebuilding **exactly once a day**, between 06:14Z
+and 06:40Z, with no two consecutive versions' windows overlapping. Under equality every entry is
+invalidated wholesale each morning; under a 24h age bound a report is reused until its DB is
+superseded and no further. Same guarantee, no daily cliff. Anything above 48h is *rejected* at
+startup rather than clamped, so a `240h` typo fails visibly instead of quietly widening the gate.
+
+**Deviation 2: cache the report, not the decision.** The plan says "look up a completed
+*decision*". Caching a verdict would freeze `severity_threshold`, `enforce` and the image-age gate
+at the moment of the first scan. The scan **report** is cached and the whole policy re-runs on every
+hit, so config changes take effect immediately and the time-dependent image-age check is always
+evaluated against the real clock. `imageage` is deliberately left outside the reuse path.
+
+**The plan's verification step is wrong.** `merlin_scan_duration_seconds_count` does *not* fall: a
+cache hit still runs the gate and still records a (near-zero) scan duration. Measured live,
+`sum(merlin_scan_duration_seconds_count)` = 29 = 4 hits + 25 misses exactly. The signal is
+`merlin_scan_cache_total{result}`, which is why that counter exists.
+
+**Verified live** on `46949ee` (helm rev 28), pushing one manifest digest twice under two tags:
+
+| push | pod | manifest PUT | outcome |
+|---|---|---|---|
+| A (first sighting) | `h8f5z` | 1.663s | miss, full scan |
+| B (identical digest) | `mnnrk` | **587ms** | **hit** |
+
+The hit was served by a *different replica* than the one that scanned, which is the property that
+matters — the store is shared Valkey, not per-process memory. Fleet-wide hit rate in the first
+30 minutes was 14.1%, which is the cache filling from empty (every first sighting is a miss), not
+the steady state; the 75.8% redundancy above is the ceiling it should approach.
+
+**Caveat for anyone verifying this by hand:** `kubectl exec ... wget`/`curl` does **not** work
+against these pods — the FIPS runtime base contains neither binary, and a naive scrape loop reads
+as `hit=0 miss=0` on a cache that is working fine. Use `kubectl port-forward`, or ask Prometheus.
+
 ---
 
 ## 5. The alerter is blind to exactly this outage

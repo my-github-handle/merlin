@@ -197,6 +197,39 @@ OOMKill/promotion-failure history had to be reconstructed from audit rows.
 - **ClickHouse `dataSize: 20Gi`** matches the live PVC, which was created from the chart default.
   PersistentVolumeClaims cannot shrink, so a smaller value here is an invalid downsize on upgrade.
 
+## Reliability step 4: scan reuse, on here and off everywhere else
+
+`46949ee`, helm rev 28, rolled 2026-08-26 01:47Z. Enables `merlin.grype.scanCache`
+(`enabled: true`, `maxDBAge: "24h"`) — when a manifest digest that was already scanned is pushed
+again, the stored grype **report** is reused instead of re-scanning.
+
+**Why, given the gate is now at 0% `infra_error`.** Not reliability. Over 24h, 197 of 260 scans
+(**75.8%**) re-scanned a digest already scanned, worth **104 minutes** of grype CPU. This is a
+throughput and cost fix; the reliability motive in the plan was superseded by steps 1–3.
+
+**Why it does not weaken the gate.** The report is cached, not the verdict, so `severityThreshold`,
+`enforce` and the image-age gate all re-run on every hit — config changes take effect immediately
+rather than being frozen at first scan. A report whose DB build time is unknown is never reused, and
+a cache fault costs a scan, never a rejection. `maxDBAge` bounds the *vulnerability DB* behind the
+report, not the entry's age, because a report stops being trustworthy when the CVE feed moves, not
+when time passes; 24h is the measured Anchore rebuild cadence (one version per day, built
+06:14Z–06:40Z, no two consecutive windows overlapping). Above 48h is rejected at startup, not
+clamped.
+
+**Verified live** by pushing one digest twice under two tags: push A missed and scanned (manifest
+PUT 1.663s, pod `h8f5z`); push B hit (**587ms**, pod `mnnrk`). The hit was served by a *different
+replica* than the one that scanned — the store is shared Valkey, so this is real cross-replica
+reuse, not a per-process cache. Fleet-wide 4 hits / 25 misses in the first 30 minutes: that 14.1% is
+the cache filling from empty, not the steady state.
+
+**Watch `merlin_scan_cache_total{result="hit"|"miss"}`.** Do *not* expect
+`merlin_scan_duration_seconds_count` to fall — a hit still runs the gate and still records a
+near-zero scan duration, so it counts hits too (measured: 29 = 4 + 25). The plan's original
+verification step says otherwise and is wrong.
+
+Turning it off is independent of the image: `scanCache.enabled: false`. Off by default in the chart,
+so no other install changes behaviour.
+
 ## Verifying a deploy
 
 "7/7 Running" does not catch a mis-wire. The `e65a3ad` roll was verified by pushing a fixture
@@ -242,6 +275,25 @@ aggregate to an existing column name (`countIf(passed) AS passed`) raises
 `Code: 184 ILLEGAL_AGGREGATION`. Note
 that the label `app.kubernetes.io/name=merlin` **also** matches the ClickHouse pod, so target gate
 pods by name or you will exec into ClickHouse.
+
+**Reading `/metrics` off a pod: do not use `kubectl exec`.** The FIPS runtime base ships neither
+`wget` nor `curl`, so `kubectl exec <pod> -- wget -qO- localhost:9090/metrics` fails with
+`executable file not found in $PATH`. A scrape loop that swallows stderr and defaults a missing
+value to 0 then reports every counter as zero — which reads exactly like a feature that silently is
+not working. Use `kubectl port-forward pod/<pod> 19090:9090` and curl from the host for one pod, or
+ask the Prometheus that actually scrapes us for the fleet-wide sum:
+
+```
+kubectl get --raw "/api/v1/namespaces/azplatdevops/pods/prometheus-app-prometheus-0:9090/proxy/api/v1/query?query=sum(merlin_scan_cache_total)"
+```
+
+Its `scrapeInterval` is 60s, so allow a minute before a just-pushed counter appears there.
+
+**And `sum()` of a counter can go *down* here.** These counters are per-pod and die with the pod, so
+an HPA scale-down discards them: `sum(merlin_scan_cache_total{result="miss"})` was observed dropping
+25 → 23 when replicas went 10 → 6, with nothing wrong. For anything spanning a scale event use
+`sum(increase(...[30m]))`, which accounts for series disappearing; reserve bare `sum()` for
+point-in-time reads you take and interpret immediately.
 
 ---
 
