@@ -23,6 +23,11 @@ type Policy struct {
 	observe   bool
 	dbAge     DBAgeObserver
 	now       func() time.Time
+	// Scan cache (see reportcache.go). Nil cache means every push scans, which is
+	// the behaviour this type had before the cache existed.
+	cache         ReportStore
+	cacheMaxDBAge time.Duration
+	cacheObserver ScanCacheObserver
 }
 
 // DBAgeObserver receives the age of the scanner's vulnerability DB, in days.
@@ -92,11 +97,7 @@ func (p *Policy) observeDBAge(built time.Time) {
 	if p.dbAge == nil || built.IsZero() {
 		return
 	}
-	now := time.Now
-	if p.now != nil {
-		now = p.now
-	}
-	age := now().Sub(built)
+	age := p.clock()().Sub(built)
 	if age < 0 {
 		age = 0
 	}
@@ -107,12 +108,15 @@ func (p *Policy) Evaluate(ctx context.Context, img policy.StagedImage) (policy.V
 	if img.OCIPath == "" {
 		return policy.Verdict{}, fmt.Errorf("grype scan: empty OCI path for image")
 	}
-	rep, err := p.runner.Scan(ctx, img.OCIPath)
+	rep, err := p.scanOrReuse(ctx, img)
 	if err != nil {
 		return policy.Verdict{}, fmt.Errorf("grype scan: %w", err)
 	}
-	// Every scan re-reports the age. The DB is refreshed out-of-band (image rebuild),
-	// so a scan is the only moment Merlin learns anything about it.
+	// Every evaluation re-reports the age, including one served from the scan cache
+	// — the report carries the build time of the DB it was produced with, so a reused
+	// report still describes a real DB. Skipping this on a cache hit would let the
+	// gauge go stale exactly when reuse is working, and an unset gauge reads as
+	// "0 days old": the healthiest possible value.
 	p.observeDBAge(rep.DBBuilt)
 	min := severityRank[strings.ToUpper(p.threshold)]
 	var reasons []string
