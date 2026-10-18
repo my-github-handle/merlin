@@ -19,6 +19,34 @@ spec:
         layout:
           shardsCount: {{ .Values.clickhouse.shardsCount }}
           replicasCount: {{ .Values.clickhouse.replicasCount }}
+    # ClickHouse's own system.* logs, not Merlin's data, are what fill this disk.
+    # On 2026-09-23 they reached 18.3 GiB of the 20 GiB volume against 6.8 MiB of
+    # audit data; every insert then failed NOT_ENOUGH_SPACE and the gate kept
+    # passing images while recording nothing. Several logs ship with no TTL, and
+    # each upgrade that changes a log's schema renames the old table to <log>_N
+    # and never drops it.
+    #
+    # Kept: the four that explain a failed audit insert, each bounded by an
+    # explicit TTL. A whole-section replace is required — ClickHouse refuses a
+    # standalone <ttl> next to an <engine>, and the operator's bundled config.d
+    # already sets an <engine> for query_log and part_log. Removed: the
+    # high-volume profiling and metric logs nothing here reads. A table that
+    # already exists is left in place but stops growing.
+    files:
+      config.d/merlin-system-logs.xml: |
+        <clickhouse>
+        {{- range list "query_log" "part_log" "error_log" "asynchronous_insert_log" }}
+          <{{ . }} replace="1">
+            <database>system</database>
+            <table>{{ . }}</table>
+            <engine>ENGINE = MergeTree PARTITION BY event_date ORDER BY event_time TTL event_date + INTERVAL {{ int $.Values.clickhouse.systemLogRetentionDays }} DAY DELETE SETTINGS ttl_only_drop_parts = 1</engine>
+            <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+          </{{ . }}>
+        {{- end }}
+        {{- range list "processors_profile_log" "text_log" "trace_log" "metric_log" "asynchronous_metric_log" "query_metric_log" "background_schedule_pool_log" }}
+          <{{ . }} remove="1"/>
+        {{- end }}
+        </clickhouse>
   templates:
     volumeClaimTemplates:
       - name: data-volume

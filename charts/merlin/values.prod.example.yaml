@@ -180,7 +180,7 @@ clickhouse:
   shardsCount: 1
   replicasCount: 1
   storage:
-    dataSize: 20Gi
+    dataSize: 100Gi
     logSize: 1Gi
     # REQUIRED: StorageClass for persistent volumes (empty string = default StorageClass)
     storageClassName: "managed-premium"  # REQUIRED: Replace with your StorageClass or "" for default

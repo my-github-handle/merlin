@@ -218,7 +218,11 @@ clickhouse:
   # k8s_secret_password in the CHI users config — NOT stored in values/ConfigMap.
   shardsCount: 1
   replicasCount: 1
-  storage: { dataSize: 20Gi, logSize: 1Gi, storageClassName: "" }
+  # Merlin's audit data is small (6.8 MiB at 14k decisions); the headroom is for
+  # ClickHouse itself. PVCs only grow, so lowering this on a live release fails.
+  storage: { dataSize: 100Gi, logSize: 1Gi, storageClassName: "" }
+  # TTL for the system.* logs the CHI keeps (see clickhouseinstallation.yaml).
+  systemLogRetentionDays: 7
   # If enabled: false, set merlin.audit.clickhouseDSN to an external DSN.
 resources:
   requests: { cpu: 500m, memory: 512Mi }

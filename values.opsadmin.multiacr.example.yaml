@@ -111,7 +111,7 @@ clickhouse:
   passwordSecret: merlin-secrets
   # Must match the LIVE PVC size. PVCs cannot shrink, so a smaller value here is an
   # invalid downsize request on upgrade.
-  storage: { dataSize: 20Gi, logSize: 1Gi, storageClassName: <storage-class> }
+  storage: { dataSize: 100Gi, logSize: 1Gi, storageClassName: <storage-class> }
 hpa:
   enabled: true
 # Only `limits` carries the scan+upload budget; `requests` stays small, so this is a
