@@ -194,7 +194,7 @@ OOMKill/promotion-failure history had to be reconstructed from audit rows.
   `enforce: true`).
 - **`serviceAccount.create: false`** — reuses an existing SA managed by another release. Do NOT
   recreate it.
-- **ClickHouse `dataSize: 20Gi`** matches the live PVC, which was created from the chart default.
+- **ClickHouse `dataSize: 100Gi`** matches the live PVC (grown from 20Gi in rev 29, below).
   PersistentVolumeClaims cannot shrink, so a smaller value here is an invalid downsize on upgrade.
 
 ## Reliability step 4: scan reuse, on here and off everywhere else
@@ -229,6 +229,39 @@ verification step says otherwise and is wrong.
 
 Turning it off is independent of the image: `scanCache.enabled: false`. Off by default in the chart,
 so no other install changes behaviour.
+
+## ClickHouse disk full: 25 days of decisions never recorded
+
+`29da4da`, helm rev 29, rolled 2026-10-18 20:14Z. Chart only; the Merlin image is unchanged.
+
+**What happened.** From **2026-09-23 01:01Z** the 20Gi ClickHouse volume was 100% full, so every
+audit insert failed `code: 243 … not enough space: While executing WaitForAsyncInsert`. The gate
+kept scanning and passing images. Nothing was recorded, and the dashboard served "No report found"
+for all of them. The c3aiops PR comment rendered those as **OK 0/0**. It was noticed on
+c3aiops#2993: its own operator image read OK but had 14 CRITICAL. The only signal anywhere was the
+`audit drop:` log line.
+
+**Why.** 18.3 GiB of the 20 GiB was ClickHouse's own `system.*` logs, against 6.8 MiB of Merlin
+data. `text_log`, `metric_log`, `asynchronous_metric_log` and `query_metric_log` ship with no TTL.
+Every upgrade that changes a log's schema renames the old table to `<log>_N` and never drops it,
+and there were 32 of those. The image is `clickhouse/clickhouse-server:latest` (unpinned), so pod
+restarts upgrade it: rev 29's restart moved 26.9.9.28 → 26.9.19.9 and produced five more.
+
+**Fix.** The CHI now ships `config.d/merlin-system-logs.xml`: `query_log`, `part_log`, `error_log`
+and `asynchronous_insert_log` kept with a 7-day TTL (`clickhouse.systemLogRetentionDays`), and the
+seven high-volume profiling/metric logs removed. `dataSize` 20Gi → 100Gi; `c3-default` expanded it
+in place (same PV, pod recreated once, ~3 min). Before the roll the orphans were dropped by hand
+(100% → 2%), and recording resumed on the next push: a c3aiops#2993 rerun wrote 29 decisions.
+
+**The row count drop after the roll is retention, not loss.** `gate_decisions` went 14,024 → 563.
+Merlin's tables are `TTL ts + 30 day`, and the survivors start exactly at 2026-09-18 (now − 30d).
+Expired rows had lingered because merges could not run on a full disk. `part_log` shows the
+`TTLDeleteMerge`s, and the dashboard's 30d view (534) was unchanged.
+
+**After any ClickHouse restart,** drop the `system.*_log_N` tables it leaves behind:
+`SELECT name FROM system.tables WHERE database='system' AND match(name,'_log_[0-9]+$')`.
+**If the dashboard's 1d/7d window is empty,** check `df -h /var/lib/clickhouse` on
+`chi-merlin-ch-merlin-0-0-0` and grep the merlin pods for `audit drop` before anything else.
 
 ## Verifying a deploy
 
